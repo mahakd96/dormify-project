@@ -1,0 +1,169 @@
+import React, { useState } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider, useAuth } from './context/AuthContext';
+
+// Components
+import Sidebar from './components/Sidebar';
+import Header from './components/Header';
+
+// Pages
+import LoginPage from './pages/LoginPage';
+import Dashboard from './pages/Dashboard';
+import BuildingsPage from './pages/BuildingsPage';
+import StudentsPage from './pages/StudentsPage';
+import UploadPage from './pages/UploadPage';
+import PriorityPage from './pages/PriorityPage';
+import AllocationPage from './pages/AllocationPage';
+import TransfersPage from './pages/TransfersPage';
+import ReportsPage from './pages/ReportsPage';
+import UsersPage from './pages/UsersPage';
+import SettingsPage from './pages/SettingsPage';
+import MapPage from './pages/MapPage';
+
+// Protected Route wrapper
+function ProtectedRoute({ children }) {
+  const { user, loading } = useAuth();
+  
+  if (loading) {
+    return <div className="loading">Loading...</div>;
+  }
+  
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+  
+  return children;
+}
+
+// Main Layout with Sidebar
+function MainLayout({ children, language, onLanguageToggle, sidebarCollapsed, onSidebarToggle }) {
+  return (
+    <div className={`app-layout ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} dir={language === 'he' ? 'rtl' : 'ltr'}>
+      <Sidebar collapsed={sidebarCollapsed} onToggle={onSidebarToggle} language={language} />
+      <Header language={language} onLanguageToggle={onLanguageToggle} />
+      <main className="main-content">
+        {children}
+      </main>
+    </div>
+  );
+}
+
+function AppContent() {
+  const [language, setLanguage] = useState('he');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const { user } = useAuth();
+
+  const toggleLanguage = () => setLanguage(lang => lang === 'he' ? 'en' : 'he');
+  const toggleSidebar = () => setSidebarCollapsed(c => !c);
+
+  return (
+    <Routes>
+      <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <LoginPage />} />
+      
+      <Route path="/*" element={
+        <ProtectedRoute>
+          <MainLayout 
+            language={language} 
+            onLanguageToggle={toggleLanguage}
+            sidebarCollapsed={sidebarCollapsed}
+            onSidebarToggle={toggleSidebar}
+          >
+            <Routes>
+              <Route path="/" element={<Navigate to="/dashboard" replace />} />
+              <Route path="/dashboard" element={<Dashboard language={language} />} />
+              <Route path="/map" element={<MapPage language={language} />} />
+              <Route path="/buildings" element={<BuildingsPage language={language} />} />
+              <Route path="/students" element={<StudentsPage language={language} />} />
+              <Route path="/upload" element={<UploadPage language={language} />} />
+              <Route path="/priority" element={<PriorityPage language={language} />} />
+              <Route path="/allocation" element={<AllocationPage language={language} />} />
+              <Route path="/transfers" element={<TransfersPage language={language} />} />
+              <Route path="/reports" element={<ReportsPage language={language} />} />
+              <Route path="/users" element={<UsersPage language={language} />} />
+              <Route path="/settings" element={<SettingsPage language={language} onLanguageToggle={toggleLanguage} />} />
+            </Routes>
+          </MainLayout>
+        </ProtectedRoute>
+      } />
+    </Routes>
+  );
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <Router>
+        <AppContent />
+      </Router>
+      
+      <style>{`
+        * {
+          margin: 0;
+          padding: 0;
+          box-sizing: border-box;
+        }
+
+        body {
+          font-family: 'Heebo', -apple-system, BlinkMacSystemFont, sans-serif;
+          background: #f1f5f9;
+          min-height: 100vh;
+        }
+
+        .app-layout {
+          min-height: 100vh;
+        }
+
+        .main-content {
+          margin-right: 260px;
+          margin-top: 64px;
+          min-height: calc(100vh - 64px);
+          transition: margin 0.3s ease;
+        }
+
+        [dir="ltr"] .main-content {
+          margin-right: 0;
+          margin-left: 260px;
+        }
+
+        .app-layout.sidebar-collapsed .main-content {
+          margin-right: 72px;
+        }
+
+        [dir="ltr"] .app-layout.sidebar-collapsed .main-content {
+          margin-right: 0;
+          margin-left: 72px;
+        }
+
+        .loading {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          height: 100vh;
+          font-size: 18px;
+          color: #64748b;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+          width: 8px;
+          height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+          background: #f1f5f9;
+        }
+
+        ::-webkit-scrollbar-thumb {
+          background: #cbd5e1;
+          border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+          background: #94a3b8;
+        }
+      `}</style>
+    </AuthProvider>
+  );
+}
+
+export default App;
