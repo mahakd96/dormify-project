@@ -29,3 +29,7 @@ backend/*.pyc
 backend/db.sqlite3
 .env
 
+
+# Python cache
+**/__pycache__/
+*.pyc
