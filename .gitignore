@@ -21,3 +21,15 @@ pnpm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# Django backend
+backend/venv/
+backend/__pycache__/
+backend/*.pyc
+backend/db.sqlite3
+.env
+
+
+# Python cache
+**/__pycache__/
+*.pyc
