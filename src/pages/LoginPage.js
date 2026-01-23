@@ -23,31 +23,33 @@ function LoginPage() {
     ],
     []
   );
+const handleSubmit = async (e) => {
+  e?.preventDefault();
+  if (isLoading) return;
 
-  const handleSubmit = async (e) => {
-    e?.preventDefault();
-    if (isLoading) return;
+  setError('');
+  setIsLoading(true);
 
-    setError('');
-    setIsLoading(true);
+  // tiny delay so UI feels responsive (optional)
+  await new Promise((resolve) => setTimeout(resolve, 300));
 
-    // tiny delay so UI feels responsive (optional)
-    await new Promise((resolve) => setTimeout(resolve, 300));
+  try {
+    const user = await login(email.trim(), password);
+    console.log('LOGIN returned:', user);
 
-    try {
-      const result = login(email.trim(), password);
-
-      if (result?.success) {
-        navigate('/dashboard');
-      } else {
-        setError(result?.error || 'התחברות נכשלה. בדוק/י פרטים ונסה/י שוב.');
-      }
-    } catch (err) {
-      setError('שגיאה לא צפויה. נסו שוב בעוד רגע.');
-    } finally {
-      setIsLoading(false);
+    if (user) {
+      navigate('/dashboard'); // or '/' if that’s your home route
+    } else {
+      // AuthContext already sets authError, but we keep your local message too
+      setError('התחברות נכשלה. בדוק/י פרטים ונסה/י שוב.');
     }
-  };
+  } catch (err) {
+    setError('שגיאה לא צפויה. נסו שוב בעוד רגע.');
+  } finally {
+    setIsLoading(false);
+  }
+};
+
 
   return (
     <div className="login-wrapper">
@@ -198,7 +200,6 @@ function LoginPage() {
 
         .brand-content{ position:relative; z-index:1; }
 
-        /* ✅ LOGO: wider + less white + symmetric */
         .logo-container{
           background: rgba(255,255,255,0.98);
           width: 420px;           /* wider to match text length */
