@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { users } from '../data/mockData';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { authAPI } from '../services/api';
 
 const AuthContext = createContext(null);
 
@@ -14,57 +14,78 @@ export const useAuth = () => {
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
+  // Initialize from localStorage on mount
   useEffect(() => {
-    // Check for saved user in localStorage
-    const savedUser = localStorage.getItem('dormify_user');
-    if (savedUser) {
-      setUser(JSON.parse(savedUser));
-    }
-    setLoading(false);
+    const initAuth = async () => {
+      const savedUser = localStorage.getItem('dormify_user');
+      const token = localStorage.getItem('dormify_access_token');
+
+      if (savedUser && token) {
+        try {
+          // Verify token is still valid
+          const response = await authAPI.getMe();
+          setUser(response.user);
+          localStorage.setItem('dormify_user', JSON.stringify(response.user));
+        } catch (err) {
+          // Token invalid, clear everything
+          console.log('Session expired, logging out');
+          localStorage.removeItem('dormify_user');
+          localStorage.removeItem('dormify_access_token');
+          localStorage.removeItem('dormify_refresh_token');
+          setUser(null);
+        }
+      }
+      setLoading(false);
+    };
+
+    initAuth();
   }, []);
 
-  const login = (email, password) => {
-    const foundUser = users.find(
-      u => u.email === email && u.password === password
-    );
-    
-    if (foundUser) {
-      const userWithoutPassword = { ...foundUser };
-      delete userWithoutPassword.password;
-      setUser(userWithoutPassword);
-      localStorage.setItem('dormify_user', JSON.stringify(userWithoutPassword));
-      return { success: true, user: userWithoutPassword };
-    }
-    
-    return { success: false, error: 'אימייל או סיסמה שגויים' };
-  };
+  const login = useCallback(async (email, password) => {
+    setError(null);
+    setLoading(true);
 
-  const logout = () => {
+    try {
+      const data = await authAPI.login(email, password);
+      setUser(data.user);
+      setLoading(false);
+      return { success: true, user: data.user };
+    } catch (err) {
+      setLoading(false);
+      setError(err.message);
+      return { success: false, error: err.message || 'אימייל או סיסמה שגויים' };
+    }
+  }, []);
+
+  const logout = useCallback(() => {
+    authAPI.logout();
     setUser(null);
-    localStorage.removeItem('dormify_user');
-  };
+    setError(null);
+  }, []);
 
   // Permission helpers
-  const isCentralAdmin = () => user?.role === 'central_admin';
-  const isRegionBoss = () => user?.role === 'region_boss';
-  const isEmployee = () => user?.role === 'employee';
-  const canApproveTransfers = () => isCentralAdmin() || isRegionBoss();
-  const canManageUsers = () => isCentralAdmin() || isRegionBoss();
-  const canUploadExcel = () => isCentralAdmin();
-  const canAssignPriority = () => isCentralAdmin();
-  const canRunAllocation = () => isCentralAdmin() || isRegionBoss();
-  
-  const getUserRegion = () => user?.regionId || null;
-  
-  const canAccessRegion = (regionId) => {
+  const isCentralAdmin = useCallback(() => user?.role === 'central_admin', [user]);
+  const isRegionBoss = useCallback(() => user?.role === 'region_boss', [user]);
+  const isEmployee = useCallback(() => user?.role === 'employee', [user]);
+  const canApproveTransfers = useCallback(() => isCentralAdmin() || isRegionBoss(), [isCentralAdmin, isRegionBoss]);
+  const canManageUsers = useCallback(() => isCentralAdmin() || isRegionBoss(), [isCentralAdmin, isRegionBoss]);
+  const canUploadExcel = useCallback(() => isCentralAdmin(), [isCentralAdmin]);
+  const canAssignPriority = useCallback(() => isCentralAdmin(), [isCentralAdmin]);
+  const canRunAllocation = useCallback(() => isCentralAdmin() || isRegionBoss(), [isCentralAdmin, isRegionBoss]);
+
+  const getUserRegion = useCallback(() => user?.region || null, [user]);
+
+  const canAccessRegion = useCallback((regionId) => {
     if (isCentralAdmin()) return true;
-    return user?.regionId === regionId;
-  };
+    return user?.region === regionId;
+  }, [user, isCentralAdmin]);
 
   const value = {
     user,
     loading,
+    error,
     login,
     logout,
     isCentralAdmin,
