@@ -6,6 +6,7 @@ from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse
 
+
 def home(request):
     return JsonResponse({
         'message': 'Dormify API is running!',
@@ -19,11 +20,11 @@ def home(request):
             'buildings': '/api/buildings/',
             'transfers': '/api/transfers/',
             'allocation': '/api/allocation/',
+            'upload': '/api/upload/excel/',
         }
     })
 
 urlpatterns = [
-    path('upload/students/', views.upload_students, name='upload-students'),
     path('', home, name='home'),
     path('admin/', admin.site.urls),
     path('api/', include('api.urls')),
