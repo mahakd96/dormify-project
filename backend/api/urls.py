@@ -23,10 +23,21 @@ urlpatterns = [
     # Statistics
     path('statistics/', views.statistics, name='statistics'),
     
+    # Excel Upload & Split
+    path('upload/excel/', views.upload_excel, name='upload-excel'),
+    path('batches/', views.list_batches, name='list-batches'),
+
+    # Region Inbox
+    path('inbox/', views.region_inbox, name='region-inbox'),
+    path('inbox/latest/', views.region_inbox_latest, name='region-inbox-latest'),
+    path('inbox/<int:inbox_id>/viewed/', views.mark_inbox_viewed, name='mark-inbox-viewed'),
+    path('inbox/<int:inbox_id>/processed/', views.mark_inbox_processed, name='mark-inbox-processed'),
+
     # Allocation
     path('allocation/run/', views.run_allocation, name='run-allocation'),
     path('allocation/history/', views.allocation_history, name='allocation-history'),
-    
+    path('allocation/summary/', views.allocation_summary, name='allocation-summary'),
+
     # Include router URLs
     path('', include(router.urls)),
 ]

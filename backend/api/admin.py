@@ -5,7 +5,10 @@ This gives you a FREE admin panel!
 
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from .models import User, Region, Building, Apartment, Room, Student, Transfer, AllocationRun
+from .models import (
+    User, Region, Building, Apartment, Room, Student,
+    Transfer, AllocationRun, ImportBatch, RegionInbox
+)
 
 
 # ===========================================
@@ -17,7 +20,7 @@ class UserAdmin(BaseUserAdmin):
     list_filter = ['role', 'region', 'is_active']
     search_fields = ['email', 'first_name', 'last_name']
     ordering = ['email']
-    
+
     fieldsets = BaseUserAdmin.fieldsets + (
         ('Role & Region', {'fields': ('role', 'region', 'phone')}),
     )
@@ -70,7 +73,7 @@ class StudentAdmin(admin.ModelAdmin):
     list_display = ['student_id', 'first_name', 'last_name', 'gender', 'religion', 'region', 'is_assigned', 'is_priority']
     list_filter = ['region', 'gender', 'religion', 'is_priority']
     search_fields = ['student_id', 'first_name', 'last_name', 'email']
-    
+
     def is_assigned(self, obj):
         return obj.assigned_room is not None
     is_assigned.boolean = True
@@ -96,6 +99,27 @@ class AllocationRunAdmin(admin.ModelAdmin):
     list_display = ['region', 'run_by', 'status', 'students_processed', 'successful_assignments', 'started_at']
     list_filter = ['region', 'status']
     readonly_fields = ['started_at', 'completed_at']
+
+
+# ===========================================
+# IMPORT BATCH ADMIN
+# ===========================================
+@admin.register(ImportBatch)
+class ImportBatchAdmin(admin.ModelAdmin):
+    list_display = ['id', 'filename', 'uploaded_by', 'total_students', 'status', 'created_at']
+    list_filter = ['status', 'created_at']
+    search_fields = ['filename']
+    readonly_fields = ['created_at']
+
+
+# ===========================================
+# REGION INBOX ADMIN
+# ===========================================
+@admin.register(RegionInbox)
+class RegionInboxAdmin(admin.ModelAdmin):
+    list_display = ['id', 'region', 'batch', 'students_count', 'status', 'created_at']
+    list_filter = ['region', 'status', 'created_at']
+    readonly_fields = ['created_at', 'viewed_at', 'processed_at']
 
 
 # Customize admin site
