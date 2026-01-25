@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from datetime import timedelta
 from dotenv import load_dotenv
+from corsheaders.defaults import default_headers
 
 # Load environment variables
 load_dotenv()
@@ -16,7 +17,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Security
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-change-this')
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+ALLOWED_HOSTS = ["localhost", "127.0.0.1", "192.168.1.13"]
 
 # Application definition
 INSTALLED_APPS = [
@@ -122,12 +123,15 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
-# ===========================================
-# CORS Configuration (Allow React to connect)
-# ===========================================
 CORS_ALLOWED_ORIGINS = os.getenv(
-    'CORS_ALLOWED_ORIGINS', 
-    'http://localhost:3000,http://127.0.0.1:3000'
+    'CORS_ALLOWED_ORIGINS',
+    'http://localhost:3000,http://127.0.0.1:3000,http://192.168.1.13:3000'
 ).split(',')
+
+
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    'authorization',
+]
+
 
 CORS_ALLOW_CREDENTIALS = True
