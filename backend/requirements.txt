@@ -13,8 +13,7 @@ djangorestframework==3.14.0
 # JWT Authentication
 djangorestframework-simplejwt==5.3.1
 
-# PostgreSQL Database
-psycopg2-binary==2.9.9
+
 
 # CORS (allow React to connect)
 django-cors-headers==4.3.1
@@ -22,7 +21,7 @@ django-cors-headers==4.3.1
 # Environment Variables
 python-dotenv==1.0.0
 
-# Excel File Parsing
+# Excel file processing
 pandas==2.1.4
 openpyxl==3.1.2
 
