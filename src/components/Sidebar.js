@@ -21,23 +21,47 @@ import {
 } from 'lucide-react';
 
 function Sidebar({ collapsed, onToggle, language }) {
-  const { user, logout, isCentralAdmin, canUploadExcel, canAssignPriority, canManageUsers } = useAuth();
+  const auth = useAuth();
   const navigate = useNavigate();
 
+  const user = auth?.user;
+  const logout = auth?.logout;
+
+  // ✅ safe wrappers (never crash)
+  const canUploadExcel = typeof auth?.canUploadExcel === 'function' ? auth.canUploadExcel : () => false;
+  const canAssignPriority =
+    typeof auth?.canAssignPriority === 'function' ? auth.canAssignPriority : () => false;
+
+  // ✅ FIX: your AuthContext provides canManageUsers() now (alias)
+  const canManageUsers = typeof auth?.canManageUsers === 'function' ? auth.canManageUsers : () => false;
+
   const handleLogout = () => {
-    logout();
+    if (typeof logout === 'function') logout();
     navigate('/login');
   };
 
-  const region = regions.find(r => r.id === user?.regionId);
-  const regionName = region ? (language === 'he' ? region.name : region.nameEn) : (language === 'he' ? 'כל האזורים' : 'All Regions');
+  // ✅ FIX: user region may be user.region OR user.regionId
+  const userRegionId = user?.regionId ?? user?.region ?? null;
+
+  const region = regions.find((r) => String(r.id) === String(userRegionId));
+  const regionName = region
+    ? language === 'he'
+      ? region.name
+      : region.nameEn
+    : language === 'he'
+      ? 'כל האזורים'
+      : 'All Regions';
 
   const getRoleName = () => {
     switch (user?.role) {
-      case 'central_admin': return language === 'he' ? 'מנהל מרכזי' : 'Central Admin';
-      case 'region_boss': return language === 'he' ? 'מנהל אזור' : 'Region Admin';
-      case 'employee': return language === 'he' ? 'עובד' : 'Employee';
-      default: return '';
+      case 'central_admin':
+        return language === 'he' ? 'מנהל מרכזי' : 'Central Admin';
+      case 'region_boss':
+        return language === 'he' ? 'מנהל אזור' : 'Region Admin';
+      case 'employee':
+        return language === 'he' ? 'עובד' : 'Employee';
+      default:
+        return '';
     }
   };
 
@@ -49,9 +73,9 @@ function Sidebar({ collapsed, onToggle, language }) {
     { path: '/upload', icon: Upload, label: language === 'he' ? 'העלאת קובץ' : 'Upload File', show: canUploadExcel() },
     { path: '/priority', icon: Star, label: language === 'he' ? 'סטודנטים עם בקשות מיוחדות' : 'Students with Special Requests', show: canAssignPriority() },
     { path: '/allocation', icon: Shuffle, label: language === 'he' ? 'שיבוץ' : 'Allocation', show: true },
-    { path: '/transfers', icon: ArrowLeftRight, label: language === 'he' ? 'בקשות מעבר':'Transfer Requests', show: true },
+    { path: '/transfers', icon: ArrowLeftRight, label: language === 'he' ? 'בקשות מעבר' : 'Transfer Requests', show: true },
     { path: '/reports', icon: BarChart3, label: language === 'he' ? 'דוחות' : 'Reports', show: true },
-    { path: '/users', icon: UserCog, label: language === 'he' ? 'מידע על עובדים ' : 'workers Contacts', show: canManageUsers() },
+    { path: '/users', icon: UserCog, label: language === 'he' ? 'מידע על עובדים ' : 'Workers Contacts', show: canManageUsers() },
     { path: '/settings', icon: Settings, label: language === 'he' ? 'הגדרות' : 'Settings', show: true },
   ];
 
@@ -75,25 +99,27 @@ function Sidebar({ collapsed, onToggle, language }) {
       )}
 
       <nav className="sidebar-nav">
-        {navItems.filter(item => item.show).map(item => (
-          <NavLink
-            key={item.path}
-            to={item.path}
-            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-            title={collapsed ? item.label : ''}
-          >
-            <item.icon size={20} />
-            {!collapsed && <span>{item.label}</span>}
-          </NavLink>
-        ))}
+        {navItems
+          .filter((item) => item.show)
+          .map((item) => (
+            <NavLink
+              key={item.path}
+              to={item.path}
+              className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+              title={collapsed ? item.label : ''}
+            >
+              <item.icon size={20} />
+              {!collapsed && <span>{item.label}</span>}
+            </NavLink>
+          ))}
       </nav>
 
       <div className="sidebar-footer">
         {!collapsed && (
           <div className="user-info">
-            <div className="user-avatar">{user?.name?.charAt(0)}</div>
+            <div className="user-avatar">{(user?.name || 'U').charAt(0)}</div>
             <div className="user-details">
-              <span className="user-name">{user?.name}</span>
+              <span className="user-name">{user?.name || ''}</span>
               <span className="user-role">{getRoleName()}</span>
             </div>
           </div>

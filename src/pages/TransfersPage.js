@@ -1,22 +1,22 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { transferRequests as transferRequestsSeed, students, rooms, buildings, regions } from '../data/mockData';
 import { ArrowLeftRight, Check, X, Clock, Plus, MapPin, Home, History } from 'lucide-react';
 
 function TransfersPage({ language }) {
-  const { isCentralAdmin, getUserRegion, canApproveTransfers } = useAuth();
+  const { isCentralAdmin, getUserRegion, canApproveTransfer } = useAuth();
   const userRegion = getUserRegion();
 
-  // ✅ stateful list (so "approve" really updates UI)
   const [transferRequests, setTransferRequests] = useState(transferRequestsSeed);
-
-  // ✅ two "pages" inside this page
-  const [tab, setTab] = useState('room'); // 'room' | 'region'
-  const [filter, setFilter] = useState('pending'); // organized queue
+  const [tab, setTab] = useState('room');
+  const [filter, setFilter] = useState('pending');
   const [showHistory, setShowHistory] = useState(false);
-
-  // ✅ for room approvals: chosen target room per transfer
   const [selectedToRoomByTransfer, setSelectedToRoomByTransfer] = useState({});
+
+  // ✅ HARD GUARD: regional users can never stay on the "region" tab
+  useEffect(() => {
+    if (!isCentralAdmin() && tab !== 'room') setTab('room');
+  }, [tab, isCentralAdmin]);
 
   const t = {
     he: {
@@ -45,9 +45,10 @@ function TransfersPage({ language }) {
       phaseHint:
         'בקשות בין אזורים/שינוי סוג מעונות מאושרות ע"י מנהל מרכזי. לאחר אישור נוצרת בקשת שיבוץ חדר (שלב 2) בתוך אזור היעד.',
       centralOnly: 'מאושר רק ע"י המנהל המרכזי',
-      regionStaffOnly: 'מאושר ע"י צוות האזור',
+      regionStaffOnly: 'מאושר ע"י צוות האזור (רק בתוך האזור שלו)',
       phase2Badge: 'שלב 2: שיבוץ באיזור יעד',
       internalBadge: 'העברה פנימית בתוך אזור',
+      notAllowed: 'אין לך הרשאה לאשר בקשה זו',
     },
     en: {
       title: 'Transfer Requests',
@@ -75,15 +76,13 @@ function TransfersPage({ language }) {
       phaseHint:
         'Region/dorm-type change is approved by central office. After approval, Phase 2 room assignment is created inside the target region.',
       centralOnly: 'Central office approval only',
-      regionStaffOnly: 'Region staff approval',
+      regionStaffOnly: 'Region staff approval (only within their region)',
       phase2Badge: 'Phase 2: assignment in target region',
       internalBadge: 'Internal move within region',
+      notAllowed: 'You are not allowed to approve this request',
     }
   }[language];
 
-  // =====================================================
-  // Robust region inference (prevents "wrong region list")
-  // =====================================================
   const inferRegionIdFromRoomId = (roomId) => {
     if (!roomId) return null;
     const sorted = [...regions].sort((a, b) => String(b.id).length - String(a.id).length);
@@ -98,55 +97,34 @@ function TransfersPage({ language }) {
   const getRoomRegionId = (room) => {
     if (!room) return null;
     if (room.regionId) return room.regionId;
-
     const b = getBuilding(room.buildingId);
     if (b?.regionId) return b.regionId;
-
     return inferRegionIdFromRoomId(room.id);
   };
 
-  // =========================
-  // Availability + Constraints
-  // =========================
   const isRoomAvailable = (room) => {
     const occ = room.currentOccupancy ?? room.occupancy ?? 0;
     const cap = room.capacity ?? 1;
     return occ < cap;
   };
 
-  /**
-   * ✅ Constraint matcher
-   * NOTE: extend here to include dorm-type request constraints.
-   * - internal room move: usually matches student constraints
-   * - phase2 assignment: may require requestedDormType / requestedDormGroup
-   */
   const matchesStudentConstraints = (room, student, transfer) => {
     if (!room || !student) return false;
 
-    // Gender constraint
-    const studentGender = student.gender; // 'female' | 'male'
+    const studentGender = student.gender;
     const allowedGender = room.allowedGender ?? room.gender ?? 'any';
     if (allowedGender !== 'any' && studentGender && allowedGender !== studentGender) return false;
 
-    // Base room type constraint from student (optional)
     if (student.roomType && room.type && room.type !== student.roomType) return false;
 
-    // Accessibility
     if (student.needsAccessibleRoom && room.isAccessible === false) return false;
 
-    // ✅ If Phase2 created due to dorm-type change request, enforce requested type if provided
-    // Example fields you might set: transfer.requestedDormType / transfer.requestedDormGroup
     if (transfer?.requestedDormType && room.type && room.type !== transfer.requestedDormType) return false;
-
-    // If you have dormGroup property on room (optional)
     if (transfer?.requestedDormGroup && room.dormGroup && room.dormGroup !== transfer.requestedDormGroup) return false;
 
     return true;
   };
 
-  // =========================
-  // Transfer Classification
-  // =========================
   const getTransferType = (tr, student) => {
     if (tr.scope === 'REGION') return 'region';
     if (tr.scope === 'ROOM') return 'room';
@@ -154,7 +132,6 @@ function TransfersPage({ language }) {
     if (tr.type === 'region') return 'region';
     if (tr.type === 'room') return 'room';
 
-    // dorm-type/group change must be REGION (central)
     if (tr.requestedDormType || tr.requestedDormGroup || tr.requestedHousingType) return 'region';
 
     if (tr.toRegionId && tr.toRegionId !== student?.regionId) return 'region';
@@ -162,40 +139,63 @@ function TransfersPage({ language }) {
     return 'room';
   };
 
-  // =========================
-  // ✅ KEY FIX: Separate internal vs phase2 room assignment
-  // =========================
   const getRoomAssignmentMode = (transfer) => {
-    // Phase 2 created after central approval (or explicitly targeted to a region)
     if (transfer.parentTransferId || transfer.targetRegionId || transfer.toRegionId) return 'phase2';
     return 'internal';
   };
 
   const getEligibleTargetRooms = (transfer, student) => {
     const mode = getRoomAssignmentMode(transfer);
-
     const internalRegionId = inferRegionIdFromRoomId(transfer.fromRoomId);
     const phase2RegionId = transfer.targetRegionId || transfer.toRegionId || null;
-
     const baseRegionId = mode === 'phase2' ? phase2RegionId : internalRegionId;
 
     return rooms
       .filter(isRoomAvailable)
-      .filter(r => getRoomRegionId(r) === baseRegionId)          // ✅ correct region per mode
+      .filter(r => getRoomRegionId(r) === baseRegionId)
       .filter(r => r.id !== transfer.fromRoomId)
       .filter(r => matchesStudentConstraints(r, student, transfer))
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
   };
 
-  // =========================
-  // Permissions
-  // =========================
-  const canActOnRegionTransfer = () => isCentralAdmin();
-  const canActOnRoomTransfer = () => canApproveTransfers();
+  const canSeeTransfer = (tr) => {
+    const student = getStudent(tr.studentId);
+    const type = getTransferType(tr, student);
 
-  // =========================
-  // Filtering (tabs + queue)
-  // =========================
+    if (isCentralAdmin()) return true;
+
+    // Regional boss: ONLY room transfers are visible (no region transfers at all)
+    if (type !== 'room') return false;
+
+    const mode = getRoomAssignmentMode(tr);
+    if (mode !== 'internal') return false; // hide phase2 as well (optional but matches your ask)
+
+    const fromRegion = inferRegionIdFromRoomId(tr.fromRoomId) ?? student?.regionId ?? null;
+    return fromRegion === userRegion;
+  };
+
+  // ✅ Local permission logic
+  const canApproveLocal = (tr) => {
+    if (tr.status !== 'pending') return false;
+
+    const student = getStudent(tr.studentId);
+    const type = getTransferType(tr, student);
+
+    if (isCentralAdmin()) {
+      // central uses your existing auth policy
+      return canApproveTransfer(tr);
+    }
+
+    // regional boss: can approve ONLY internal room transfers within their region
+    if (type !== 'room') return false;
+
+    const mode = getRoomAssignmentMode(tr);
+    if (mode !== 'internal') return false;
+
+    const fromRegion = inferRegionIdFromRoomId(tr.fromRoomId) ?? student?.regionId ?? null;
+    return fromRegion === userRegion;
+  };
+
   const filteredTransfers = useMemo(() => {
     return transferRequests.filter(tr => {
       const student = getStudent(tr.studentId);
@@ -204,21 +204,7 @@ function TransfersPage({ language }) {
       if (tab === 'region' && type !== 'region') return false;
       if (tab === 'room' && type !== 'room') return false;
 
-      // visibility rules
-      if (!isCentralAdmin()) {
-        if (type === 'room') {
-          // For internal room transfers: only own region OR phase2 targeted to user's region
-          const mode = getRoomAssignmentMode(tr);
-          if (mode === 'internal' && student?.regionId !== userRegion) return false;
-          if (mode === 'phase2') {
-            const target = tr.targetRegionId || tr.toRegionId;
-            if (target && target !== userRegion) return false;
-          }
-        }
-
-        // For region transfers: optional view only if originated from own region
-        if (type === 'region' && student?.regionId !== userRegion) return false;
-      }
+      if (!canSeeTransfer(tr)) return false;
 
       const isHistory = tr.status === 'approved' || tr.status === 'rejected';
       if (!showHistory && isHistory) return false;
@@ -237,17 +223,7 @@ function TransfersPage({ language }) {
       if (tab === 'region' && type !== 'region') return false;
       if (tab === 'room' && type !== 'room') return false;
 
-      if (!isCentralAdmin()) {
-        if (type === 'room') {
-          const mode = getRoomAssignmentMode(tr);
-          if (mode === 'internal' && student?.regionId !== userRegion) return false;
-          if (mode === 'phase2') {
-            const target = tr.targetRegionId || tr.toRegionId;
-            if (target && target !== userRegion) return false;
-          }
-        }
-        if (type === 'region' && student?.regionId !== userRegion) return false;
-      }
+      if (!canSeeTransfer(tr)) return false;
 
       const isHistory = tr.status === 'approved' || tr.status === 'rejected';
       if (!showHistory && isHistory) return false;
@@ -257,18 +233,17 @@ function TransfersPage({ language }) {
     }).length;
   };
 
-  // =========================
-  // Actions (stateful)
-  // =========================
   const approveTransfer = (transfer) => {
     const student = getStudent(transfer.studentId);
     const type = getTransferType(transfer, student);
 
-    if (type === 'region') {
-      if (!canActOnRegionTransfer()) return;
+    if (!canApproveLocal(transfer)) {
+      alert(t.notAllowed);
+      return;
+    }
 
-      // ✅ Phase 1 approval
-      // ✅ Always create phase2 room assignment into target region (if provided)
+    // Central admin region approvals (kept as-is)
+    if (type === 'region') {
       const targetRegionId = transfer.toRegionId || transfer.targetRegionId || null;
 
       const phase2 = targetRegionId
@@ -284,10 +259,8 @@ function TransfersPage({ language }) {
             reviewedBy: 'central-office',
             reviewedAt: new Date().toISOString(),
             scope: 'ROOM',
-            // ✅ critical fields for Phase2 filtering
             targetRegionId,
             parentTransferId: transfer.id,
-            // pass dorm-type request to phase2 if exists
             requestedDormType: transfer.requestedDormType ?? null,
             requestedDormGroup: transfer.requestedDormGroup ?? null
           }
@@ -311,9 +284,7 @@ function TransfersPage({ language }) {
       return;
     }
 
-    // room transfer approval
-    if (!canActOnRoomTransfer()) return;
-
+    // Room transfer approval (regional or central)
     const selectedTo = selectedToRoomByTransfer[transfer.id];
     if (!selectedTo) {
       alert(t.mustChooseRoom);
@@ -327,7 +298,7 @@ function TransfersPage({ language }) {
               ...p,
               toRoomId: selectedTo,
               status: 'approved',
-              reviewedBy: 'region-staff',
+              reviewedBy: isCentralAdmin() ? 'central-office' : 'region-staff',
               reviewedAt: new Date().toISOString(),
               scope: 'ROOM'
             }
@@ -340,8 +311,10 @@ function TransfersPage({ language }) {
     const student = getStudent(transfer.studentId);
     const type = getTransferType(transfer, student);
 
-    if (type === 'region' && !canActOnRegionTransfer()) return;
-    if (type === 'room' && !canActOnRoomTransfer()) return;
+    if (!canApproveLocal(transfer)) {
+      alert(t.notAllowed);
+      return;
+    }
 
     setTransferRequests(prev =>
       prev.map(p =>
@@ -349,7 +322,7 @@ function TransfersPage({ language }) {
           ? {
               ...p,
               status: 'rejected',
-              reviewedBy: type === 'region' ? 'central-office' : 'region-staff',
+              reviewedBy: type === 'region' ? 'central-office' : (isCentralAdmin() ? 'central-office' : 'region-staff'),
               reviewedAt: new Date().toISOString(),
               scope: type === 'region' ? 'REGION' : 'ROOM'
             }
@@ -372,7 +345,6 @@ function TransfersPage({ language }) {
     );
   };
 
-  // small label in card: internal vs phase2
   const getRoomModeBadge = (transfer) => {
     const mode = getRoomAssignmentMode(transfer);
     return (
@@ -380,6 +352,18 @@ function TransfersPage({ language }) {
         {mode === 'phase2' ? t.phase2Badge : t.internalBadge}
       </span>
     );
+  };
+
+  const getApproveTooltip = (transfer) => {
+    const student = getStudent(transfer.studentId);
+    const type = getTransferType(transfer, student);
+
+    if (isCentralAdmin()) {
+      return type === 'region' ? t.centralOnly : '';
+    }
+
+    // regional users can only approve internal room transfers
+    return t.regionStaffOnly;
   };
 
   return (
@@ -399,9 +383,13 @@ function TransfersPage({ language }) {
           <button className={`tab ${tab === 'room' ? 'active' : ''}`} onClick={() => setTab('room')}>
             <Home size={16} /> {t.roomTab}
           </button>
-          <button className={`tab ${tab === 'region' ? 'active' : ''}`} onClick={() => setTab('region')}>
-            <MapPin size={16} /> {t.regionTab}
-          </button>
+
+          {/* ✅ Region tab exists ONLY for central admin */}
+          {isCentralAdmin() && (
+            <button className={`tab ${tab === 'region' ? 'active' : ''}`} onClick={() => setTab('region')}>
+              <MapPin size={16} /> {t.regionTab}
+            </button>
+          )}
         </div>
 
         <button className="history-toggle" onClick={() => setShowHistory(v => !v)}>
@@ -425,7 +413,7 @@ function TransfersPage({ language }) {
         </div>
       </div>
 
-      {tab === 'region' && <div className="phase-hint">{t.phaseHint}</div>}
+      {isCentralAdmin() && tab === 'region' && <div className="phase-hint">{t.phaseHint}</div>}
 
       <div className="transfers-list">
         {filteredTransfers.length > 0 ? (
@@ -443,9 +431,8 @@ function TransfersPage({ language }) {
             const eligibleRooms = type === 'room' ? getEligibleTargetRooms(transfer, student) : [];
             const selectedToRoom = selectedToRoomByTransfer[transfer.id] ?? '';
 
-            const canApprove = type === 'region' ? canActOnRegionTransfer() : canActOnRoomTransfer();
-            const approveTooltip =
-              type === 'region' ? (canApprove ? '' : t.centralOnly) : (canApprove ? '' : t.regionStaffOnly);
+            const canApprove = canApproveLocal(transfer);
+            const approveTooltip = canApprove ? '' : getApproveTooltip(transfer);
 
             return (
               <div key={transfer.id} className={`transfer-card ${transfer.status}`}>

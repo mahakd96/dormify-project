@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 
 // Components
@@ -20,71 +20,90 @@ import UsersPage from './pages/UsersPage';
 import SettingsPage from './pages/SettingsPage';
 import MapPage from './pages/MapPage';
 
-// Protected Route wrapper
-function ProtectedRoute({ children }) {
-  const { user, loading } = useAuth();
-  
-  if (loading) {
-    return <div className="loading">Loading...</div>;
-  }
-  
-  if (!user) {
-    return <Navigate to="/login" replace />;
-  }
-  
-  return children;
-}
-
-// Main Layout with Sidebar
-function MainLayout({ children, language, onLanguageToggle, sidebarCollapsed, onSidebarToggle }) {
+// Main Layout with Sidebar + Header
+function MainLayout({ language, onLanguageToggle, sidebarCollapsed, onSidebarToggle }) {
   return (
-    <div className={`app-layout ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} dir={language === 'he' ? 'rtl' : 'ltr'}>
+    <div
+      className={`app-layout ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
+      dir={language === 'he' ? 'rtl' : 'ltr'}
+    >
       <Sidebar collapsed={sidebarCollapsed} onToggle={onSidebarToggle} language={language} />
       <Header language={language} onLanguageToggle={onLanguageToggle} />
       <main className="main-content">
-        {children}
+        <Outlet />
       </main>
     </div>
+  );
+}
+
+// Auth gate for protected area
+function ProtectedLayout({ language, onLanguageToggle, sidebarCollapsed, onSidebarToggle }) {
+  const { user, loading } = useAuth();
+
+  if (loading) return <div className="loading">Loading...</div>;
+  if (!user) return <Navigate to="/login" replace />;
+
+  return (
+    <MainLayout
+      language={language}
+      onLanguageToggle={onLanguageToggle}
+      sidebarCollapsed={sidebarCollapsed}
+      onSidebarToggle={onSidebarToggle}
+    />
   );
 }
 
 function AppContent() {
   const [language, setLanguage] = useState('he');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
 
-  const toggleLanguage = () => setLanguage(lang => lang === 'he' ? 'en' : 'he');
-  const toggleSidebar = () => setSidebarCollapsed(c => !c);
+  const toggleLanguage = () => setLanguage((lang) => (lang === 'he' ? 'en' : 'he'));
+  const toggleSidebar = () => setSidebarCollapsed((c) => !c);
 
   return (
     <Routes>
-      <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <LoginPage />} />
-      
-      <Route path="/*" element={
-        <ProtectedRoute>
-          <MainLayout 
-            language={language} 
+      {/* Login */}
+      <Route
+        path="/login"
+        element={
+          loading ? (
+            <div className="loading">Loading...</div>
+          ) : user ? (
+            <Navigate to="/dashboard" replace />
+          ) : (
+            <LoginPage />
+          )
+        }
+      />
+
+      {/* Protected app shell */}
+      <Route
+        element={
+          <ProtectedLayout
+            language={language}
             onLanguageToggle={toggleLanguage}
             sidebarCollapsed={sidebarCollapsed}
             onSidebarToggle={toggleSidebar}
-          >
-            <Routes>
-              <Route path="/" element={<Navigate to="/dashboard" replace />} />
-              <Route path="/dashboard" element={<Dashboard language={language} />} />
-              <Route path="/map" element={<MapPage language={language} />} />
-              <Route path="/buildings" element={<BuildingsPage language={language} />} />
-              <Route path="/students" element={<StudentsPage language={language} />} />
-              <Route path="/upload" element={<UploadPage language={language} />} />
-              <Route path="/priority" element={<PriorityPage language={language} />} />
-              <Route path="/allocation" element={<AllocationPage language={language} />} />
-              <Route path="/transfers" element={<TransfersPage language={language} />} />
-              <Route path="/reports" element={<ReportsPage language={language} />} />
-              <Route path="/users" element={<UsersPage language={language} />} />
-              <Route path="/settings" element={<SettingsPage language={language} onLanguageToggle={toggleLanguage} />} />
-            </Routes>
-          </MainLayout>
-        </ProtectedRoute>
-      } />
+          />
+        }
+      >
+        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/dashboard" element={<Dashboard language={language} />} />
+        <Route path="/map" element={<MapPage language={language} />} />
+        <Route path="/buildings" element={<BuildingsPage language={language} />} />
+        <Route path="/students" element={<StudentsPage language={language} />} />
+        <Route path="/upload" element={<UploadPage language={language} />} />
+        <Route path="/priority" element={<PriorityPage language={language} />} />
+        <Route path="/allocation" element={<AllocationPage language={language} />} />
+        <Route path="/transfers" element={<TransfersPage language={language} />} />
+        <Route path="/reports" element={<ReportsPage language={language} />} />
+        <Route path="/users" element={<UsersPage language={language} />} />
+        <Route path="/settings" element={<SettingsPage language={language} onLanguageToggle={toggleLanguage} />} />
+      </Route>
+
+      {/* Fallback */}
+      <Route path="*" element={<Navigate to={user ? '/dashboard' : '/login'} replace />} />
     </Routes>
   );
 }
@@ -95,7 +114,7 @@ function App() {
       <Router>
         <AppContent />
       </Router>
-      
+
       <style>{`
         * {
           margin: 0;
@@ -143,7 +162,6 @@ function App() {
           color: #64748b;
         }
 
-        /* Scrollbar */
         ::-webkit-scrollbar {
           width: 8px;
           height: 8px;
