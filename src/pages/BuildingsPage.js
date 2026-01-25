@@ -1,13 +1,24 @@
 import React, { useMemo, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { regions, buildings, apartments, rooms, students as studentsSeed } from '../data/mockData';
-import { Building2, Home, Users, ChevronDown, ChevronUp, Search, Star, X, Plus } from 'lucide-react';
+import { dormOffices, dorms, buildings, apartments, rooms, students as studentsSeed } from '../data/mockData';
+import {
+  Building2,
+  Home,
+  Users,
+  ChevronDown,
+  ChevronUp,
+  Search,
+  Star,
+  X,
+  Plus,
+  ArrowRightLeft,
+  Pencil,
+} from 'lucide-react';
 
 function BuildingsPage({ language }) {
-  const { isCentralAdmin, getUserRegion } = useAuth();
-  const userRegion = getUserRegion();
+  const { isCentralAdmin, getUserRegion, canEditRegion } = useAuth();
+  const userDormId = getUserRegion();
 
-  // ✅ Editable students only (assign/unassign)
   const [studentsState, setStudentsState] = useState(() => [...studentsSeed]);
 
   const [selectedBuilding, setSelectedBuilding] = useState(null);
@@ -15,22 +26,30 @@ function BuildingsPage({ language }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedBuildings, setExpandedBuildings] = useState({});
 
-  // ✅ Region selector
-  const defaultRegion = isCentralAdmin() ? regions[0]?.id : userRegion;
-  const [selectedRegionId, setSelectedRegionId] = useState(defaultRegion);
-  const effectiveRegionId = isCentralAdmin() ? selectedRegionId : userRegion;
-
-  // ✅ Add-student modal
   const [addModal, setAddModal] = useState({ open: false, roomId: null, query: '' });
 
-  // ✅ Drag state
+  const [moveModal, setMoveModal] = useState({
+    open: false,
+    studentId: null,
+    fromRoomId: null,
+    toRoomId: '',
+    query: '',
+  });
+
+  const [swapMode, setSwapMode] = useState({
+    active: false,
+    studentId: null,
+    fromRoomId: null,
+  });
+
   const [draggingStudentId, setDraggingStudentId] = useState(null);
 
   const t = {
     he: {
       title: 'בניינים וחדרים',
-      subtitle: 'שיוך סטודנטים לחדרים',
+      subtitle: '',
       search: 'חיפוש בניין...',
+      chooseOffice: 'בחר משרד לצפייה',
       chooseDorm: 'בחר מעונות לצפייה',
       floor: 'קומה',
       apartment: 'דירה',
@@ -41,17 +60,32 @@ function BuildingsPage({ language }) {
       selectBuilding: 'בחר דירה לצפייה',
       addStudent: 'הוסף סטודנט/ית',
       remove: 'הסר',
-      unassigned: 'לא משוייכים',
       close: 'סגור',
       pickStudent: 'בחר סטודנט/ית לשיוך',
       dropHere: 'שחרר כאן לשיוך',
       capacity: 'קיבולת',
+      updateMove: 'עדכון / העברה',
+      swap: 'החלפה',
+      swapHint: 'בחר סטודנט נוסף להחלפה',
+      moveTo: 'העבר אל',
+      confirm: 'אישור',
+      cancel: 'ביטול',
+      roomFull: 'החדר מלא',
+      searchRoom: 'חיפוש חדר/דירה/בניין...',
+      statsBuildings: 'בניינים',
+      statsApartments: 'דירות',
+      statsRooms: 'חדרים',
+      statsAssigned: 'משוייכים',
+      statsUnassigned: 'לא משוייכים',
+      dragTip: 'שיוך סטודנטים לחדרים',
+      viewOnly: 'צפייה בלבד (אין הרשאה לעריכה באיזור זה)',
     },
     en: {
       title: 'Buildings & Rooms',
       subtitle: 'Assign students to rooms',
       search: 'Search building...',
-      chooseDorm: 'Choose dorm to view',
+      chooseOffice: 'Choose office',
+      chooseDorm: 'Choose dorm',
       floor: 'Floor',
       apartment: 'Apartment',
       room: 'Room',
@@ -61,329 +95,644 @@ function BuildingsPage({ language }) {
       selectBuilding: 'Select an apartment to view',
       addStudent: 'Add student',
       remove: 'Remove',
-      unassigned: 'Unassigned',
       close: 'Close',
       pickStudent: 'Pick a student to assign',
       dropHere: 'Drop here to assign',
       capacity: 'Capacity',
-    }
+      updateMove: 'Update / Move',
+      swap: 'Swap',
+      swapHint: 'Pick another student to swap',
+      moveTo: 'Move to',
+      confirm: 'Confirm',
+      cancel: 'Cancel',
+      roomFull: 'Room is full',
+      searchRoom: 'Search room/apartment/building...',
+      statsBuildings: 'Buildings',
+      statsApartments: 'Apartments',
+      statsRooms: 'Rooms',
+      statsAssigned: 'Assigned',
+      statsUnassigned: 'Unassigned',
+      dragTip: 'Drag students between rooms',
+      viewOnly: 'View-only (no edit permission for this region)',
+    },
   }[language];
 
-  // -------------------------
-  // Helpers
-  // -------------------------
+  const userDormObj = useMemo(() => dorms.find((d) => d.id === userDormId) || null, [userDormId]);
+  const userOfficeId = userDormObj?.officeId || null;
+
+  const defaultOfficeId = useMemo(() => {
+    if (!isCentralAdmin()) return userOfficeId;
+    return dormOffices?.[0]?.id || '';
+  }, [isCentralAdmin, userOfficeId]);
+
+  const [selectedOfficeId, setSelectedOfficeId] = useState(defaultOfficeId);
+
+  const effectiveOfficeId = isCentralAdmin() ? selectedOfficeId : userOfficeId;
+
+  const dormsInOffice = useMemo(() => {
+    const office = dormOffices.find((o) => o.id === effectiveOfficeId);
+    if (!office) return [];
+    const allowed = new Set(office.dormIds || []);
+    return dorms.filter((d) => allowed.has(d.id));
+  }, [effectiveOfficeId]);
+
+  const defaultDormId = useMemo(() => {
+    if (!isCentralAdmin()) return userDormId;
+    return dormsInOffice[0]?.id || '';
+  }, [isCentralAdmin, dormsInOffice, userDormId]);
+
+  const [selectedDormId, setSelectedDormId] = useState(defaultDormId);
+
+  const effectiveDormId = isCentralAdmin() ? selectedDormId : userDormId;
+  const effectiveDormObj = useMemo(() => dorms.find((d) => d.id === effectiveDormId) || null, [effectiveDormId]);
+  const effectiveOfficeObj = useMemo(
+    () => dormOffices.find((o) => o.id === effectiveOfficeId) || null,
+    [effectiveOfficeId]
+  );
+
+  const canEditThisDorm = useMemo(() => {
+    if (!effectiveDormId) return false;
+    return isCentralAdmin() || canEditRegion(effectiveDormId);
+  }, [effectiveDormId, isCentralAdmin, canEditRegion]);
+
   const toggleBuilding = (buildingId) => {
-    setExpandedBuildings(prev => ({ ...prev, [buildingId]: !prev[buildingId] }));
+    setExpandedBuildings((prev) => ({ ...prev, [buildingId]: !prev[buildingId] }));
     setSelectedBuilding(buildingId);
     setSelectedApartment(null);
   };
 
-  const getBuildingApartments = (buildingId) => apartments.filter(a => a.buildingId === buildingId);
-  const getApartmentRooms = (apartmentId) => rooms.filter(r => r.apartmentId === apartmentId);
+  const getBuildingApartments = (buildingId) => apartments.filter((a) => a.buildingId === buildingId);
+  const getApartmentRooms = (apartmentId) => rooms.filter((r) => r.apartmentId === apartmentId);
+  const getRoomStudents = (roomId) => studentsState.filter((s) => s.assignedRoomId === roomId);
 
-  const getRoomStudents = (roomId) =>
-    studentsState.filter(s => s.assignedRoomId === roomId);
-
-  const unassignedStudents = useMemo(
-    () => studentsState.filter(s => !s.assignedRoomId),
-    [studentsState]
-  );
-
-  const selectableRegions = useMemo(() => {
-    return isCentralAdmin()
-      ? regions
-      : regions.filter(r => r.id === userRegion);
-  }, [isCentralAdmin, userRegion]);
+  const unassignedStudents = useMemo(() => studentsState.filter((s) => !s.assignedRoomId), [studentsState]);
 
   const filteredBuildings = useMemo(() => {
     let list = buildings;
 
-    if (!isCentralAdmin()) {
-      list = list.filter(b => b.regionId === userRegion);
-    } else if (effectiveRegionId) {
-      list = list.filter(b => b.regionId === effectiveRegionId);
+    if (effectiveDormId) {
+      list = list.filter((b) => b.regionId === effectiveDormId);
     }
 
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase();
-      list = list.filter(b => {
-        const region = regions.find(r => r.id === b.regionId);
+      list = list.filter((b) => {
+        const dorm = dorms.find((d) => d.id === b.regionId);
         return (
           (b.name || '').toLowerCase().includes(q) ||
-          (region?.name || '').toLowerCase().includes(q) ||
-          (region?.nameEn || '').toLowerCase().includes(q)
+          (dorm?.name || '').toLowerCase().includes(q) ||
+          (dorm?.nameEn || '').toLowerCase().includes(q)
         );
       });
     }
 
     return list;
-  }, [effectiveRegionId, isCentralAdmin, userRegion, searchQuery]);
+  }, [effectiveDormId, searchQuery]);
 
-  const selectedRegionObj = regions.find(r => r.id === effectiveRegionId);
+  const canDropIntoRoom = (room) => {
+    const current = getRoomStudents(room.id).length;
+    return current < (Number(room.capacity) || 0);
+  };
 
-  // -------------------------
-  // Assignment actions
-  // -------------------------
   const assignStudentToRoom = (studentId, roomId) => {
-    setStudentsState(prev =>
-      prev.map(s => (s.id === studentId ? { ...s, assignedRoomId: roomId } : s))
-    );
+    if (!canEditThisDorm) return;
+    setStudentsState((prev) => prev.map((s) => (s.id === studentId ? { ...s, assignedRoomId: roomId } : s)));
   };
 
   const unassignStudent = (studentId) => {
-    setStudentsState(prev =>
-      prev.map(s => (s.id === studentId ? { ...s, assignedRoomId: null } : s))
+    if (!canEditThisDorm) return;
+    setStudentsState((prev) => prev.map((s) => (s.id === studentId ? { ...s, assignedRoomId: null } : s)));
+  };
+
+  const swapStudents = (studentAId, roomAId, studentBId, roomBId) => {
+    if (!canEditThisDorm) return;
+    setStudentsState((prev) =>
+      prev.map((s) => {
+        if (s.id === studentAId) return { ...s, assignedRoomId: roomBId };
+        if (s.id === studentBId) return { ...s, assignedRoomId: roomAId };
+        return s;
+      })
     );
   };
 
-  // -------------------------
-  // Capacity guard (optional)
-  // -------------------------
-  const canDropIntoRoom = (room) => {
-    const current = getRoomStudents(room.id).length;
-    return current < room.capacity;
-  };
-
-  // -------------------------
-  // Add-student modal list
-  // -------------------------
   const filteredUnassigned = useMemo(() => {
     const q = addModal.query.trim().toLowerCase();
     if (!q) return unassignedStudents;
-    return unassignedStudents.filter(s =>
-      `${s.firstName} ${s.lastName}`.toLowerCase().includes(q)
-    );
+    return unassignedStudents.filter((s) => `${s.firstName} ${s.lastName}`.toLowerCase().includes(q));
   }, [unassignedStudents, addModal.query]);
 
+  const allRoomsInDorm = useMemo(() => rooms.filter((r) => r.regionId === effectiveDormId), [effectiveDormId]);
+
+  const filteredRoomsForMove = useMemo(() => {
+    const q = moveModal.query.trim().toLowerCase();
+    if (!q) return allRoomsInDorm;
+
+    return allRoomsInDorm.filter((r) => {
+      const apt = apartments.find((a) => a.id === r.apartmentId);
+      const bld = buildings.find((b) => b.id === r.buildingId);
+
+      const hay = [
+        r.id,
+        r.name,
+        String(apt?.number ?? ''),
+        String(apt?.floor ?? ''),
+        bld?.name || '',
+        bld?.id || '',
+        r.apartmentId || '',
+        r.buildingId || '',
+      ]
+        .join(' ')
+        .toLowerCase();
+
+      return hay.includes(q);
+    });
+  }, [allRoomsInDorm, moveModal.query]);
+
+  const safeResetSelection = () => {
+    setSelectedBuilding(null);
+    setSelectedApartment(null);
+    setExpandedBuildings({});
+    setSearchQuery('');
+    setSwapMode({ active: false, studentId: null, fromRoomId: null });
+    setDraggingStudentId(null);
+    setAddModal({ open: false, roomId: null, query: '' });
+    setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' });
+  };
+
+  const handleOfficeChange = (nextOfficeId) => {
+    setSelectedOfficeId(nextOfficeId);
+
+    const office = dormOffices.find((o) => o.id === nextOfficeId);
+    const nextDormId = office?.dormIds?.[0] || '';
+
+    setSelectedDormId(nextDormId);
+    safeResetSelection();
+  };
+
+  const handleDormChange = (nextDormId) => {
+    setSelectedDormId(nextDormId);
+    safeResetSelection();
+  };
+
+  const selectedApartmentObj = useMemo(
+    () => (selectedApartment ? apartments.find((a) => a.id === selectedApartment) : null),
+    [selectedApartment]
+  );
+  const selectedBuildingObj = useMemo(() => {
+    if (!selectedApartmentObj) return null;
+    return buildings.find((b) => b.id === selectedApartmentObj.buildingId) || null;
+  }, [selectedApartmentObj]);
+
+  const selectedApartmentRooms = useMemo(() => {
+    if (!selectedApartment) return [];
+    return getApartmentRooms(selectedApartment);
+  }, [selectedApartment]);
+
+  const assignedCount = useMemo(() => studentsState.filter((s) => !!s.assignedRoomId).length, [studentsState]);
+  const unassignedCount = useMemo(() => studentsState.filter((s) => !s.assignedRoomId).length, [studentsState]);
+
+  const apartmentsCountInFiltered = useMemo(() => {
+    let total = 0;
+    filteredBuildings.forEach((b) => {
+      total += getBuildingApartments(b.id).length;
+    });
+    return total;
+  }, [filteredBuildings]);
+
+  const roomsCountInFiltered = useMemo(() => {
+    let total = 0;
+    filteredBuildings.forEach((b) => {
+      const apts = getBuildingApartments(b.id);
+      apts.forEach((a) => {
+        total += getApartmentRooms(a.id).length;
+      });
+    });
+    return total;
+  }, [filteredBuildings]);
+
+  const viewOnlyTitle = !canEditThisDorm ? t.viewOnly : '';
+
   return (
-    <div className="buildings-page">
-      <div className="page-header">
-        <div>
-          <h1>{t.title}</h1>
-          <p>{t.subtitle}</p>
-        </div>
-      </div>
+    <div className="bp-shell">
+      <div className="bp-top">
+        <div className="bp-titleRow">
+          <div className="bp-titleBlock">
+            <h1 className="bp-title">{t.title}</h1>
+            <div className="bp-sub">
+              <span className="bp-subText">{t.subtitle}</span>
+              <span className="bp-dot">•</span>
+              <span className="bp-tip" title={viewOnlyTitle}>
+                <Users size={14} />
+                {t.dragTip}
+              </span>
+              {!canEditThisDorm && <span className="bp-viewOnly">{t.viewOnly}</span>}
+            </div>
+          </div>
 
-      <div className="top-controls">
-        <div className="region-select">
-          <label>{t.chooseDorm}</label>
-          <select
-            value={effectiveRegionId || ''}
-            onChange={(e) => {
-              const next = e.target.value;
-              setSelectedRegionId(next);
-              setSelectedBuilding(null);
-              setSelectedApartment(null);
-              setExpandedBuildings({});
-              setSearchQuery('');
-            }}
-            disabled={!isCentralAdmin()}
-          >
-            {selectableRegions.map(r => (
-              <option key={r.id} value={r.id}>
-                {language === 'he' ? r.name : r.nameEn}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="search-bar">
-          <Search size={18} />
-          <input
-            type="text"
-            placeholder={t.search}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-        </div>
-      </div>
-
-      {isCentralAdmin() && (
-        <div className="chips">
-          {selectableRegions.slice(0, 8).map(r => (
-            <button
-              key={r.id}
-              className={`chip ${effectiveRegionId === r.id ? 'active' : ''}`}
-              onClick={() => {
-                setSelectedRegionId(r.id);
-                setSelectedBuilding(null);
-                setSelectedApartment(null);
-                setExpandedBuildings({});
-                setSearchQuery('');
-              }}
-              title={language === 'he' ? r.name : r.nameEn}
-            >
-              {language === 'he' ? r.name : r.nameEn}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className="content-grid">
-        {/* LEFT: Buildings */}
-        <div className="buildings-list">
-          <div className="region-group">
-            <h3 className="region-title">
-              {language === 'he' ? selectedRegionObj?.name : selectedRegionObj?.nameEn}
-            </h3>
-
-            {filteredBuildings.map(building => {
-              const buildingApartments = getBuildingApartments(building.id);
-              const isExpanded = expandedBuildings[building.id];
-
-              return (
-                <div key={building.id} className="building-card">
-                  <div
-                    className={`building-header ${selectedBuilding === building.id ? 'selected' : ''}`}
-                    onClick={() => toggleBuilding(building.id)}
-                  >
-                    <div className="building-icon">
-                      <Building2 size={20} />
-                    </div>
-                    <div className="building-info">
-                      <span className="building-name">{building.name}</span>
-                      <span className="building-meta">
-                        {building.floors} {t.floor} • {buildingApartments.length} {t.apartment}
-                      </span>
-                    </div>
-                    {isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
-                  </div>
-
-                  {isExpanded && (
-                    <div className="apartments-list">
-                      {buildingApartments.map(apt => (
-                        <div
-                          key={apt.id}
-                          className={`apartment-item ${apt.isReserved ? 'reserved' : ''} ${selectedApartment === apt.id ? 'selected' : ''}`}
-                          onClick={() => setSelectedApartment(apt.id)}
-                        >
-                          <Home size={16} />
-                          <span>{t.apartment} {apt.number}</span>
-                          <span className="floor-badge">{t.floor} {apt.floor}</span>
-                          {apt.isReserved && <Star size={14} className="reserved-icon" />}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+          <div className="bp-contextPills">
+            <span className="bp-pill">
+              {language === 'he' ? effectiveOfficeObj?.name : effectiveOfficeObj?.nameEn}
+            </span>
+            <span className="bp-pill bp-pillPrimary">
+              {language === 'he' ? effectiveDormObj?.name : effectiveDormObj?.nameEn}
+            </span>
           </div>
         </div>
 
-        {/* RIGHT: Allocation panel */}
-        <div className="details-panel">
-          {selectedApartment ? (
-            <div className="apartment-details">
-              {(() => {
-                const apt = apartments.find(a => a.id === selectedApartment);
-                const aptRooms = getApartmentRooms(selectedApartment);
-                const building = buildings.find(b => b.id === apt?.buildingId);
-                const region = regions.find(r => r.id === apt?.regionId);
+        <div className="bp-controls">
+          <div className="bp-selectCard">
+            <div className="bp-selectGrid">
+              <div className="bp-field">
+                <label>{t.chooseOffice}</label>
+                <select
+                  value={effectiveOfficeId || ''}
+                  onChange={(e) => handleOfficeChange(e.target.value)}
+                >
+                  {dormOffices.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {language === 'he' ? o.name : o.nameEn}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="bp-field">
+                <label>{t.chooseDorm}</label>
+                <select
+                  value={effectiveDormId || ''}
+                  onChange={(e) => handleDormChange(e.target.value)}
+                >
+                  {dormsInOffice.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {language === 'he' ? d.name : d.nameEn}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div className="bp-searchCard">
+            <div className="bp-search">
+              <Search size={18} />
+              <input
+                type="text"
+                placeholder={t.search}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+              {searchQuery?.trim() && (
+                <button className="bp-clear" onClick={() => setSearchQuery('')} title="Clear">
+                  <X size={16} />
+                </button>
+              )}
+            </div>
+
+            <div className="bp-stats">
+              <div className="bp-stat">
+                <span className="bp-statLabel">{t.statsBuildings}</span>
+                <span className="bp-statValue">{filteredBuildings.length}</span>
+              </div>
+              <div className="bp-stat">
+                <span className="bp-statLabel">{t.statsApartments}</span>
+                <span className="bp-statValue">{apartmentsCountInFiltered}</span>
+              </div>
+              <div className="bp-stat">
+                <span className="bp-statLabel">{t.statsRooms}</span>
+                <span className="bp-statValue">{roomsCountInFiltered}</span>
+              </div>
+              <div className="bp-stat bp-statAccent">
+                <span className="bp-statLabel">{t.statsAssigned}</span>
+                <span className="bp-statValue">{assignedCount}</span>
+              </div>
+              <div className="bp-stat">
+                <span className="bp-statLabel">{t.statsUnassigned}</span>
+                <span className="bp-statValue">{unassignedCount}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {isCentralAdmin() && (
+          <div className="bp-chipRow">
+            {dormsInOffice.slice(0, 14).map((d) => (
+              <button
+                key={d.id}
+                className={`bp-chip ${effectiveDormId === d.id ? 'active' : ''}`}
+                onClick={() => handleDormChange(d.id)}
+                title={language === 'he' ? d.name : d.nameEn}
+              >
+                {language === 'he' ? d.name : d.nameEn}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="bp-grid">
+        <div className="bp-left">
+          <div className="bp-panel">
+            <div className="bp-panelHeader">
+              <div className="bp-panelHeaderLeft">
+                <Building2 size={18} />
+                <span className="bp-panelTitle">{language === 'he' ? 'רשימת בניינים' : 'Buildings list'}</span>
+              </div>
+              <span className="bp-panelMeta">
+                {filteredBuildings.length} {language === 'he' ? 'פריטים' : 'items'}
+              </span>
+            </div>
+
+            <div className="bp-panelBody">
+              {filteredBuildings.map((building) => {
+                const buildingApartments = getBuildingApartments(building.id);
+                const isExpanded = expandedBuildings[building.id];
 
                 return (
-                  <>
-                    <div className="details-header">
-                      <h3>{t.apartment} {apt?.number}</h3>
-                      <p>{building?.name} • {language === 'he' ? region?.name : region?.nameEn}</p>
-                      {apt?.isReserved && (
-                        <span className="reserved-badge">
-                          <Star size={14} /> {t.reserved}
-                        </span>
-                      )}
-                    </div>
+                  <div key={building.id} className="bp-bldCard">
+                    <button
+                      className={`bp-bldHead ${selectedBuilding === building.id ? 'selected' : ''}`}
+                      onClick={() => toggleBuilding(building.id)}
+                    >
+                      <div className="bp-bldIcon">
+                        <Building2 size={18} />
+                      </div>
+                      <div className="bp-bldInfo">
+                        <div className="bp-bldName">{building.name}</div>
+                        <div className="bp-bldSub">
+                          <span>
+                            {building.floors ?? '-'} {t.floor}
+                          </span>
+                          <span className="bp-dotSmall">•</span>
+                          <span>
+                            {buildingApartments.length} {t.apartment}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="bp-bldChevron">{isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}</div>
+                    </button>
 
-                    <div className="rooms-grid">
-                      {aptRooms.map(room => {
-                        const roomStudents = getRoomStudents(room.id);
-                        const full = roomStudents.length >= room.capacity;
-
-                        return (
-                          <div
-                            key={room.id}
-                            className={`room-card ${full ? 'room-full' : ''}`}
-                            onDragOver={(e) => {
-                              e.preventDefault();
-                            }}
-                            onDrop={() => {
-                              if (!draggingStudentId) return;
-                              if (!canDropIntoRoom(room)) return;
-                              assignStudentToRoom(draggingStudentId, room.id);
-                              setDraggingStudentId(null);
-                            }}
+                    {isExpanded && (
+                      <div className="bp-aptList">
+                        {buildingApartments.map((apt) => (
+                          <button
+                            key={apt.id}
+                            className={`bp-aptItem ${apt.isReserved ? 'reserved' : ''} ${
+                              selectedApartment === apt.id ? 'selected' : ''
+                            }`}
+                            onClick={() => setSelectedApartment(apt.id)}
                           >
-                            <div className="room-header">
-                              <div className="room-header-left">
-                                <span className="room-name">{room.name}</span>
-                                <span className="room-capacity">
-                                  {t.capacity}: {roomStudents.length}/{room.capacity}
-                                </span>
-                              </div>
-
-                              <button
-                                className="add-btn"
-                                onClick={() => setAddModal({ open: true, roomId: room.id, query: '' })}
-                                title={t.addStudent}
-                              >
-                                <Plus size={16} />
-                                <span>{t.addStudent}</span>
-                              </button>
+                            <div className="bp-aptLeft">
+                              <Home size={16} />
+                              <span className="bp-aptText">
+                                {t.apartment} {apt.number}
+                              </span>
+                              {apt.isReserved && <Star size={14} className="bp-aptStar" />}
                             </div>
 
-                            <div className="room-students">
-                              {roomStudents.length > 0 ? (
-                                roomStudents.map(student => (
-                                  <div
-                                    key={student.id}
-                                    className="student-row"
-                                    draggable
-                                    onDragStart={() => setDraggingStudentId(student.id)}
-                                  >
-                                    <div className="student-left">
+                            <span className="bp-floorBadge">
+                              {t.floor} {apt.floor ?? '-'}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        <div className="bp-right">
+          <div className="bp-panel bp-panelBig">
+            {selectedApartment ? (
+              <>
+                <div className="bp-workHeader">
+                  <div className="bp-workHeaderTop">
+                    <div className="bp-workTitle">
+                      <div className="bp-workTitleLine">
+                        <span className="bp-workH">{t.apartment} {selectedApartmentObj?.number}</span>
+                        {selectedApartmentObj?.isReserved && (
+                          <span className="bp-reservedBadge">
+                            <Star size={14} />
+                            {t.reserved}
+                          </span>
+                        )}
+                        {!canEditThisDorm && <span className="bp-viewPill">{t.viewOnly}</span>}
+                      </div>
+                      <div className="bp-breadcrumb">
+                        <span className="bp-breadItem">{selectedBuildingObj?.name}</span>
+                        <span className="bp-dotSmall">•</span>
+                        <span className="bp-breadItem">{language === 'he' ? effectiveDormObj?.name : effectiveDormObj?.nameEn}</span>
+                      </div>
+                    </div>
+
+                    {swapMode.active && canEditThisDorm && (
+                      <div className="bp-swapBanner">
+                        <div className="bp-swapLeft">
+                          <ArrowRightLeft size={16} />
+                          <span>{t.swapHint}</span>
+                        </div>
+                        <button
+                          className="bp-swapCancel"
+                          onClick={() => setSwapMode({ active: false, studentId: null, fromRoomId: null })}
+                        >
+                          {t.cancel}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bp-workBody">
+                  <div className="bp-roomsGrid">
+                    {selectedApartmentRooms.map((room) => {
+                      const roomStudents = getRoomStudents(room.id);
+                      const cap = Number(room.capacity) || 0;
+                      const count = roomStudents.length;
+                      const full = count >= cap;
+                      const pct = cap > 0 ? Math.min(100, Math.round((count / cap) * 100)) : 0;
+
+                      return (
+                        <div
+                          key={room.id}
+                          className={`bp-roomCard ${full ? 'full' : ''} ${!canEditThisDorm ? 'viewOnly' : ''}`}
+                          onDragOver={(e) => {
+                            if (!canEditThisDorm) return;
+                            e.preventDefault();
+                          }}
+                          onDrop={() => {
+                            if (!canEditThisDorm) return;
+                            if (!draggingStudentId) return;
+                            if (!canDropIntoRoom(room)) return;
+                            assignStudentToRoom(draggingStudentId, room.id);
+                            setDraggingStudentId(null);
+                          }}
+                          title={!canEditThisDorm ? t.viewOnly : ''}
+                        >
+                          <div className="bp-roomTop">
+                            <div className="bp-roomTitle">
+                              <span className="bp-roomName">{room.name}</span>
+                              <span className="bp-roomCap">
+                                {t.capacity}: {count}/{cap}
+                                {full ? ` • ${t.roomFull}` : ''}
+                              </span>
+                            </div>
+
+                            <button
+                              className="bp-addBtn"
+                              onClick={() => {
+                                if (!canEditThisDorm) return;
+                                setAddModal({ open: true, roomId: room.id, query: '' });
+                              }}
+                              title={!canEditThisDorm ? t.viewOnly : t.addStudent}
+                              disabled={!canEditThisDorm}
+                            >
+                              <Plus size={16} />
+                              <span className="bp-addBtnText">{t.addStudent}</span>
+                            </button>
+                          </div>
+
+                          <div className="bp-meter">
+                            <div className="bp-meterTrack">
+                              <div className="bp-meterFill" style={{ width: `${pct}%` }} />
+                            </div>
+                            <span className="bp-meterText">{pct}%</span>
+                          </div>
+
+                          <div className="bp-roomBody">
+                            {roomStudents.length > 0 ? (
+                              roomStudents.map((student) => (
+                                <div
+                                  key={student.id}
+                                  className={`bp-studentRow ${
+                                    swapMode.active && swapMode.studentId === student.id ? 'swapSelected' : ''
+                                  } ${!canEditThisDorm ? 'viewOnly' : ''}`}
+                                  draggable={canEditThisDorm}
+                                  onDragStart={() => {
+                                    if (!canEditThisDorm) return;
+                                    setDraggingStudentId(student.id);
+                                  }}
+                                  onClick={() => {
+                                    if (!canEditThisDorm) return;
+                                    if (!swapMode.active) return;
+
+                                    if (!swapMode.studentId) {
+                                      setSwapMode({ active: true, studentId: student.id, fromRoomId: room.id });
+                                      return;
+                                    }
+
+                                    if (swapMode.studentId === student.id) return;
+
+                                    swapStudents(swapMode.studentId, swapMode.fromRoomId, student.id, room.id);
+                                    setSwapMode({ active: false, studentId: null, fromRoomId: null });
+                                  }}
+                                  title={!canEditThisDorm ? t.viewOnly : ''}
+                                >
+                                  <div className="bp-studentLeft">
+                                    <div className="bp-avatar">
                                       <Users size={14} />
-                                      <span>{student.firstName} {student.lastName}</span>
                                     </div>
+                                    <span className="bp-studentName">
+                                      {student.firstName} {student.lastName}
+                                    </span>
+                                  </div>
+
+                                  <div className="bp-studentActions">
                                     <button
-                                      className="remove-btn"
-                                      onClick={() => unassignStudent(student.id)}
-                                      title={t.remove}
+                                      className="bp-iconBtn"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (!canEditThisDorm) return;
+                                        setMoveModal({
+                                          open: true,
+                                          studentId: student.id,
+                                          fromRoomId: room.id,
+                                          toRoomId: '',
+                                          query: '',
+                                        });
+                                      }}
+                                      title={!canEditThisDorm ? t.viewOnly : t.updateMove}
+                                      disabled={!canEditThisDorm}
                                     >
-                                      <X size={14} />
+                                      <Pencil size={16} />
+                                    </button>
+
+                                    <button
+                                      className="bp-iconBtn"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (!canEditThisDorm) return;
+                                        setSwapMode((prev) => ({
+                                          active: !prev.active,
+                                          studentId: !prev.active ? student.id : null,
+                                          fromRoomId: !prev.active ? room.id : null,
+                                        }));
+                                      }}
+                                      title={!canEditThisDorm ? t.viewOnly : t.swap}
+                                      disabled={!canEditThisDorm}
+                                    >
+                                      <ArrowRightLeft size={16} />
+                                    </button>
+
+                                    <button
+                                      className="bp-iconBtn danger"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (!canEditThisDorm) return;
+                                        unassignStudent(student.id);
+                                      }}
+                                      title={!canEditThisDorm ? t.viewOnly : t.remove}
+                                      disabled={!canEditThisDorm}
+                                    >
+                                      <X size={16} />
                                     </button>
                                   </div>
-                                ))
-                              ) : (
-                                <div className="empty-drop">
-                                  <span className="empty-label">{t.empty}</span>
-                                  <span className="drop-hint">{t.dropHere}</span>
                                 </div>
-                              )}
-                            </div>
+                              ))
+                            ) : (
+                              <div className="bp-emptyDrop">
+                                <div className="bp-emptyTop">{t.empty}</div>
+                                <div className="bp-emptySub">{t.dropHere}</div>
+                              </div>
+                            )}
                           </div>
-                        );
-                      })}
-                    </div>
-                  </>
-                );
-              })()}
-            </div>
-          ) : (
-            <div className="empty-state">
-              <Building2 size={48} />
-              <p>{t.selectBuilding}</p>
-            </div>
-          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="bp-emptyState">
+                <div className="bp-emptyIcon">
+                  <Building2 size={44} />
+                </div>
+                <div className="bp-emptyText">{t.selectBuilding}</div>
+                <div className="bp-emptySubText">
+                  {language === 'he'
+                    ? 'בחרי בניין ואז דירה — ותראי את החדרים והשיוכים.'
+                    : 'Pick a building and then an apartment to manage rooms.'}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* ✅ Add Student Modal */}
       {addModal.open && (
-        <div className="modal-backdrop" onClick={() => setAddModal({ open: false, roomId: null, query: '' })}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h4>{t.pickStudent}</h4>
+        <div
+          className="bp-modalBackdrop"
+          onClick={() => setAddModal({ open: false, roomId: null, query: '' })}
+        >
+          <div className="bp-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="bp-modalHeader">
+              <div className="bp-modalTitle">
+                <Users size={18} />
+                <h4>{t.pickStudent}</h4>
+              </div>
               <button
-                className="icon-btn"
+                className="bp-closeBtn"
                 onClick={() => setAddModal({ open: false, roomId: null, query: '' })}
                 title={t.close}
               >
@@ -391,32 +740,45 @@ function BuildingsPage({ language }) {
               </button>
             </div>
 
-            <div className="modal-search">
+            <div className="bp-modalSearch">
               <Search size={16} />
               <input
                 value={addModal.query}
-                onChange={(e) => setAddModal(prev => ({ ...prev, query: e.target.value }))}
+                onChange={(e) => setAddModal((prev) => ({ ...prev, query: e.target.value }))}
                 placeholder={language === 'he' ? 'חיפוש סטודנט/ית...' : 'Search student...'}
               />
             </div>
 
-            <div className="modal-list">
+            <div className="bp-modalList">
               {filteredUnassigned.length === 0 ? (
-                <div className="modal-empty">
+                <div className="bp-modalEmpty">
                   <span>{language === 'he' ? 'אין סטודנטים פנויים לשיוך' : 'No available students'}</span>
                 </div>
               ) : (
-                filteredUnassigned.map(s => (
+                filteredUnassigned.map((s) => (
                   <button
                     key={s.id}
-                    className="modal-item"
+                    className="bp-modalItem"
                     onClick={() => {
+                      if (!canEditThisDorm) return;
+                      const targetRoom = rooms.find((r) => r.id === addModal.roomId);
+                      if (!targetRoom) return;
+                      if (!canDropIntoRoom(targetRoom)) return;
                       assignStudentToRoom(s.id, addModal.roomId);
                       setAddModal({ open: false, roomId: null, query: '' });
                     }}
+                    disabled={!canEditThisDorm}
+                    title={!canEditThisDorm ? t.viewOnly : ''}
                   >
-                    <Users size={14} />
-                    <span>{s.firstName} {s.lastName}</span>
+                    <div className="bp-modalItemLeft">
+                      <div className="bp-avatar">
+                        <Users size={14} />
+                      </div>
+                      <span>
+                        {s.firstName} {s.lastName}
+                      </span>
+                    </div>
+                    <span className="bp-modalChevron">+</span>
                   </button>
                 ))
               )}
@@ -425,324 +787,964 @@ function BuildingsPage({ language }) {
         </div>
       )}
 
-      <style>{`
-        .buildings-page { padding: 24px; }
-        .page-header { margin-bottom: 18px; }
-        .page-header h1 { font-size: 24px; font-weight: 700; margin-bottom: 4px; }
-        .page-header p { color: #64748b; }
+      {moveModal.open && (
+        <div
+          className="bp-modalBackdrop"
+          onClick={() => setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' })}
+        >
+          <div className="bp-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="bp-modalHeader">
+              <div className="bp-modalTitle">
+                <Pencil size={18} />
+                <h4>{t.updateMove}</h4>
+              </div>
+              <button
+                className="bp-closeBtn"
+                onClick={() => setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' })}
+                title={t.close}
+              >
+                <X size={18} />
+              </button>
+            </div>
 
-        .top-controls {
-          display: grid;
-          grid-template-columns: 1fr 1.5fr;
-          gap: 16px;
+            <div className="bp-modalSearch">
+              <Search size={16} />
+              <input
+                value={moveModal.query}
+                onChange={(e) => setMoveModal((prev) => ({ ...prev, query: e.target.value }))}
+                placeholder={t.searchRoom}
+              />
+            </div>
+
+            <div className="bp-modalList">
+              {filteredRoomsForMove.length === 0 ? (
+                <div className="bp-modalEmpty">
+                  <span>{language === 'he' ? 'אין תוצאות' : 'No results'}</span>
+                </div>
+              ) : (
+                filteredRoomsForMove.map((r) => {
+                  const apt = apartments.find((a) => a.id === r.apartmentId);
+                  const bld = buildings.find((b) => b.id === r.buildingId);
+                  const count = getRoomStudents(r.id).length;
+                  const full = count >= (Number(r.capacity) || 0);
+
+                  return (
+                    <button
+                      key={r.id}
+                      className={`bp-modalItem ${full ? 'disabled' : ''} ${moveModal.toRoomId === r.id ? 'active' : ''}`}
+                      onClick={() => {
+                        if (!canEditThisDorm) return;
+                        if (full) return;
+                        setMoveModal((prev) => ({ ...prev, toRoomId: r.id }));
+                      }}
+                      disabled={full || !canEditThisDorm}
+                      title={!canEditThisDorm ? t.viewOnly : (full ? t.roomFull : r.id)}
+                    >
+                      <div className="bp-modalItemLeft">
+                        <Home size={14} />
+                        <span className="bp-modalRoom">
+                          {bld?.name || ''} • {t.apartment} {apt?.number ?? '-'} • {r.name}
+                        </span>
+                      </div>
+                      <span className="bp-modalCap">
+                        {count}/{r.capacity}
+                      </span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="bp-modalFooter">
+              <button
+                className="bp-btn secondary"
+                onClick={() => setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' })}
+              >
+                {t.cancel}
+              </button>
+              <button
+                className="bp-btn primary"
+                disabled={!moveModal.toRoomId || !canEditThisDorm}
+                onClick={() => {
+                  if (!canEditThisDorm) return;
+                  if (!moveModal.studentId || !moveModal.toRoomId) return;
+                  assignStudentToRoom(moveModal.studentId, moveModal.toRoomId);
+                  setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' });
+                }}
+                title={!canEditThisDorm ? t.viewOnly : ''}
+              >
+                {t.confirm}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <style>{`
+        :root{
+          --bg: #f6f8fc;
+          --card: #ffffff;
+          --text: #0f172a;
+          --muted: #64748b;
+          --border: rgba(15, 23, 42, 0.10);
+          --shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+          --shadow2: 0 6px 18px rgba(15, 23, 42, 0.08);
+          --primary: #2563eb;
+          --primary2: rgba(37, 99, 235, 0.12);
+          --danger: #b91c1c;
+          --dangerBg: rgba(185, 28, 28, 0.10);
+          --warn: #b45309;
+          --warnBg: rgba(180, 83, 9, 0.14);
+          --radius: 16px;
+          --radius2: 12px;
+        }
+
+        .bp-shell{
+          padding: 18px;
+          background: var(--bg);
+          min-height: calc(100vh - 40px);
+        }
+
+        .bp-top{
+          position: sticky;
+          top: 0;
+          z-index: 5;
+          background: linear-gradient(to bottom, rgba(246,248,252,1), rgba(246,248,252,0.88));
+          backdrop-filter: blur(8px);
+          padding-bottom: 14px;
           margin-bottom: 14px;
         }
 
-        .region-select {
-          background: white;
-          padding: 12px 16px;
-          border-radius: 12px;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-        }
-        .region-select label { font-size: 12px; color: #64748b; font-weight: 600; }
-        .region-select select {
-          border: 1px solid #e5e7eb;
-          border-radius: 10px;
-          padding: 10px;
-          font-family: inherit;
-          font-size: 14px;
-          outline: none;
-        }
-        .region-select select:disabled { opacity: 0.8; }
-
-        .search-bar {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          background: white;
-          padding: 12px 16px;
-          border-radius: 12px;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }
-        .search-bar svg { color: #94a3b8; }
-        .search-bar input {
-          flex: 1;
-          border: none;
-          outline: none;
-          font-size: 15px;
-          font-family: inherit;
-        }
-
-        .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
-        .chip {
-          border: 1px solid #e5e7eb;
-          background: white;
-          padding: 8px 10px;
-          border-radius: 999px;
-          cursor: pointer;
-          font-size: 13px;
-        }
-        .chip.active { background: #dbeafe; border-color: #3d9fe0; font-weight: 600; }
-
-        .content-grid { display: grid; grid-template-columns: 1fr 1.5fr; gap: 24px; }
-        .buildings-list { display: flex; flex-direction: column; gap: 20px; }
-
-        .region-group {
-          background: white;
-          border-radius: 16px;
-          padding: 16px;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }
-
-        .region-title {
-          font-size: 14px;
-          font-weight: 600;
-          color: #64748b;
-          margin-bottom: 12px;
-          padding-bottom: 8px;
-          border-bottom: 1px solid #e5e7eb;
-        }
-
-        .building-card { margin-bottom: 8px; }
-
-        .building-header {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          padding: 12px;
-          background: #f8fafc;
-          border-radius: 10px;
-          cursor: pointer;
-          transition: all 0.2s;
-        }
-        .building-header:hover { background: #f1f5f9; }
-        .building-header.selected { background: #dbeafe; border: 1px solid #3d9fe0; }
-
-        .building-icon {
-          width: 40px; height: 40px;
-          background: #dbeafe; color: #2563eb;
-          border-radius: 10px;
-          display: flex; align-items: center; justify-content: center;
-        }
-        .building-info { flex: 1; }
-        .building-name { display: block; font-weight: 600; }
-        .building-meta { font-size: 12px; color: #64748b; }
-
-        .apartments-list {
-          padding: 8px 0 0 12px;
-          display: flex;
-          flex-direction: column;
-          gap: 4px;
-        }
-
-        .apartment-item {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          padding: 10px 12px;
-          background: white;
-          border: 1px solid #e5e7eb;
-          border-radius: 8px;
-          cursor: pointer;
-          font-size: 14px;
-          transition: all 0.2s;
-        }
-        .apartment-item:hover { border-color: #3d9fe0; }
-        .apartment-item.selected { background: #dbeafe; border-color: #3d9fe0; }
-        .apartment-item.reserved { background: #fef9c3; border-color: #fcd34d; }
-
-        .floor-badge {
-          margin-right: auto;
-          font-size: 11px;
-          color: #64748b;
-          background: #f1f5f9;
-          padding: 2px 8px;
-          border-radius: 4px;
-        }
-        .reserved-icon { color: #f59e0b; }
-
-        .details-panel {
-          background: white;
-          border-radius: 16px;
-          padding: 24px;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-          min-height: 400px;
-        }
-
-        .details-header {
-          margin-bottom: 24px;
-          padding-bottom: 16px;
-          border-bottom: 1px solid #e5e7eb;
-        }
-        .details-header h3 { font-size: 20px; margin-bottom: 4px; }
-        .details-header p { color: #64748b; font-size: 14px; }
-
-        .reserved-badge {
-          display: inline-flex;
-          align-items: center;
-          gap: 4px;
-          margin-top: 8px;
-          padding: 4px 12px;
-          background: #fef9c3;
-          color: #b45309;
-          border-radius: 20px;
-          font-size: 13px;
-          font-weight: 500;
-        }
-
-        .rooms-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
-
-        .room-card { border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; }
-        .room-card.room-full { outline: 2px solid rgba(220,38,38,0.15); }
-
-        .room-header {
-          display: flex;
+        .bp-titleRow{
+          display:flex;
+          align-items:flex-end;
           justify-content: space-between;
-          align-items: center;
-          padding: 12px;
-          background: #f8fafc;
-          border-bottom: 1px solid #e5e7eb;
-          gap: 10px;
+          gap: 12px;
+          margin-bottom: 12px;
         }
-        .room-header-left { display: flex; flex-direction: column; gap: 2px; }
-        .room-name { font-weight: 700; }
-        .room-capacity { font-size: 12px; color: #64748b; }
+        .bp-titleBlock{ display:flex; flex-direction:column; gap:6px; }
+        .bp-title{
+          margin:0;
+          font-size: 24px;
+          letter-spacing: -0.02em;
+          color: var(--text);
+          font-weight: 800;
+        }
+        .bp-sub{
+          display:flex;
+          align-items:center;
+          gap:10px;
+          color: var(--muted);
+          font-size: 13px;
+        }
+        .bp-subText{ font-weight: 600; }
+        .bp-dot{ opacity: .6; }
+        .bp-tip{
+          display:inline-flex;
+          align-items:center;
+          gap:6px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          background: rgba(15, 23, 42, 0.04);
+          border: 1px solid var(--border);
+        }
+        .bp-viewOnly{
+          display:inline-flex;
+          align-items:center;
+          padding: 6px 10px;
+          border-radius: 999px;
+          background: rgba(180, 83, 9, 0.14);
+          border: 1px solid rgba(180, 83, 9, 0.25);
+          color: #92400e;
+          font-weight: 900;
+          font-size: 12px;
+        }
 
-        .add-btn {
-          display: inline-flex;
-          align-items: center;
-          gap: 6px;
-          border: 1px solid #e5e7eb;
-          background: white;
-          padding: 8px 10px;
-          border-radius: 10px;
-          cursor: pointer;
+        .bp-contextPills{
+          display:flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          justify-content: flex-end;
+        }
+        .bp-pill{
+          display:inline-flex;
+          align-items:center;
+          padding: 8px 12px;
+          border-radius: 999px;
+          background: rgba(15, 23, 42, 0.04);
+          border: 1px solid var(--border);
+          color: var(--text);
+          font-weight: 700;
           font-size: 13px;
           white-space: nowrap;
         }
-        .add-btn:hover { border-color: #3d9fe0; }
-
-        .room-students { padding: 12px; min-height: 90px; }
-
-        .student-row {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 8px;
-          padding: 10px;
-          background: #f8fafc;
-          border-radius: 10px;
-          margin-bottom: 8px;
-          font-size: 14px;
-          border: 1px solid transparent;
+        .bp-pillPrimary{
+          background: var(--primary2);
+          border-color: rgba(37, 99, 235, 0.25);
+          color: #1d4ed8;
         }
-        .student-row:active { cursor: grabbing; }
-        .student-row:hover { border-color: #e5e7eb; }
 
-        .student-left { display: inline-flex; align-items: center; gap: 8px; }
-
-        .remove-btn {
-          border: none;
-          background: transparent;
-          cursor: pointer;
-          color: #94a3b8;
-          padding: 4px;
-          border-radius: 8px;
+        .bp-controls{
+          display:grid;
+          grid-template-columns: 1.1fr 1.6fr;
+          gap: 14px;
+          align-items: stretch;
         }
-        .remove-btn:hover { background: #eef2ff; color: #1d4ed8; }
 
-        .empty-drop { display: flex; flex-direction: column; gap: 6px; }
-        .empty-label { color: #94a3b8; font-style: italic; }
-        .drop-hint { font-size: 12px; color: #64748b; }
+        .bp-selectCard,
+        .bp-searchCard{
+          background: var(--card);
+          border: 1px solid var(--border);
+          border-radius: var(--radius);
+          box-shadow: var(--shadow2);
+          padding: 12px;
+        }
 
-        .empty-state {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          height: 100%;
-          color: #94a3b8;
+        .bp-selectGrid{
+          display:grid;
+          grid-template-columns: 1fr 1fr;
           gap: 12px;
         }
 
-        /* Modal */
-        .modal-backdrop {
-          position: fixed;
-          inset: 0;
-          background: rgba(15, 23, 42, 0.45);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          z-index: 50;
-          padding: 20px;
+        .bp-field{ display:flex; flex-direction:column; gap:6px; }
+        .bp-field label{
+          font-size: 12px;
+          color: var(--muted);
+          font-weight: 700;
         }
-        .modal {
-          width: 520px;
-          max-width: 95vw;
-          background: white;
-          border-radius: 16px;
-          box-shadow: 0 20px 60px rgba(0,0,0,0.25);
-          overflow: hidden;
-        }
-        .modal-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding: 14px 16px;
-          border-bottom: 1px solid #e5e7eb;
-        }
-        .modal-header h4 { margin: 0; font-size: 15px; }
-        .icon-btn {
-          border: none;
-          background: transparent;
-          cursor: pointer;
-          padding: 6px;
-          border-radius: 10px;
-        }
-        .icon-btn:hover { background: #f1f5f9; }
-
-        .modal-search {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          padding: 12px 16px;
-          border-bottom: 1px solid #e5e7eb;
-        }
-        .modal-search input {
-          flex: 1;
-          border: none;
-          outline: none;
+        .bp-field select{
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          padding: 10px 12px;
           font-family: inherit;
           font-size: 14px;
-        }
-        .modal-list {
-          max-height: 360px;
-          overflow: auto;
-          padding: 10px;
-        }
-        .modal-item {
-          width: 100%;
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          padding: 12px;
-          border: 1px solid #e5e7eb;
+          outline: none;
           background: white;
-          border-radius: 12px;
+          color: var(--text);
+        }
+
+        .bp-search{
+          display:flex;
+          align-items:center;
+          gap: 10px;
+          border: 1px solid var(--border);
+          background: #fff;
+          border-radius: 14px;
+          padding: 10px 12px;
+        }
+        .bp-search svg{ color: #94a3b8; }
+        .bp-search input{
+          border: none;
+          outline: none;
+          flex: 1;
+          font-size: 14px;
+          font-family: inherit;
+          color: var(--text);
+        }
+        .bp-clear{
+          border:none;
+          background: rgba(15,23,42,0.04);
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          padding: 6px;
           cursor: pointer;
-          margin-bottom: 8px;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+        }
+        .bp-clear:hover{ background: rgba(15,23,42,0.06); }
+
+        .bp-stats{
+          display:grid;
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+          gap: 10px;
+          margin-top: 10px;
+        }
+        .bp-stat{
+          border: 1px solid var(--border);
+          background: rgba(15, 23, 42, 0.02);
+          border-radius: 14px;
+          padding: 10px 10px;
+          display:flex;
+          flex-direction:column;
+          gap: 4px;
+        }
+        .bp-statAccent{
+          background: var(--primary2);
+          border-color: rgba(37, 99, 235, 0.25);
+        }
+        .bp-statLabel{
+          font-size: 11px;
+          color: var(--muted);
+          font-weight: 700;
+        }
+        .bp-statValue{
+          font-size: 18px;
+          font-weight: 900;
+          color: var(--text);
+          letter-spacing: -0.02em;
+        }
+
+        .bp-chipRow{
+          margin-top: 12px;
+          display:flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .bp-chip{
+          border: 1px solid var(--border);
+          background: var(--card);
+          border-radius: 999px;
+          padding: 8px 12px;
+          cursor: pointer;
+          font-size: 13px;
+          font-weight: 700;
+          color: var(--text);
+        }
+        .bp-chip:hover{
+          border-color: rgba(37, 99, 235, 0.25);
+          background: rgba(37, 99, 235, 0.06);
+        }
+        .bp-chip.active{
+          background: var(--primary2);
+          border-color: rgba(37, 99, 235, 0.25);
+          color: #1d4ed8;
+        }
+
+        .bp-grid{
+          display:grid;
+          grid-template-columns: 1fr 1.6fr;
+          gap: 16px;
+        }
+
+        .bp-panel{
+          background: var(--card);
+          border: 1px solid var(--border);
+          border-radius: var(--radius);
+          box-shadow: var(--shadow);
+          overflow: hidden;
+        }
+        .bp-panelBig{ min-height: 520px; }
+
+        .bp-panelHeader{
+          display:flex;
+          align-items:center;
+          justify-content: space-between;
+          padding: 12px 14px;
+          border-bottom: 1px solid var(--border);
+          background: rgba(15, 23, 42, 0.02);
+        }
+        .bp-panelHeaderLeft{
+          display:flex;
+          align-items:center;
+          gap: 10px;
+          color: var(--text);
+          font-weight: 900;
+        }
+        .bp-panelTitle{ font-size: 13px; }
+        .bp-panelMeta{
+          font-size: 12px;
+          color: var(--muted);
+          font-weight: 700;
+        }
+
+        .bp-panelBody{
+          padding: 12px;
+          max-height: calc(100vh - 320px);
+          overflow: auto;
+        }
+
+        .bp-bldCard{ margin-bottom: 10px; }
+        .bp-bldHead{
+          width: 100%;
+          display:flex;
+          align-items:center;
+          gap: 12px;
+          padding: 12px;
+          border-radius: 14px;
+          border: 1px solid var(--border);
+          background: #fff;
+          cursor: pointer;
           text-align: left;
         }
-        .modal-item:hover { border-color: #3d9fe0; background: #f8fafc; }
-        .modal-empty { padding: 20px; color: #64748b; }
+        .bp-bldHead:hover{
+          border-color: rgba(37, 99, 235, 0.25);
+          background: rgba(37,99,235,0.03);
+        }
+        .bp-bldHead.selected{
+          background: var(--primary2);
+          border-color: rgba(37, 99, 235, 0.25);
+        }
+        .bp-bldIcon{
+          width: 40px;
+          height: 40px;
+          border-radius: 14px;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          background: rgba(37,99,235,0.10);
+          color: #1d4ed8;
+          flex-shrink: 0;
+        }
+        .bp-bldInfo{ flex: 1; min-width: 0; }
+        .bp-bldName{
+          font-weight: 900;
+          color: var(--text);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .bp-bldSub{
+          display:flex;
+          align-items:center;
+          gap: 8px;
+          font-size: 12px;
+          color: var(--muted);
+          font-weight: 700;
+          margin-top: 2px;
+        }
+        .bp-dotSmall{ opacity: .55; }
+        .bp-bldChevron{ color: #64748b; }
 
-        @media (max-width: 1024px) {
-          .top-controls { grid-template-columns: 1fr; }
-          .content-grid { grid-template-columns: 1fr; }
-          .rooms-grid { grid-template-columns: 1fr; }
+        .bp-aptList{
+          padding: 10px 10px 0 10px;
+          display:flex;
+          flex-direction:column;
+          gap: 8px;
+        }
+        .bp-aptItem{
+          width: 100%;
+          display:flex;
+          align-items:center;
+          justify-content: space-between;
+          gap: 10px;
+          border: 1px solid var(--border);
+          background: #fff;
+          border-radius: 14px;
+          padding: 10px 12px;
+          cursor: pointer;
+          text-align: left;
+        }
+        .bp-aptItem:hover{
+          border-color: rgba(37, 99, 235, 0.25);
+          background: rgba(37,99,235,0.03);
+        }
+        .bp-aptItem.selected{
+          background: var(--primary2);
+          border-color: rgba(37, 99, 235, 0.25);
+        }
+        .bp-aptItem.reserved{
+          background: var(--warnBg);
+          border-color: rgba(180, 83, 9, 0.25);
+        }
+        .bp-aptLeft{
+          display:flex;
+          align-items:center;
+          gap: 10px;
+          color: var(--text);
+          font-weight: 800;
+          min-width: 0;
+        }
+        .bp-aptText{
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .bp-aptStar{ color: #f59e0b; }
+        .bp-floorBadge{
+          font-size: 11px;
+          color: var(--muted);
+          font-weight: 800;
+          background: rgba(15,23,42,0.04);
+          border: 1px solid var(--border);
+          padding: 4px 10px;
+          border-radius: 999px;
+          white-space: nowrap;
+        }
+
+        .bp-workHeader{
+          padding: 16px 16px 0 16px;
+        }
+        .bp-workHeaderTop{
+          display:flex;
+          align-items:flex-start;
+          justify-content: space-between;
+          gap: 12px;
+        }
+        .bp-workTitleLine{
+          display:flex;
+          align-items:center;
+          gap: 10px;
+        }
+        .bp-workH{
+          font-size: 18px;
+          font-weight: 950;
+          color: var(--text);
+          letter-spacing: -0.02em;
+        }
+        .bp-viewPill{
+          display:inline-flex;
+          align-items:center;
+          padding: 6px 10px;
+          border-radius: 999px;
+          background: rgba(180, 83, 9, 0.14);
+          border: 1px solid rgba(180, 83, 9, 0.25);
+          color: #92400e;
+          font-weight: 900;
+          font-size: 12px;
+          white-space: nowrap;
+        }
+        .bp-breadcrumb{
+          margin-top: 6px;
+          display:flex;
+          align-items:center;
+          gap: 8px;
+          color: var(--muted);
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .bp-reservedBadge{
+          display:inline-flex;
+          align-items:center;
+          gap: 6px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          background: var(--warnBg);
+          border: 1px solid rgba(180, 83, 9, 0.25);
+          color: var(--warn);
+          font-weight: 900;
+          font-size: 12px;
+        }
+
+        .bp-swapBanner{
+          display:flex;
+          align-items:center;
+          gap: 12px;
+          padding: 10px 12px;
+          border-radius: 14px;
+          background: var(--primary2);
+          border: 1px solid rgba(37, 99, 235, 0.25);
+          color: #1d4ed8;
+          font-weight: 900;
+          font-size: 13px;
+          white-space: nowrap;
+        }
+        .bp-swapLeft{
+          display:flex;
+          align-items:center;
+          gap: 8px;
+        }
+        .bp-swapCancel{
+          border: none;
+          background: rgba(255,255,255,0.85);
+          border: 1px solid rgba(37, 99, 235, 0.25);
+          color: #1d4ed8;
+          padding: 8px 10px;
+          border-radius: 12px;
+          cursor:pointer;
+          font-weight: 950;
+        }
+        .bp-swapCancel:hover{ background: #fff; }
+
+        .bp-workBody{ padding: 16px; }
+        .bp-roomsGrid{
+          display:grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 14px;
+        }
+
+        .bp-roomCard{
+          border: 1px solid var(--border);
+          border-radius: var(--radius);
+          background: #fff;
+          overflow:hidden;
+          box-shadow: 0 2px 10px rgba(15,23,42,0.05);
+        }
+        .bp-roomCard.full{
+          outline: 2px solid rgba(185, 28, 28, 0.15);
+        }
+        .bp-roomCard.viewOnly{
+          opacity: 0.92;
+        }
+
+        .bp-roomTop{
+          display:flex;
+          align-items:flex-start;
+          justify-content: space-between;
+          gap: 10px;
+          padding: 12px 12px 10px 12px;
+          border-bottom: 1px solid var(--border);
+          background: rgba(15, 23, 42, 0.02);
+        }
+        .bp-roomTitle{ display:flex; flex-direction:column; gap: 2px; }
+        .bp-roomName{
+          font-weight: 950;
+          color: var(--text);
+          letter-spacing: -0.01em;
+        }
+        .bp-roomCap{
+          font-size: 12px;
+          color: var(--muted);
+          font-weight: 800;
+        }
+
+        .bp-addBtn{
+          display:inline-flex;
+          align-items:center;
+          gap: 8px;
+          border: 1px solid rgba(37, 99, 235, 0.25);
+          background: rgba(37,99,235,0.06);
+          color: #1d4ed8;
+          padding: 9px 10px;
+          border-radius: 14px;
+          cursor:pointer;
+          font-weight: 900;
+          white-space: nowrap;
+        }
+        .bp-addBtn:hover{ background: rgba(37,99,235,0.10); }
+        .bp-addBtnText{ font-size: 13px; }
+        .bp-addBtn:disabled{
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+
+        .bp-meter{
+          display:flex;
+          align-items:center;
+          justify-content: space-between;
+          gap: 10px;
+          padding: 10px 12px 0 12px;
+        }
+        .bp-meterTrack{
+          height: 8px;
+          border-radius: 999px;
+          background: rgba(15, 23, 42, 0.08);
+          flex: 1;
+          overflow:hidden;
+        }
+        .bp-meterFill{
+          height: 100%;
+          border-radius: 999px;
+          background: rgba(37, 99, 235, 0.65);
+        }
+        .bp-meterText{
+          font-size: 12px;
+          color: var(--muted);
+          font-weight: 900;
+          width: 44px;
+          text-align: right;
+        }
+
+        .bp-roomBody{
+          padding: 12px;
+          min-height: 90px;
+        }
+
+        .bp-studentRow{
+          display:flex;
+          align-items:center;
+          justify-content: space-between;
+          gap: 10px;
+          padding: 10px 10px;
+          border-radius: 14px;
+          border: 1px solid rgba(15, 23, 42, 0.08);
+          background: rgba(15, 23, 42, 0.02);
+          margin-bottom: 10px;
+          cursor: grab;
+        }
+        .bp-studentRow.viewOnly{
+          cursor: default;
+        }
+        .bp-studentRow:active{ cursor: grabbing; }
+        .bp-studentRow:hover{ background: rgba(37,99,235,0.04); border-color: rgba(37, 99, 235, 0.18); }
+        .bp-studentRow.swapSelected{
+          background: var(--primary2);
+          border-color: rgba(37, 99, 235, 0.25);
+        }
+
+        .bp-studentLeft{
+          display:flex;
+          align-items:center;
+          gap: 10px;
+          min-width: 0;
+        }
+        .bp-avatar{
+          width: 28px;
+          height: 28px;
+          border-radius: 10px;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          background: rgba(37,99,235,0.10);
+          color: #1d4ed8;
+          flex-shrink: 0;
+        }
+        .bp-studentName{
+          font-weight: 900;
+          color: var(--text);
+          white-space: nowrap;
+          overflow:hidden;
+          text-overflow: ellipsis;
+        }
+
+        .bp-studentActions{
+          display:flex;
+          align-items:center;
+          gap: 8px;
+          flex-shrink: 0;
+        }
+        .bp-iconBtn{
+          border: 1px solid rgba(15,23,42,0.10);
+          background: #fff;
+          color: #334155;
+          border-radius: 12px;
+          padding: 7px;
+          cursor:pointer;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+        }
+        .bp-iconBtn:hover{
+          border-color: rgba(37, 99, 235, 0.25);
+          background: rgba(37,99,235,0.06);
+          color: #1d4ed8;
+        }
+        .bp-iconBtn.danger:hover{
+          border-color: rgba(185, 28, 28, 0.25);
+          background: var(--dangerBg);
+          color: var(--danger);
+        }
+        .bp-iconBtn:disabled{
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+
+        .bp-emptyDrop{
+          display:flex;
+          flex-direction:column;
+          gap: 6px;
+          padding: 10px;
+          border-radius: 14px;
+          border: 1px dashed rgba(15,23,42,0.18);
+          background: rgba(15,23,42,0.015);
+        }
+        .bp-emptyTop{
+          font-weight: 900;
+          color: #64748b;
+        }
+        .bp-emptySub{
+          font-size: 12px;
+          color: #64748b;
+          font-weight: 700;
+        }
+
+        .bp-emptyState{
+          height: 100%;
+          min-height: 520px;
+          display:flex;
+          flex-direction:column;
+          align-items:center;
+          justify-content:center;
+          gap: 12px;
+          padding: 24px;
+          text-align:center;
+        }
+        .bp-emptyIcon{
+          width: 78px;
+          height: 78px;
+          border-radius: 24px;
+          background: rgba(37,99,235,0.10);
+          color: #1d4ed8;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          border: 1px solid rgba(37, 99, 235, 0.20);
+        }
+        .bp-emptyText{
+          font-size: 16px;
+          font-weight: 950;
+          color: var(--text);
+        }
+        .bp-emptySubText{
+          max-width: 520px;
+          color: var(--muted);
+          font-weight: 700;
+          font-size: 13px;
+        }
+
+        .bp-modalBackdrop{
+          position: fixed;
+          inset: 0;
+          background: rgba(15, 23, 42, 0.55);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          z-index: 50;
+          padding: 18px;
+        }
+        .bp-modal{
+          width: 600px;
+          max-width: 96vw;
+          background: #fff;
+          border-radius: 18px;
+          border: 1px solid rgba(255,255,255,0.12);
+          box-shadow: 0 25px 80px rgba(0,0,0,0.35);
+          overflow:hidden;
+        }
+        .bp-modalHeader{
+          display:flex;
+          align-items:center;
+          justify-content: space-between;
+          padding: 14px 16px;
+          border-bottom: 1px solid var(--border);
+          background: rgba(15, 23, 42, 0.02);
+        }
+        .bp-modalTitle{
+          display:flex;
+          align-items:center;
+          gap: 10px;
+          color: var(--text);
+        }
+        .bp-modalTitle h4{
+          margin:0;
+          font-size: 15px;
+          font-weight: 950;
+        }
+        .bp-closeBtn{
+          border: 1px solid var(--border);
+          background: #fff;
+          border-radius: 12px;
+          padding: 7px;
+          cursor:pointer;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+        }
+        .bp-closeBtn:hover{ background: rgba(15,23,42,0.04); }
+
+        .bp-modalSearch{
+          display:flex;
+          align-items:center;
+          gap: 10px;
+          padding: 12px 16px;
+          border-bottom: 1px solid var(--border);
+        }
+        .bp-modalSearch input{
+          flex: 1;
+          border:none;
+          outline:none;
+          font-family: inherit;
+          font-size: 14px;
+          color: var(--text);
+        }
+
+        .bp-modalList{
+          max-height: 420px;
+          overflow:auto;
+          padding: 12px;
+        }
+
+        .bp-modalItem{
+          width: 100%;
+          display:flex;
+          align-items:center;
+          justify-content: space-between;
+          gap: 10px;
+          padding: 12px 12px;
+          border-radius: 16px;
+          border: 1px solid var(--border);
+          background: #fff;
+          cursor:pointer;
+          margin-bottom: 10px;
+          text-align:left;
+        }
+        .bp-modalItem:hover{
+          border-color: rgba(37, 99, 235, 0.25);
+          background: rgba(37,99,235,0.03);
+        }
+        .bp-modalItem.active{
+          background: var(--primary2);
+          border-color: rgba(37, 99, 235, 0.25);
+        }
+        .bp-modalItem.disabled{
+          opacity: 0.6;
+          cursor:not-allowed;
+        }
+        .bp-modalItemLeft{
+          display:flex;
+          align-items:center;
+          gap: 10px;
+          min-width: 0;
+        }
+        .bp-modalRoom{
+          font-size: 13px;
+          font-weight: 800;
+          color: var(--text);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .bp-modalCap{
+          font-size: 12px;
+          color: var(--muted);
+          font-weight: 900;
+          white-space: nowrap;
+        }
+        .bp-modalChevron{
+          font-weight: 950;
+          color: #1d4ed8;
+          opacity: 0.9;
+        }
+        .bp-modalEmpty{
+          padding: 18px;
+          color: var(--muted);
+          font-weight: 800;
+        }
+
+        .bp-modalFooter{
+          display:flex;
+          align-items:center;
+          justify-content:flex-end;
+          gap: 10px;
+          padding: 12px 16px;
+          border-top: 1px solid var(--border);
+          background: rgba(15, 23, 42, 0.02);
+        }
+        .bp-btn{
+          border:none;
+          cursor:pointer;
+          border-radius: 14px;
+          padding: 10px 14px;
+          font-weight: 950;
+          font-family: inherit;
+        }
+        .bp-btn.secondary{
+          background: #fff;
+          border: 1px solid var(--border);
+          color: var(--text);
+        }
+        .bp-btn.secondary:hover{
+          border-color: rgba(37, 99, 235, 0.25);
+          background: rgba(37,99,235,0.03);
+        }
+        .bp-btn.primary{
+          background: rgba(37, 99, 235, 0.95);
+          color: #fff;
+        }
+        .bp-btn.primary:hover:enabled{ filter: brightness(0.95); }
+        .bp-btn.primary:disabled{ opacity: 0.6; cursor:not-allowed; }
+
+        @media (max-width: 1120px){
+          .bp-controls{ grid-template-columns: 1fr; }
+          .bp-selectGrid{ grid-template-columns: 1fr; }
+          .bp-stats{ grid-template-columns: repeat(3, minmax(0,1fr)); }
+        }
+        @media (max-width: 980px){
+          .bp-grid{ grid-template-columns: 1fr; }
+          .bp-panelBody{ max-height: unset; }
+          .bp-roomsGrid{ grid-template-columns: 1fr; }
+          .bp-titleRow{ flex-direction: column; align-items:flex-start; }
+          .bp-contextPills{ justify-content:flex-start; }
         }
       `}</style>
     </div>

@@ -17,9 +17,8 @@ function LoginPage() {
 
   const demoAccounts = useMemo(
     () => [
-      { email: 'admin@technion.ac.il', role: 'מנהל מרכזי' },
-      { email: 'canada.boss@technion.ac.il', role: 'מנהל אזור קנדה' },
-      { email: 'canada.emp1@technion.ac.il', role: 'עובד אזור קנדה' },
+      { email: 'admin@technion.ac.il', password: 'admin123', role: 'מנהל מרכזי' },
+      { email: 'canada@technion.ac.il', password: 'test123', role: 'מנהל אזור קנדה' },
     ],
     []
   );
@@ -31,14 +30,12 @@ function LoginPage() {
     setError('');
     setIsLoading(true);
 
-    // tiny delay so UI feels responsive (optional)
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
     try {
-      const result = login(email.trim(), password);
+      // ✅ MUST await (otherwise token may not be stored yet)
+      const result = await login(email.trim(), password);
 
       if (result?.success) {
-        navigate('/dashboard');
+        navigate('/dashboard', { replace: true });
       } else {
         setError(result?.error || 'התחברות נכשלה. בדוק/י פרטים ונסה/י שוב.');
       }
@@ -51,7 +48,6 @@ function LoginPage() {
 
   return (
     <div className="login-wrapper">
-      {/* Left Panel - Branding */}
       <div className="left-panel">
         <div className="brand-content">
           <div className="logo-container" aria-label="Technion logo">
@@ -68,7 +64,6 @@ function LoginPage() {
         </div>
       </div>
 
-      {/* Right Panel - Login Form */}
       <div className="right-panel">
         <div className="form-container">
           <div className="form-header">
@@ -131,9 +126,7 @@ function LoginPage() {
             <div className="demo-section">
               <div className="demo-header">
                 <span className="demo-badge">דמו</span>
-                <span className="demo-info">
-                  סיסמה: <strong>123456</strong>
-                </span>
+                <span className="demo-info">בחר חשבון למילוי אוטומטי</span>
               </div>
 
               <div className="demo-accounts">
@@ -144,7 +137,7 @@ function LoginPage() {
                     className="demo-account"
                     onClick={() => {
                       setEmail(account.email);
-                      setPassword('123456');
+                      setPassword(account.password);
                     }}
                   >
                     <span className="account-role">{account.role}</span>
@@ -167,7 +160,6 @@ function LoginPage() {
           direction: rtl;
         }
 
-        /* Left Panel - Branding */
         .left-panel{
           flex: 1;
           background: linear-gradient(165deg, #004e89 0%, #002a4d 50%, #001529 100%);
@@ -179,37 +171,19 @@ function LoginPage() {
           overflow:hidden;
         }
 
-        .left-panel::before{
-          content:'';
-          position:absolute;
-          top:-50%;
-          right:-20%;
-          width:80%;
-          height:150%;
-          background: radial-gradient(circle, rgba(61,159,224,0.18) 0%, transparent 70%);
-          pointer-events:none;
-          animation: glow-pulse 8s ease-in-out infinite;
-        }
-
-        @keyframes glow-pulse{
-          0%,100%{ opacity:1; }
-          50%{ opacity:0.6; }
-        }
-
         .brand-content{ position:relative; z-index:1; }
 
-        /* ✅ LOGO: wider + less white + symmetric */
         .logo-container{
           background: rgba(255,255,255,0.98);
-          width: 420px;           /* wider to match text length */
-          height: 165px;          /* shorter to reduce white block feel */
+          width: 420px;
+          height: 165px;
           border-radius: 28px;
           display:flex;
           align-items:center;
           justify-content:center;
           margin-bottom: 44px;
           box-shadow: 0 30px 80px rgba(0,0,0,0.40);
-          padding: 18px 22px;     /* less padding = less "white width" */
+          padding: 18px 22px;
           border: 1px solid rgba(255,255,255,0.30);
         }
 
@@ -217,8 +191,6 @@ function LoginPage() {
           width: 100%;
           height: 100%;
           object-fit: contain;
-          image-rendering: -webkit-optimize-contrast;
-          transform: translateZ(0);
         }
 
         .brand-title{
@@ -227,7 +199,6 @@ function LoginPage() {
           color: #ffffff;
           margin-bottom: 18px;
           line-height: 1.2;
-          text-shadow: 0 2px 20px rgba(0,0,0,0.20);
         }
 
         .brand-subtitle{
@@ -236,7 +207,6 @@ function LoginPage() {
           font-weight: 400;
           direction:ltr;
           text-align:right;
-          text-shadow: 0 1px 10px rgba(0,0,0,0.15);
         }
 
         .brand-decorative{
@@ -245,7 +215,6 @@ function LoginPage() {
           background: linear-gradient(90deg, #3d9fe0, rgba(61,159,224,0.25));
           margin-top: 46px;
           border-radius: 3px;
-          box-shadow: 0 2px 15px rgba(61,159,224,0.45);
         }
 
         .left-footer{
@@ -255,7 +224,6 @@ function LoginPage() {
           font-size: 14px;
         }
 
-        /* Right Panel - Form */
         .right-panel{
           flex: 1;
           background:#ffffff;
@@ -334,12 +302,6 @@ function LoginPage() {
           background:#ffffff;
         }
 
-        .input-wrapper input:focus{
-          outline:none;
-          border-color:#004e89;
-          box-shadow: 0 0 0 4px rgba(0,78,137,0.10);
-        }
-
         .toggle-password{
           position:absolute;
           left:12px;
@@ -352,12 +314,6 @@ function LoginPage() {
           align-items:center;
           justify-content:center;
           border-radius:8px;
-          transition: all 0.2s ease;
-        }
-
-        .toggle-password:hover{
-          background:#f1f5f9;
-          color:#475569;
         }
 
         .submit-btn{
@@ -370,21 +326,10 @@ function LoginPage() {
           font-size:16px;
           font-weight:600;
           cursor:pointer;
-          transition: all 0.3s ease;
-          box-shadow: 0 4px 16px rgba(0,78,137,0.30);
           margin-top:8px;
         }
 
-        .submit-btn:hover:not(:disabled){
-          transform: translateY(-2px);
-          box-shadow: 0 8px 24px rgba(0,78,137,0.40);
-        }
-
-        .submit-btn:disabled{
-          opacity:0.7;
-          cursor:not-allowed;
-          transform:none;
-        }
+        .submit-btn:disabled{ opacity:0.7; cursor:not-allowed; }
 
         .demo-section{
           margin-top:16px;
@@ -433,12 +378,6 @@ function LoginPage() {
           text-align:right;
         }
 
-        .demo-account:hover{
-          border-color:#004e89;
-          background:#f1f5f9;
-          transform: translateX(-4px);
-        }
-
         .account-role{
           font-size:14px;
           font-weight:600;
@@ -455,30 +394,11 @@ function LoginPage() {
 
         @media (max-width: 1024px){
           .login-wrapper{ flex-direction:column; }
-
-          .left-panel{
-            min-height: 320px;
-            padding: 40px 30px;
-          }
-
-          .logo-container{
-            width: 320px;
-            height: 140px;
-            margin-bottom: 26px;
-            padding: 14px 18px;
-          }
-
+          .left-panel{ min-height: 320px; padding: 40px 30px; }
+          .logo-container{ width: 320px; height: 140px; margin-bottom: 26px; }
           .brand-title{ font-size:32px; }
           .brand-subtitle{ font-size:16px; }
-
           .right-panel{ padding: 40px 30px; }
-        }
-
-        @media (max-width: 420px){
-          .logo-container{
-            width: 100%;
-            max-width: 340px;
-          }
         }
       `}</style>
     </div>

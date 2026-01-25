@@ -1,33 +1,49 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { allocationAPI, inboxAPI } from '../services/api';
 import {
-  Play, Settings, Check, AlertTriangle, Users, Home, RefreshCw,
-  Lock, Bell, Mail, Calendar, Loader, XCircle
+  Play,
+  Settings,
+  Check,
+  AlertTriangle,
+  Users,
+  Home,
+  RefreshCw,
+  Lock,
+  Bell,
+  Mail,
+  Calendar,
+  Loader,
+  XCircle,
 } from 'lucide-react';
 
 function AllocationPage({ language }) {
-  const { isCentralAdmin, getUserRegion, canRunAllocation, user } = useAuth();
+  // ✅ AuthContext now provides canRunAllocation() + getUserRegion() normalized
+  const { isCentralAdmin, getUserRegion, canRunAllocation } = useAuth();
 
-  // State
+  // ✅ Use a stable boolean for effects (avoids re-running effect on every render)
+  const central = isCentralAdmin?.() === true;
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
   const [summary, setSummary] = useState(null);
   const [inboxItem, setInboxItem] = useState(null);
+
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [result, setResult] = useState(null);
 
   const [constraints, setConstraints] = useState({
-    sameGender: { enabled: true, strict: true, critical: true },
-    sameReligion: { enabled: true, strict: false, critical: false },
-    roommateMatch: { enabled: true, strict: true, critical: false },
-    priorityFirst: { enabled: true, strict: true, critical: true },
-    roommatePositiveOnly: { enabled: true, strict: true, critical: true },
-    ReligiousTogether: { enabled: true, strict: true, critical: true },
-    sectorMatching: { enabled: true, strict: true, critical: false },
-    avoidYearMix_1_with_3_4: { enabled: true, strict: false, critical: false },
-    avoidAtudaimWithHasmaha: { enabled: true, strict: false, critical: false },
+    sameGender: { enabled: true, strict: true, critical: true, weight: 10 },
+    sameReligion: { enabled: true, strict: false, critical: false, weight: 6 },
+    roommateMatch: { enabled: true, strict: true, critical: false, weight: 8 },
+    priorityFirst: { enabled: true, strict: true, critical: true, weight: 10 },
+    roommatePositiveOnly: { enabled: true, strict: true, critical: true, weight: 10 },
+    ReligiousTogether: { enabled: true, strict: true, critical: true, weight: 9 },
+    sectorMatching: { enabled: true, strict: true, critical: false, weight: 7 },
+    avoidYearMix_1_with_3_4: { enabled: true, strict: false, critical: false, weight: 4 },
+    avoidAtudaimWithHasmaha: { enabled: true, strict: false, critical: false, weight: 4 },
   });
 
   const t = {
@@ -37,18 +53,11 @@ function AllocationPage({ language }) {
       runAllocation: 'הפעל שיבוץ',
       running: 'מריץ שיבוץ...',
       constraints: 'אילוצי שיבוץ',
-      sameGender: 'אותו מגדר בדירה',
-      sameReligion: 'אותה דת בדירה',
-      roommateMatch: 'התאמת שותפים מבוקשים',
-      priorityFirst: 'סטודנטים בעדיפות קודם',
-      roommatePositiveOnly: '100% תשובות חיוביות למבקשים להיות יחד',
-      ReligiousTogether: '100% התאמות חיוביות דירת דתיים/ות',
-      sectorMatching: 'התאמה לפי שייכות',
-      avoidYearMix_1_with_3_4: 'לא לשבץ שנה א׳ עם שנה ג׳/ד׳',
-      avoidAtudaimWithHasmaha: 'לא לשבץ הסמכה עם עתודאים',
       strict: 'חובה',
       flexible: 'גמיש',
       critical: 'קריטי',
+      weight: 'משקל',
+      weightHint: 'כמה חשוב האילוץ באופטימיזציה (0–10)',
       studentsToAssign: 'סטודנטים לשיבוץ',
       availableBeds: 'מיטות פנויות',
       results: 'תוצאות השיבוץ',
@@ -59,6 +68,7 @@ function AllocationPage({ language }) {
       noStudents: 'אין סטודנטים לשיבוץ',
       loading: 'טוען נתונים...',
       error: 'שגיאה בטעינת הנתונים',
+      retry: 'נסה שוב',
       notification: 'הודעה מלשכת המעונות המרכזית',
       receivedStudents: 'התקבלו סטודנטים לשיבוץ',
       batchId: 'מספר קובץ',
@@ -69,6 +79,16 @@ function AllocationPage({ language }) {
       transfers: 'מעברים',
       leaving: 'עוזבים',
       priorityStudents: 'סטודנטים בעדיפות',
+      sameGender: 'אותו מגדר בדירה',
+      sameReligion: 'אותה דת בדירה',
+      roommateMatch: 'התאמת שותפים מבוקשים',
+      priorityFirst: 'סטודנטים בעדיפות קודם',
+      roommatePositiveOnly: '100% תשובות חיוביות למבקשים להיות יחד',
+      ReligiousTogether: '100% התאמות חיוביות דירת דתיים/ות',
+      sectorMatching: 'התאמה לפי שייכות',
+      avoidYearMix_1_with_3_4: 'לא לשבץ שנה א׳ עם שנה ג׳/ד׳',
+      avoidAtudaimWithHasmaha: 'לא לשבץ הסמכה עם עתודאים',
+      noRegion: 'לא נמצא אזור למשתמש.',
     },
     en: {
       title: 'Student Allocation',
@@ -76,18 +96,11 @@ function AllocationPage({ language }) {
       runAllocation: 'Run Allocation',
       running: 'Running allocation...',
       constraints: 'Allocation Constraints',
-      sameGender: 'Same gender in apartment',
-      sameReligion: 'Same religion in apartment',
-      roommateMatch: 'Match roommate requests',
-      priorityFirst: 'Priority students first',
-      roommatePositiveOnly: '100% positive roommate matches',
-      ReligiousTogether: '100% positive religious apartment matches',
-      sectorMatching: 'Sector matching',
-      avoidYearMix_1_with_3_4: 'Avoid mixing 1st year with 3rd/4th',
-      avoidAtudaimWithHasmaha: 'Avoid mixing graduate with atudaim',
       strict: 'Strict',
       flexible: 'Flexible',
       critical: 'Critical',
+      weight: 'Weight',
+      weightHint: 'How important in optimization (0–10)',
       studentsToAssign: 'Students to assign',
       availableBeds: 'Available beds',
       results: 'Allocation Results',
@@ -98,6 +111,7 @@ function AllocationPage({ language }) {
       noStudents: 'No students to assign',
       loading: 'Loading data...',
       error: 'Error loading data',
+      retry: 'Try again',
       notification: 'Notification from Central Housing Office',
       receivedStudents: 'Students received for allocation',
       batchId: 'Batch ID',
@@ -108,86 +122,144 @@ function AllocationPage({ language }) {
       transfers: 'Transfers',
       leaving: 'Leaving',
       priorityStudents: 'Priority students',
-    }
+      sameGender: 'Same gender in apartment',
+      sameReligion: 'Same religion in apartment',
+      roommateMatch: 'Match roommate requests',
+      priorityFirst: 'Priority students first',
+      roommatePositiveOnly: '100% positive roommate matches',
+      ReligiousTogether: '100% positive religious apartment matches',
+      sectorMatching: 'Sector matching',
+      avoidYearMix_1_with_3_4: 'Avoid mixing 1st year with 3rd/4th',
+      avoidAtudaimWithHasmaha: 'Avoid mixing graduate with atudaim',
+      noRegion: 'User region was not found.',
+    },
   }[language];
 
-  // Load data on mount
   useEffect(() => {
-    loadData();
-  }, []);
+    let alive = true;
 
-  const loadData = async () => {
-    setLoading(true);
-    setError(null);
+    const load = async () => {
+      setLoading(true);
+      setError(null);
 
-    try {
-      // Get allocation summary
-      const summaryData = await allocationAPI.getSummary();
-      setSummary(summaryData);
+      try {
+        const summaryData = await allocationAPI.getSummary();
+        if (!alive) return;
+        setSummary(summaryData);
 
-      // Get latest inbox item for region managers
-      if (!isCentralAdmin()) {
-        try {
-          const inboxData = await inboxAPI.getLatest();
-          if (inboxData.inbox) {
-            setInboxItem(inboxData.inbox);
-            // Mark as viewed if pending
-            if (inboxData.inbox.status === 'pending') {
-              await inboxAPI.markViewed(inboxData.inbox.id);
+        // ✅ avoid calling isCentralAdmin() inside effect dependencies and avoid function-ref dependency
+        if (!central) {
+          try {
+            const inboxData = await inboxAPI.getLatest();
+            if (!alive) return;
+
+            if (inboxData?.inbox) {
+              setInboxItem(inboxData.inbox);
+
+              if (inboxData.inbox.status === 'pending') {
+                await inboxAPI.markViewed(inboxData.inbox.id);
+              }
             }
+          } catch (e) {
+            // keep silent for UX, but you can uncomment for debugging:
+            // console.warn('inboxAPI.getLatest failed', e);
           }
-        } catch (err) {
-          // No inbox item - that's okay
         }
+      } catch (err) {
+        if (!alive) return;
+        setError(err?.message || 'Unknown error');
+      } finally {
+        if (!alive) return;
+        setLoading(false);
       }
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+    };
+
+    load();
+
+    return () => {
+      alive = false;
+    };
+  }, [central]);
 
   const toggleConstraintEnabled = (key) => {
-    const current = constraints[key];
-    if (current.critical) return;
-
-    setConstraints({
-      ...constraints,
-      [key]: { ...current, enabled: !current.enabled }
+    setConstraints((prev) => {
+      const current = prev[key];
+      if (!current || current.critical) return prev;
+      return { ...prev, [key]: { ...current, enabled: !current.enabled } };
     });
   };
+
+  const setConstraintWeight = (key, nextWeight) => {
+    const w = Math.max(0, Math.min(10, Number(nextWeight)));
+    setConstraints((prev) => {
+      const current = prev[key];
+      if (!current) return prev;
+      return { ...prev, [key]: { ...current, weight: w } };
+    });
+  };
+
+  const effectiveConfig = useMemo(() => {
+    const out = {};
+    Object.entries(constraints).forEach(([k, v]) => {
+      out[k] = {
+        enabled: !!v.enabled,
+        strict: !!v.strict,
+        critical: !!v.critical,
+        weight: Number(v.weight) || 0,
+      };
+    });
+    return out;
+  }, [constraints]);
 
   const runAllocation = async () => {
     setIsRunning(true);
     setProgress(0);
     setResult(null);
+    setError(null);
 
-    // Simulate progress
     const progressInterval = setInterval(() => {
-      setProgress(prev => Math.min(prev + 5, 90));
+      setProgress((prev) => Math.min(prev + 5, 90));
     }, 200);
 
     try {
-      const response = await allocationAPI.run(getUserRegion());
+      // ✅ Guard region id (prevents crashes & confusing “Unknown error”)
+      const regionId = getUserRegion?.();
+      if (!regionId) {
+        clearInterval(progressInterval);
+        setProgress(0);
+        setIsRunning(false);
+        setError(t.noRegion);
+        return;
+      }
+
+      let response;
+      try {
+        response = await allocationAPI.run(regionId, { constraints: effectiveConfig });
+      } catch {
+        response = await allocationAPI.run(regionId);
+      }
 
       clearInterval(progressInterval);
       setProgress(100);
 
-      setResult(response.result);
+      setResult(response?.result || null);
 
-      // Mark inbox as processed
       if (inboxItem) {
         await inboxAPI.markProcessed(inboxItem.id);
       }
 
-      // Reload data
-      await loadData();
-
+      try {
+        const summaryData = await allocationAPI.getSummary();
+        setSummary(summaryData);
+      } catch (e) {
+        // ignore
+      }
     } catch (err) {
       clearInterval(progressInterval);
-      setError(err.message);
+      setError(err?.message || 'Unknown error');
     } finally {
       setIsRunning(false);
+      clearInterval(progressInterval);
     }
   };
 
@@ -210,199 +282,277 @@ function AllocationPage({ language }) {
           <XCircle size={40} />
           <p>{t.error}</p>
           <p className="error-message">{error}</p>
-          <button onClick={loadData}>נסה שוב</button>
+          <button onClick={() => window.location.reload()}>{t.retry}</button>
         </div>
         <style>{styles}</style>
       </div>
     );
   }
 
+  // ✅ Now canRunAllocation exists in AuthContext (alias), so this won't crash
+  const canRun = typeof canRunAllocation === 'function' ? canRunAllocation() : false;
+  const hasStudents = (summary?.unassigned_students || 0) > 0;
+
   return (
     <div className="allocation-page">
-      <div className="page-header">
-        <div>
-          <h1>{t.title}</h1>
-          <p>{t.subtitle}</p>
-        </div>
-        {summary?.region && (
-          <span className="region-badge">
-            {language === 'he' ? summary.region.name : summary.region.name_en}
-          </span>
-        )}
-      </div>
+      <div className="shell">
+        <div className="topbar">
+          <div className="titleBlock">
+            <h1>{t.title}</h1>
+            <p>{t.subtitle}</p>
+          </div>
 
-      {/* Inbox Notification */}
-      {inboxItem && (
-        <div className="inbox-notification">
-          <div className="notification-header">
-            <div className="notification-icon">
-              <Bell size={24} />
-            </div>
-            <div className="notification-title">
-              <h3>{t.notification}</h3>
-              <span className="batch-tag">
-                {t.batchId}: #{inboxItem.batch}
+          <div className="topbarRight">
+            {summary?.region && (
+              <span className="region-badge">
+                {language === 'he' ? summary.region.name : summary.region.name_en}
               </span>
-            </div>
-          </div>
+            )}
 
-          <div className="notification-content">
-            <div className="main-message">
-              <Mail size={20} />
-              <span>
-                <strong>{inboxItem.students_count}</strong> {t.receivedStudents}
-              </span>
-            </div>
-
-            <div className="notification-meta">
-              <div className="meta-item">
-                <Calendar size={16} />
-                <span>{t.receivedAt}: {new Date(inboxItem.created_at).toLocaleDateString('he-IL')}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div className="allocation-grid">
-        {/* Stats Row */}
-        <div className="stats-row">
-          <div className="stat-card">
-            <Users size={24} />
-            <div>
-              <span className="number">{summary?.unassigned_students || 0}</span>
-              <span className="label">{t.studentsToAssign}</span>
-            </div>
-          </div>
-          <div className="stat-card">
-            <Home size={24} />
-            <div>
-              <span className="number">{summary?.available_beds || 0}</span>
-              <span className="label">{t.availableBeds}</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Students Breakdown */}
-        {summary?.students_by_category && (
-          <div className="breakdown-card">
-            <h3>{t.studentsBreakdown}</h3>
-            <div className="breakdown-grid">
-              <div className="breakdown-item">
-                <span className="count">{summary.students_by_category.new || 0}</span>
-                <span className="label">{t.newStudents}</span>
-              </div>
-              <div className="breakdown-item">
-                <span className="count">{summary.students_by_category.continuing || 0}</span>
-                <span className="label">{t.continuing}</span>
-              </div>
-              <div className="breakdown-item">
-                <span className="count">{summary.students_by_category.transfer || 0}</span>
-                <span className="label">{t.transfers}</span>
-              </div>
-              <div className="breakdown-item priority">
-                <span className="count">{summary.priority_students || 0}</span>
-                <span className="label">{t.priorityStudents}</span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Constraints */}
-        <div className="constraints-card">
-          <h3><Settings size={18} /> {t.constraints}</h3>
-
-          <div className="constraints-list">
-            {Object.entries(constraints).map(([key, value]) => (
-              <div key={key} className={`constraint-item ${value.critical ? 'critical' : ''}`}>
-                <label className={`constraint-toggle ${value.critical ? 'locked' : ''}`}>
-                  <input
-                    type="checkbox"
-                    checked={value.enabled}
-                    disabled={value.critical}
-                    onChange={() => toggleConstraintEnabled(key)}
-                  />
-                  <span className="constraint-text">
-                    {t[key]}
-                    {value.critical && (
-                      <span className="critical-chip">
-                        <Lock size={12} /> {t.critical}
-                      </span>
-                    )}
-                  </span>
-                </label>
-
-                <span className={`constraint-type ${value.strict ? 'strict' : 'flexible'}`}>
-                  {value.strict ? t.strict : t.flexible}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Run Section */}
-        <div className="run-section">
-          {(summary?.unassigned_students || 0) > 0 ? (
-            <>
-              <button
-                className="run-btn"
-                onClick={runAllocation}
-                disabled={isRunning || !canRunAllocation()}
-              >
+            {hasStudents ? (
+              <button className="run-btn" onClick={runAllocation} disabled={isRunning || !canRun}>
                 {isRunning ? (
                   <>
-                    <RefreshCw size={20} className="spin" />
+                    <RefreshCw size={18} className="spin" />
                     {t.running}
                   </>
                 ) : (
                   <>
-                    <Play size={20} />
+                    <Play size={18} />
                     {t.runAllocation}
                   </>
                 )}
               </button>
-
-              {isRunning && (
-                <div className="progress-section">
-                  <div className="progress-bar">
-                    <div className="progress-fill" style={{ width: `${progress}%` }} />
-                  </div>
-                  <span>{progress}%</span>
-                </div>
-              )}
-            </>
-          ) : (
-            <div className="no-students">
-              <Check size={32} />
-              <p>{t.noStudents}</p>
-            </div>
-          )}
+            ) : (
+              <span className="status-chip ok">
+                <Check size={16} />
+                {t.noStudents}
+              </span>
+            )}
+          </div>
         </div>
 
-        {/* Results */}
-        {result && (
-          <div className="results-card">
-            <h3>{t.results}</h3>
-            <div className="results-grid">
-              <div className="result-item success">
-                <Check size={20} />
-                <span className="number">{result.successful_assignments}</span>
-                <span className="label">{t.assigned}</span>
-              </div>
-              <div className="result-item info">
-                <Users size={20} />
-                <span className="number">{result.roommate_matches}</span>
-                <span className="label">{t.roommateMatches}</span>
-              </div>
-              <div className="result-item warning">
-                <AlertTriangle size={20} />
-                <span className="number">{result.conflicts}</span>
-                <span className="label">{t.conflicts}</span>
-              </div>
+        {isRunning && (
+          <div className="progressWrap">
+            <div className="progressBar">
+              <div className="progressFill" style={{ width: `${progress}%` }} />
             </div>
-            <button className="view-btn">{t.viewResults}</button>
+            <span className="progressPct">{progress}%</span>
           </div>
         )}
+
+        {inboxItem && (
+          <div className="banner">
+            <div className="bannerLeft">
+              <div className="bannerIcon">
+                <Bell size={20} />
+              </div>
+              <div className="bannerText">
+                <div className="bannerTitle">
+                  <span className="bannerHeading">{t.notification}</span>
+                  <span className="chip">
+                    {t.batchId}: #{inboxItem.batch}
+                  </span>
+                </div>
+                <div className="bannerMain">
+                  <Mail size={16} />
+                  <span>
+                    <strong>{inboxItem.students_count}</strong> {t.receivedStudents}
+                  </span>
+                </div>
+                <div className="bannerMeta">
+                  <Calendar size={14} />
+                  <span>
+                    {t.receivedAt}: {new Date(inboxItem.created_at).toLocaleDateString('he-IL')}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="bannerRight">
+              <span className={`status-chip ${inboxItem.status === 'pending' ? 'warn' : 'neutral'}`}>
+                {inboxItem.status === 'pending' ? (
+                  <>
+                    <AlertTriangle size={16} /> {language === 'he' ? 'ממתין לטיפול' : 'Pending'}
+                  </>
+                ) : (
+                  <>
+                    <Check size={16} /> {language === 'he' ? 'נצפה' : 'Viewed'}
+                  </>
+                )}
+              </span>
+            </div>
+          </div>
+        )}
+
+        <div className="grid">
+          <div className="leftCol">
+            <div className="card">
+              <div className="cardHeader">
+                <div className="cardTitle">
+                  <Settings size={16} />
+                  <span>{t.constraints}</span>
+                </div>
+                <span className="hint">{t.weightHint}</span>
+              </div>
+
+              <div className="constraintsTable">
+                {Object.entries(constraints).map(([key, value]) => (
+                  <div
+                    key={key}
+                    className={`row ${value.critical ? 'critical' : ''} ${!value.enabled ? 'disabled' : ''}`}
+                  >
+                    <div className="rowMain">
+                      <label className={`toggle ${value.critical ? 'locked' : ''}`}>
+                        <input
+                          type="checkbox"
+                          checked={value.enabled}
+                          disabled={value.critical}
+                          onChange={() => toggleConstraintEnabled(key)}
+                        />
+                        <span className="labelText">
+                          {t[key] || key}
+                          {value.critical && (
+                            <span className="miniChip">
+                              <Lock size={12} /> {t.critical}
+                            </span>
+                          )}
+                        </span>
+                      </label>
+
+                      <div className="weight">
+                        <span className="wLabel">{t.weight}</span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="10"
+                          step="1"
+                          value={value.weight}
+                          disabled={!value.enabled}
+                          onChange={(e) => setConstraintWeight(key, e.target.value)}
+                        />
+                        <span className="wValue">{value.weight}</span>
+                      </div>
+                    </div>
+
+                    <span className={`pill ${value.strict ? 'strict' : 'flex'}`}>
+                      {value.strict ? t.strict : t.flexible}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              {!canRun && (
+                <div className="lockNote">
+                  <Lock size={16} />
+                  <span>
+                    {language === 'he'
+                      ? 'אין הרשאה להריץ שיבוץ בחשבון זה.'
+                      : 'You do not have permission to run allocation on this account.'}
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="rightCol">
+            <div className="statsRow">
+              <div className="stat">
+                <div className="statIcon">
+                  <Users size={18} />
+                </div>
+                <div>
+                  <div className="statNum">{summary?.unassigned_students || 0}</div>
+                  <div className="statLbl">{t.studentsToAssign}</div>
+                </div>
+              </div>
+              <div className="stat">
+                <div className="statIcon">
+                  <Home size={18} />
+                </div>
+                <div>
+                  <div className="statNum">{summary?.available_beds || 0}</div>
+                  <div className="statLbl">{t.availableBeds}</div>
+                </div>
+              </div>
+            </div>
+
+            {summary?.students_by_category && (
+              <div className="card">
+                <div className="cardHeader compact">
+                  <div className="cardTitle">
+                    <Users size={16} />
+                    <span>{t.studentsBreakdown}</span>
+                  </div>
+                </div>
+
+                <div className="breakdown">
+                  <div className="bItem">
+                    <div className="bNum">{summary.students_by_category.new || 0}</div>
+                    <div className="bLbl">{t.newStudents}</div>
+                  </div>
+                  <div className="bItem">
+                    <div className="bNum">{summary.students_by_category.continuing || 0}</div>
+                    <div className="bLbl">{t.continuing}</div>
+                  </div>
+                  <div className="bItem">
+                    <div className="bNum">{summary.students_by_category.transfer || 0}</div>
+                    <div className="bLbl">{t.transfers}</div>
+                  </div>
+                  <div className="bItem priority">
+                    <div className="bNum">{summary.priority_students || 0}</div>
+                    <div className="bLbl">{t.priorityStudents}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {result && (
+              <div className="card">
+                <div className="cardHeader compact">
+                  <div className="cardTitle">
+                    <Check size={16} />
+                    <span>{t.results}</span>
+                  </div>
+                </div>
+
+                <div className="results">
+                  <div className="kpi ok">
+                    <div className="kpiIcon">
+                      <Check size={18} />
+                    </div>
+                    <div>
+                      <div className="kpiNum">{result.successful_assignments}</div>
+                      <div className="kpiLbl">{t.assigned}</div>
+                    </div>
+                  </div>
+
+                  <div className="kpi info">
+                    <div className="kpiIcon">
+                      <Users size={18} />
+                    </div>
+                    <div>
+                      <div className="kpiNum">{result.roommate_matches}</div>
+                      <div className="kpiLbl">{t.roommateMatches}</div>
+                    </div>
+                  </div>
+
+                  <div className="kpi warn">
+                    <div className="kpiIcon">
+                      <AlertTriangle size={18} />
+                    </div>
+                    <div>
+                      <div className="kpiNum">{result.conflicts}</div>
+                      <div className="kpiLbl">{t.conflicts}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <button className="ghostBtn">{t.viewResults}</button>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
       <style>{styles}</style>
@@ -411,317 +561,623 @@ function AllocationPage({ language }) {
 }
 
 const styles = `
-  .allocation-page { padding: 24px; }
-  .page-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; }
-  .page-header h1 { font-size: 24px; font-weight: 700; margin-bottom: 4px; }
-  .page-header p { color: #64748b; }
-  .region-badge { background: linear-gradient(135deg, #3d9fe0, #2563eb); color: white; padding: 8px 16px; border-radius: 20px; font-size: 14px; }
+  :root{
+    --bg: #f6f8fc;
+    --card: #ffffff;
+    --text: #0f172a;
+    --muted: #64748b;
+    --border: rgba(15,23,42,0.10);
+    --shadow: 0 10px 30px rgba(15,23,42,0.08);
+    --shadow2: 0 6px 18px rgba(15,23,42,0.08);
+    --primary: #2563eb;
+    --primarySoft: rgba(37,99,235,0.10);
+    --ok: #047857;
+    --okSoft: rgba(4,120,87,0.12);
+    --warn: #b45309;
+    --warnSoft: rgba(180,83,9,0.14);
+    --danger: #b91c1c;
+    --dangerSoft: rgba(185,28,28,0.12);
+    --radius: 18px;
+    --radius2: 14px;
+  }
 
-  .loading-state, .error-state {
+  .allocation-page{
+    padding: 18px;
+    background: var(--bg);
+    min-height: calc(100vh - 40px);
+  }
+
+  .shell{
+    max-width: 1080px;
+    margin: 0 auto;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 400px;
-    color: #64748b;
-    gap: 16px;
-  }
-  .error-state { color: #dc2626; }
-  .error-message { font-size: 14px; color: #94a3b8; }
-  .error-state button { 
-    padding: 8px 16px; 
-    background: #3d9fe0; 
-    color: white; 
-    border: none; 
-    border-radius: 8px; 
-    cursor: pointer; 
+    gap: 14px;
   }
 
-  /* Inbox Notification */
-  .inbox-notification {
-    background: linear-gradient(135deg, #dbeafe, #ede9fe);
-    border: 1px solid #93c5fd;
-    border-radius: 16px;
-    padding: 20px;
-    margin-bottom: 24px;
-  }
-
-  .notification-header {
+  .topbar{
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: linear-gradient(to bottom, rgba(246,248,252,1), rgba(246,248,252,0.88));
+    backdrop-filter: blur(8px);
+    border-radius: var(--radius);
+    padding: 14px 14px;
     display: flex;
-    align-items: center;
-    gap: 16px;
-    margin-bottom: 16px;
-  }
-
-  .notification-icon {
-    width: 48px;
-    height: 48px;
-    background: white;
-    border-radius: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #2563eb;
-  }
-
-  .notification-title h3 {
-    font-size: 16px;
-    font-weight: 600;
-    color: #1e3a8a;
-    margin-bottom: 4px;
-  }
-
-  .batch-tag {
-    font-size: 12px;
-    background: #2563eb;
-    color: white;
-    padding: 2px 8px;
-    border-radius: 8px;
-  }
-
-  .notification-content {
-    background: white;
-    border-radius: 12px;
-    padding: 16px;
-  }
-
-  .main-message {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    font-size: 18px;
-    color: #1e293b;
-    padding-bottom: 12px;
-    border-bottom: 1px solid #e5e7eb;
-  }
-
-  .main-message svg { color: #2563eb; }
-
-  .notification-meta {
-    display: flex;
-    gap: 24px;
-    margin-top: 12px;
-  }
-
-  .meta-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 13px;
-    color: #64748b;
-  }
-
-  /* Main Grid */
-  .allocation-grid { max-width: 700px; margin: 0 auto; }
-
-  .stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
-
-  .stat-card {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    background: white;
-    padding: 24px;
-    border-radius: 16px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-  }
-
-  .stat-card svg { color: #3d9fe0; }
-  .stat-card .number { display: block; font-size: 28px; font-weight: 700; color: #1e293b; }
-  .stat-card .label { font-size: 14px; color: #64748b; }
-
-  /* Breakdown Card */
-  .breakdown-card {
-    background: white;
-    padding: 20px;
-    border-radius: 16px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    margin-bottom: 24px;
-  }
-
-  .breakdown-card h3 {
-    font-size: 14px;
-    color: #64748b;
-    margin-bottom: 16px;
-  }
-
-  .breakdown-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 12px;
-  }
-
-  .breakdown-item {
-    text-align: center;
-    padding: 12px;
-    background: #f8fafc;
-    border-radius: 10px;
-  }
-
-  .breakdown-item .count {
-    display: block;
-    font-size: 24px;
-    font-weight: 700;
-    color: #1e293b;
-  }
-
-  .breakdown-item .label {
-    font-size: 12px;
-    color: #64748b;
-  }
-
-  .breakdown-item.priority {
-    background: #fef3c7;
-  }
-
-  .breakdown-item.priority .count {
-    color: #d97706;
-  }
-
-  /* Constraints */
-  .constraints-card {
-    background: white;
-    padding: 24px;
-    border-radius: 16px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    margin-bottom: 24px;
-  }
-
-  .constraints-card h3 {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 16px;
-    margin-bottom: 20px;
-    color: #64748b;
-  }
-
-  .constraints-list { display: flex; flex-direction: column; gap: 12px; }
-
-  .constraint-item {
-    display: flex;
+    align-items: flex-end;
     justify-content: space-between;
-    align-items: center;
-    padding: 12px;
-    background: #f8fafc;
-    border-radius: 10px;
+    gap: 12px;
   }
 
-  .constraint-item.critical {
-    border: 1px solid #fecaca;
-    background: #fff1f2;
+  .titleBlock h1{
+    margin: 0;
+    font-size: 22px;
+    font-weight: 900;
+    letter-spacing: -0.02em;
+    color: var(--text);
   }
 
-  .constraint-toggle {
+  .titleBlock p{
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-weight: 700;
+    font-size: 13px;
+  }
+
+  .topbarRight{
     display: flex;
     align-items: center;
     gap: 10px;
-    cursor: pointer;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
-  .constraint-toggle.locked { cursor: not-allowed; opacity: 0.95; }
-  .constraint-toggle input { width: 18px; height: 18px; }
-
-  .constraint-text { display: inline-flex; align-items: center; gap: 10px; }
-
-  .critical-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    padding: 2px 8px;
+  .region-badge{
+    background: var(--primarySoft);
+    border: 1px solid rgba(37,99,235,0.25);
+    color: #1d4ed8;
+    padding: 8px 12px;
     border-radius: 999px;
-    background: #fee2e2;
-    color: #b91c1c;
-    font-weight: 600;
-  }
-
-  .constraint-type {
-    font-size: 12px;
-    padding: 4px 10px;
-    border-radius: 12px;
-    font-weight: 600;
+    font-size: 13px;
+    font-weight: 900;
     white-space: nowrap;
   }
 
-  .constraint-type.strict { background: #fee2e2; color: #dc2626; }
-  .constraint-type.flexible { background: #dbeafe; color: #2563eb; }
-
-  /* Run Section */
-  .run-section { margin-bottom: 24px; }
-
-  .run-btn {
-    width: 100%;
-    display: flex;
+  .run-btn{
+    display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 10px;
-    padding: 16px;
+    padding: 10px 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(4,120,87,0.25);
     background: linear-gradient(135deg, #059669, #047857);
     color: white;
-    border: none;
-    border-radius: 12px;
-    font-size: 18px;
-    font-weight: 600;
-    font-family: inherit;
+    font-weight: 950;
+    font-size: 14px;
     cursor: pointer;
-    transition: all 0.2s;
+    box-shadow: 0 10px 20px rgba(4,120,87,0.25);
+    transition: transform 0.18s, filter 0.18s;
+    font-family: inherit;
+    white-space: nowrap;
   }
 
-  .run-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(5, 150, 105, 0.4); }
-  .run-btn:disabled { opacity: 0.7; cursor: not-allowed; transform: none; }
+  .run-btn:hover{ transform: translateY(-1px); filter: brightness(0.98); }
+  .run-btn:disabled{
+    opacity: 0.65;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+  }
 
-  .spin { animation: spin 1s linear infinite; }
-  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-
-  .progress-section { margin-top: 16px; }
-  .progress-bar { height: 8px; background: #e5e7eb; border-radius: 4px; overflow: hidden; }
-  .progress-fill { height: 100%; background: linear-gradient(90deg, #3d9fe0, #2563eb); transition: width 0.3s; }
-  .progress-section span { display: block; text-align: center; margin-top: 8px; font-size: 14px; color: #64748b; }
-
-  .no-students {
-    display: flex;
-    flex-direction: column;
+  .status-chip{
+    display: inline-flex;
     align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 900;
+    border: 1px solid var(--border);
+    background: rgba(15,23,42,0.03);
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .status-chip.ok{
+    background: var(--okSoft);
+    border-color: rgba(4,120,87,0.25);
+    color: var(--ok);
+  }
+  .status-chip.warn{
+    background: var(--warnSoft);
+    border-color: rgba(180,83,9,0.25);
+    color: var(--warn);
+  }
+  .status-chip.neutral{
+    background: rgba(15,23,42,0.03);
+    border-color: var(--border);
+    color: var(--text);
+  }
+
+  .progressWrap{
+    display:flex;
+    align-items:center;
+    gap: 10px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius2);
+    padding: 10px 12px;
+    box-shadow: var(--shadow2);
+  }
+  .progressBar{
+    height: 10px;
+    border-radius: 999px;
+    background: rgba(15,23,42,0.08);
+    overflow:hidden;
+    flex: 1;
+  }
+  .progressFill{
+    height: 100%;
+    background: linear-gradient(90deg, rgba(37,99,235,0.75), rgba(5,150,105,0.75));
+    transition: width 0.25s ease;
+    border-radius: 999px;
+  }
+  .progressPct{
+    width: 52px;
+    text-align:right;
+    font-size: 13px;
+    font-weight: 950;
+    color: var(--muted);
+  }
+
+  .banner{
+    display:flex;
+    align-items: center;
+    justify-content: space-between;
     gap: 12px;
-    padding: 40px;
-    background: #d1fae5;
-    border-radius: 16px;
-    color: #059669;
+    background: linear-gradient(135deg, rgba(37,99,235,0.10), rgba(99,102,241,0.10));
+    border: 1px solid rgba(37,99,235,0.18);
+    border-radius: var(--radius);
+    padding: 14px;
+  }
+  .bannerLeft{
+    display:flex;
+    align-items: flex-start;
+    gap: 12px;
+    min-width: 0;
+  }
+  .bannerIcon{
+    width: 40px;
+    height: 40px;
+    border-radius: 14px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background: rgba(255,255,255,0.85);
+    border: 1px solid rgba(255,255,255,0.6);
+    color: #1d4ed8;
+    flex-shrink: 0;
+  }
+  .bannerText{ min-width: 0; }
+  .bannerTitle{
+    display:flex;
+    align-items:center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .bannerHeading{
+    font-weight: 950;
+    color: #1e3a8a;
+    font-size: 13px;
+  }
+  .chip{
+    font-size: 12px;
+    font-weight: 950;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.85);
+    border: 1px solid rgba(15,23,42,0.10);
+    color: var(--text);
+  }
+  .bannerMain{
+    display:flex;
+    align-items:center;
+    gap: 8px;
+    margin-top: 8px;
+    font-weight: 800;
+    color: var(--text);
+  }
+  .bannerMeta{
+    display:flex;
+    align-items:center;
+    gap: 8px;
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 800;
   }
 
-  /* Results */
-  .results-card {
-    background: white;
-    padding: 24px;
-    border-radius: 16px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  .grid{
+    display:grid;
+    grid-template-columns: 1.25fr 0.9fr;
+    gap: 14px;
+    align-items:start;
   }
 
-  .results-card h3 { font-size: 16px; margin-bottom: 20px; }
-  .results-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 20px; }
+  .card{
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 14px;
+  }
 
-  .result-item { text-align: center; padding: 16px; border-radius: 12px; }
-  .result-item.success { background: #d1fae5; color: #059669; }
-  .result-item.info { background: #dbeafe; color: #2563eb; }
-  .result-item.warning { background: #fef3c7; color: #d97706; }
+  .cardHeader{
+    display:flex;
+    align-items:flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .cardHeader.compact{
+    padding-bottom: 10px;
+    margin-bottom: 12px;
+  }
+  .cardTitle{
+    display:flex;
+    align-items:center;
+    gap: 10px;
+    font-weight: 950;
+    color: var(--text);
+  }
+  .hint{
+    font-size: 12px;
+    color: var(--muted);
+    font-weight: 800;
+    text-align: right;
+  }
 
-  .result-item .number { display: block; font-size: 24px; font-weight: 700; margin: 8px 0 4px; }
-  .result-item .label { font-size: 12px; }
+  .constraintsTable{
+    display:flex;
+    flex-direction:column;
+    gap: 10px;
+  }
 
-  .view-btn {
+  .row{
+    display:flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 12px;
+    border-radius: var(--radius2);
+    background: rgba(15,23,42,0.02);
+    border: 1px solid rgba(15,23,42,0.06);
+  }
+  .row.critical{
+    background: rgba(185,28,28,0.06);
+    border-color: rgba(185,28,28,0.14);
+  }
+  .row.disabled{
+    opacity: 0.75;
+  }
+
+  .rowMain{
+    display:flex;
+    flex-direction:column;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .toggle{
+    display:flex;
+    align-items:center;
+    gap: 10px;
+    cursor: pointer;
+    min-width: 0;
+  }
+  .toggle.locked{
+    cursor: not-allowed;
+  }
+  .toggle input{
+    width: 18px;
+    height: 18px;
+  }
+  .labelText{
+    display:inline-flex;
+    align-items:center;
+    gap: 10px;
+    font-weight: 900;
+    color: var(--text);
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+  .miniChip{
+    display:inline-flex;
+    align-items:center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 950;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--dangerSoft);
+    border: 1px solid rgba(185,28,28,0.18);
+    color: var(--danger);
+    white-space: nowrap;
+  }
+
+  .weight{
+    display:grid;
+    grid-template-columns: 64px 1fr 40px;
+    align-items:center;
+    gap: 10px;
+  }
+  .wLabel{
+    font-size: 12px;
+    font-weight: 900;
+    color: var(--muted);
+  }
+  .weight input[type="range"]{
+    width: 100%;
+    accent-color: var(--primary);
+  }
+  .wValue{
+    font-size: 12px;
+    font-weight: 950;
+    color: var(--text);
+    padding: 6px 8px;
+    border-radius: 12px;
+    background: #fff;
+    border: 1px solid var(--border);
+    text-align:center;
+  }
+
+  .pill{
+    height: fit-content;
+    align-self: center;
+    padding: 8px 10px;
+    border-radius: 999px;
+    font-weight: 950;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    background: rgba(15,23,42,0.03);
+    white-space: nowrap;
+  }
+  .pill.strict{
+    background: var(--dangerSoft);
+    border-color: rgba(185,28,28,0.18);
+    color: var(--danger);
+  }
+  .pill.flex{
+    background: var(--primarySoft);
+    border-color: rgba(37,99,235,0.18);
+    color: #1d4ed8;
+  }
+
+  .lockNote{
+    margin-top: 12px;
+    display:flex;
+    align-items:center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius2);
+    background: rgba(15,23,42,0.03);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-weight: 850;
+    font-size: 13px;
+  }
+
+  .statsRow{
+    display:grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .stat{
+    display:flex;
+    align-items:center;
+    gap: 12px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow2);
+    padding: 14px;
+  }
+
+  .statIcon{
+    width: 38px;
+    height: 38px;
+    border-radius: 14px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background: rgba(37,99,235,0.10);
+    border: 1px solid rgba(37,99,235,0.16);
+    color: #1d4ed8;
+  }
+
+  .statNum{
+    font-size: 22px;
+    font-weight: 950;
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+  .statLbl{
+    font-size: 12px;
+    font-weight: 900;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .breakdown{
+    display:grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .bItem{
+    border-radius: var(--radius2);
+    border: 1px solid var(--border);
+    background: rgba(15,23,42,0.02);
+    padding: 12px;
+    text-align:center;
+  }
+  .bItem.priority{
+    background: var(--warnSoft);
+    border-color: rgba(180,83,9,0.20);
+  }
+  .bNum{
+    font-size: 20px;
+    font-weight: 950;
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+  .bItem.priority .bNum{
+    color: var(--warn);
+  }
+  .bLbl{
+    margin-top: 4px;
+    font-size: 12px;
+    font-weight: 900;
+    color: var(--muted);
+  }
+
+  .results{
+    display:grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .kpi{
+    display:flex;
+    align-items:center;
+    gap: 12px;
+    border-radius: var(--radius2);
+    border: 1px solid var(--border);
+    background: rgba(15,23,42,0.02);
+    padding: 12px;
+  }
+  .kpi.ok{
+    background: var(--okSoft);
+    border-color: rgba(4,120,87,0.20);
+  }
+  .kpi.info{
+    background: var(--primarySoft);
+    border-color: rgba(37,99,235,0.18);
+  }
+  .kpi.warn{
+    background: var(--warnSoft);
+    border-color: rgba(180,83,9,0.20);
+  }
+  .kpiIcon{
+    width: 36px;
+    height: 36px;
+    border-radius: 14px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background: rgba(255,255,255,0.75);
+    border: 1px solid rgba(255,255,255,0.6);
+  }
+  .kpi.ok .kpiIcon{ color: var(--ok); }
+  .kpi.info .kpiIcon{ color: #1d4ed8; }
+  .kpi.warn .kpiIcon{ color: var(--warn); }
+  .kpiNum{
+    font-size: 18px;
+    font-weight: 950;
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+  .kpiLbl{
+    font-size: 12px;
+    font-weight: 900;
+    color: rgba(15,23,42,0.70);
+    margin-top: 2px;
+  }
+
+  .ghostBtn{
+    margin-top: 12px;
     width: 100%;
     padding: 12px;
-    background: #f1f5f9;
-    border: none;
-    border-radius: 10px;
-    font-size: 14px;
-    font-weight: 500;
-    font-family: inherit;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: rgba(15,23,42,0.02);
+    color: var(--text);
+    font-weight: 950;
     cursor: pointer;
+    font-family: inherit;
+  }
+  .ghostBtn:hover{
+    background: rgba(37,99,235,0.06);
+    border-color: rgba(37,99,235,0.18);
+    color: #1d4ed8;
   }
 
-  .view-btn:hover { background: #e2e8f0; }
+  .loading-state, .error-state{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    height: 400px;
+    gap: 14px;
+    border-radius: var(--radius);
+    background: var(--card);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow2);
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  .loading-state p{
+    margin: 0;
+    color: var(--muted);
+    font-weight: 900;
+  }
+
+  .error-state{
+    color: var(--danger);
+  }
+  .error-message{
+    font-size: 13px;
+    color: var(--muted);
+    max-width: 520px;
+    text-align:center;
+    margin: -6px 0 0;
+    font-weight: 800;
+  }
+  .error-state button{
+    padding: 10px 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(37,99,235,0.18);
+    background: var(--primarySoft);
+    color: #1d4ed8;
+    font-weight: 950;
+    cursor:pointer;
+    font-family: inherit;
+  }
+  .error-state button:hover{
+    background: rgba(37,99,235,0.14);
+  }
+
+  .spin{ animation: spin 1s linear infinite; }
+  @keyframes spin{ from{ transform: rotate(0deg);} to{ transform: rotate(360deg);} }
+
+  @media (max-width: 980px){
+    .topbar{
+      flex-direction: column;
+      align-items: flex-start;
+    }
+    .topbarRight{
+      justify-content:flex-start;
+    }
+    .grid{
+      grid-template-columns: 1fr;
+    }
+    .breakdown{
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
 `;
 
 export default AllocationPage;
