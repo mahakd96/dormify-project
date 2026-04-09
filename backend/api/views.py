@@ -1,6 +1,6 @@
 """
 DORMIFY - API Views
-Handle all API requests
+Safe merged version
 """
 
 from rest_framework import viewsets, status, permissions
@@ -9,14 +9,14 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.utils import timezone
-from django.db.models import Q, Count
+from django.db import transaction
+from django.db.models import Q
 import pandas as pd
-from datetime import datetime
-
 
 from .models import (
-    User, Region, Building, Apartment, Room, Student,
-    Transfer, AllocationRun, ImportBatch, RegionInbox
+    User, Region, Office, StaffProfile, DormType, Building, Floor, Apartment, Room, Bed,
+    Student, BedAssignment, MovementRequest, Transfer,
+    AllocationRun, ImportBatch, RegionInbox
 )
 from .serializers import (
     UserSerializer, LoginSerializer, RegisterSerializer,
@@ -32,7 +32,6 @@ from .serializers import (
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def login_view(request):
-    """Login and get JWT token"""
     serializer = LoginSerializer(data=request.data)
 
     if serializer.is_valid():
@@ -58,7 +57,6 @@ def login_view(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def register_view(request):
-    """Register new user"""
     serializer = RegisterSerializer(data=request.data)
 
     if serializer.is_valid():
@@ -83,7 +81,6 @@ def register_view(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def me_view(request):
-    """Get current logged-in user"""
     return Response({
         'user': UserSerializer(request.user).data
     })
@@ -92,7 +89,6 @@ def me_view(request):
 @api_view(['PUT'])
 @permission_classes([IsAuthenticated])
 def change_password_view(request):
-    """Change password"""
     user = request.user
     current_password = request.data.get('current_password')
     new_password = request.data.get('new_password')
@@ -119,29 +115,120 @@ def change_password_view(request):
 # PERMISSION HELPERS
 # ===========================================
 class IsCentralAdmin(permissions.BasePermission):
-    """Only central admin can access"""
     def has_permission(self, request, view):
         return request.user.is_authenticated and request.user.is_central_admin
 
 
 class IsBoss(permissions.BasePermission):
-    """Central admin or region boss can access"""
     def has_permission(self, request, view):
         return request.user.is_authenticated and request.user.is_boss
 
 
 def filter_by_region(queryset, user, region_field='region'):
-    """Filter queryset by user's region (unless central admin)"""
     if user.is_central_admin:
         return queryset
+    if not user.region:
+        return queryset.none()
     return queryset.filter(**{region_field: user.region})
+
+
+def ensure_room_beds(room: Room):
+    """
+    If room has no Bed records yet, create beds automatically based on capacity.
+    This keeps old room-based frontend working while enabling new bed-level model.
+    """
+    existing = room.beds.count()
+    if existing >= room.capacity:
+        return
+
+    for i in range(existing + 1, room.capacity + 1):
+        Bed.objects.create(room=room, label=f'Bed {i}')
+
+
+def get_free_bed(room: Room):
+    ensure_room_beds(room)
+    occupied_bed_ids = BedAssignment.objects.filter(
+        bed__room=room,
+        status=BedAssignment.Status.ACTIVE
+    ).values_list('bed_id', flat=True)
+    return room.beds.exclude(id__in=occupied_bed_ids).order_by('id').first()
+
+
+def end_active_bed_assignments(student: Student):
+    BedAssignment.objects.filter(
+        student=student,
+        status=BedAssignment.Status.ACTIVE
+    ).update(
+        status=BedAssignment.Status.ENDED,
+        ended_at=timezone.now()
+    )
+
+
+def assign_student_to_room(student: Student, room: Room, assigned_by: User, assignment_type=BedAssignment.AssignmentType.MANUAL):
+    """
+    Creates/updates the normalized bed assignment,
+    and also keeps Student.assigned_room updated for frontend compatibility.
+    """
+    free_bed = get_free_bed(room)
+    if not free_bed:
+        raise ValueError('No available bed in selected room.')
+
+    end_active_bed_assignments(student)
+
+    assignment = BedAssignment.objects.create(
+        student=student,
+        bed=free_bed,
+        status=BedAssignment.Status.ACTIVE,
+        assignment_type=assignment_type,
+        assigned_by=assigned_by
+    )
+
+    student.assigned_room = room
+    student.save(update_fields=['assigned_room', 'updated_at'])
+
+    return assignment
+
+
+def infer_movement_type(from_room: Room, to_room: Room):
+    if not from_room or not to_room:
+        return MovementRequest.MovementType.INTERNAL
+
+    from_region = from_room.region if from_room else None
+    to_region = to_room.region if to_room else None
+
+    if from_region and to_region and from_region != to_region:
+        return MovementRequest.MovementType.REGION_CHANGE
+
+    from_dorm_type = from_room.apartment.dorm_type_id if from_room and from_room.apartment else None
+    to_dorm_type = to_room.apartment.dorm_type_id if to_room and to_room.apartment else None
+    if from_dorm_type != to_dorm_type:
+        return MovementRequest.MovementType.DORM_TYPE_CHANGE
+
+    return MovementRequest.MovementType.INTERNAL
+
+
+def user_can_approve_transfer(user: User, transfer: Transfer):
+    """
+    Central admin: can approve everything
+    Region boss: only same-region internal moves
+    """
+    if user.is_central_admin:
+        return True
+
+    if not user.is_boss or not user.region:
+        return False
+
+    same_from_region = transfer.from_room.region == user.region
+    same_to_region = transfer.to_room.region == user.region
+
+    # regional boss only internal/same-region approval
+    return same_from_region and same_to_region
 
 
 # ===========================================
 # REGION VIEWS
 # ===========================================
 class RegionViewSet(viewsets.ModelViewSet):
-    """API endpoint for regions"""
     serializer_class = RegionSerializer
     permission_classes = [IsAuthenticated]
 
@@ -156,7 +243,6 @@ class RegionViewSet(viewsets.ModelViewSet):
 # BUILDING VIEWS
 # ===========================================
 class BuildingViewSet(viewsets.ModelViewSet):
-    """API endpoint for buildings"""
     serializer_class = BuildingSerializer
     permission_classes = [IsAuthenticated]
 
@@ -166,7 +252,6 @@ class BuildingViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def apartments(self, request, pk=None):
-        """Get apartments in a building"""
         building = self.get_object()
         apartments = building.apartments.filter(is_active=True)
         serializer = ApartmentSerializer(apartments, many=True)
@@ -174,14 +259,12 @@ class BuildingViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     def rooms(self, request, pk=None):
-        """Get rooms in a building"""
         building = self.get_object()
         rooms = Room.objects.filter(
             apartment__building=building,
             is_active=True
         )
 
-        # Filter by available only
         available_only = request.query_params.get('available', 'false') == 'true'
         if available_only:
             rooms = [r for r in rooms if not r.is_full]
@@ -194,7 +277,6 @@ class BuildingViewSet(viewsets.ModelViewSet):
 # STUDENT VIEWS
 # ===========================================
 class StudentViewSet(viewsets.ModelViewSet):
-    """API endpoint for students"""
     serializer_class = StudentSerializer
     permission_classes = [IsAuthenticated]
 
@@ -202,7 +284,6 @@ class StudentViewSet(viewsets.ModelViewSet):
         queryset = Student.objects.filter(is_active=True)
         queryset = filter_by_region(queryset, self.request.user)
 
-        # Search
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
@@ -211,17 +292,14 @@ class StudentViewSet(viewsets.ModelViewSet):
                 Q(student_id__icontains=search)
             )
 
-        # Filter by gender
         gender = self.request.query_params.get('gender')
         if gender and gender != 'all':
             queryset = queryset.filter(gender=gender)
 
-        # Filter by religion
         religion = self.request.query_params.get('religion')
         if religion and religion != 'all':
             queryset = queryset.filter(religion=religion)
 
-        # Filter by status
         status_filter = self.request.query_params.get('status')
         if status_filter == 'assigned':
             queryset = queryset.filter(assigned_room__isnull=False)
@@ -233,7 +311,6 @@ class StudentViewSet(viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        # Only central admin can create students
         if not self.request.user.is_central_admin:
             raise permissions.PermissionDenied('רק מנהל מרכזי יכול להוסיף סטודנטים')
         serializer.save()
@@ -243,31 +320,56 @@ class StudentViewSet(viewsets.ModelViewSet):
 # TRANSFER VIEWS
 # ===========================================
 class TransferViewSet(viewsets.ModelViewSet):
-    """API endpoint for transfer requests"""
     serializer_class = TransferSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = Transfer.objects.all()
+        queryset = Transfer.objects.select_related(
+            'student', 'from_room', 'to_room', 'requested_by', 'reviewed_by'
+        )
 
-        # Filter by region
         if not self.request.user.is_central_admin:
             queryset = queryset.filter(student__region=self.request.user.region)
 
-        # Filter by status
         status_filter = self.request.query_params.get('status')
         if status_filter and status_filter != 'all':
             queryset = queryset.filter(status=status_filter)
 
-        return queryset
+        return queryset.order_by('-created_at')
 
     def perform_create(self, serializer):
-        # Set requested_by to current user
-        serializer.save(requested_by=self.request.user)
+        student = serializer.validated_data['student']
+        from_room = serializer.validated_data.get('from_room') or student.assigned_room
+        to_room = serializer.validated_data['to_room']
+
+        if not from_room:
+            raise permissions.ValidationError('הסטודנט אינו משויך כרגע לחדר מקור')
+
+        movement_type = infer_movement_type(from_room, to_room)
+
+        transfer = serializer.save(
+            requested_by=self.request.user,
+            from_room=from_room,
+            movement_type=movement_type
+        )
+
+        current_assignment = student.current_assignment
+        target_bed = get_free_bed(to_room)
+
+        movement_request = MovementRequest.objects.create(
+            student=student,
+            from_assignment=current_assignment,
+            to_bed=target_bed,
+            movement_type=movement_type,
+            status=MovementRequest.Status.PENDING,
+            reason=transfer.reason,
+            requested_by=self.request.user
+        )
+        transfer.movement_request = movement_request
+        transfer.save(update_fields=['movement_request', 'updated_at'])
 
     @action(detail=True, methods=['put'])
     def approve(self, request, pk=None):
-        """Approve transfer request (boss only)"""
         if not request.user.is_boss:
             return Response({
                 'error': 'רק מנהל יכול לאשר בקשות'
@@ -280,32 +382,55 @@ class TransferViewSet(viewsets.ModelViewSet):
                 'error': 'הבקשה כבר טופלה'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Check region permission
-        if not request.user.is_central_admin:
-            if transfer.student.region != request.user.region:
-                return Response({
-                    'error': 'אין הרשאה לאשר בקשה זו'
-                }, status=status.HTTP_403_FORBIDDEN)
+        if not user_can_approve_transfer(request.user, transfer):
+            return Response({
+                'error': 'אין הרשאה לאשר בקשה זו'
+            }, status=status.HTTP_403_FORBIDDEN)
 
-        # Update transfer
-        transfer.status = Transfer.Status.APPROVED
-        transfer.reviewed_by = request.user
-        transfer.reviewed_at = timezone.now()
-        transfer.save()
+        if transfer.to_room.is_full:
+            return Response({
+                'error': 'החדר היעד מלא'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Update student's room
-        student = transfer.student
-        student.assigned_room = transfer.to_room
-        student.save()
+        try:
+            with transaction.atomic():
+                transfer.status = Transfer.Status.APPROVED
+                transfer.reviewed_by = request.user
+                transfer.reviewed_at = timezone.now()
+                transfer.save()
 
-        return Response({
-            'message': 'הבקשה אושרה בהצלחה',
-            'transfer': TransferSerializer(transfer).data
-        })
+                student = transfer.student
+                assignment_type = (
+                    BedAssignment.AssignmentType.PHASE2
+                    if transfer.movement_type == MovementRequest.MovementType.PHASE2
+                    else BedAssignment.AssignmentType.TRANSFER
+                )
+                new_assignment = assign_student_to_room(
+                    student=student,
+                    room=transfer.to_room,
+                    assigned_by=request.user,
+                    assignment_type=assignment_type
+                )
+
+                if transfer.movement_request:
+                    transfer.movement_request.to_bed = new_assignment.bed
+                    transfer.movement_request.status = MovementRequest.Status.COMPLETED
+                    transfer.movement_request.approved_by = request.user
+                    transfer.movement_request.completed_at = timezone.now()
+                    transfer.movement_request.save()
+
+            return Response({
+                'message': 'הבקשה אושרה בהצלחה',
+                'transfer': TransferSerializer(transfer).data
+            })
+
+        except ValueError as e:
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['put'])
     def reject(self, request, pk=None):
-        """Reject transfer request (boss only)"""
         if not request.user.is_boss:
             return Response({
                 'error': 'רק מנהל יכול לדחות בקשות'
@@ -318,12 +443,22 @@ class TransferViewSet(viewsets.ModelViewSet):
                 'error': 'הבקשה כבר טופלה'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Update transfer
+        if not request.user.is_central_admin and transfer.student.region != request.user.region:
+            return Response({
+                'error': 'אין הרשאה לדחות בקשה זו'
+            }, status=status.HTTP_403_FORBIDDEN)
+
         transfer.status = Transfer.Status.REJECTED
         transfer.reviewed_by = request.user
         transfer.reviewed_at = timezone.now()
         transfer.rejection_reason = request.data.get('reason', '')
         transfer.save()
+
+        if transfer.movement_request:
+            transfer.movement_request.status = MovementRequest.Status.REJECTED
+            transfer.movement_request.approved_by = request.user
+            transfer.movement_request.completed_at = timezone.now()
+            transfer.movement_request.save()
 
         return Response({
             'message': 'הבקשה נדחתה',
@@ -337,7 +472,6 @@ class TransferViewSet(viewsets.ModelViewSet):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def run_allocation(request):
-    """Run the MiniZinc allocation algorithm"""
     if not request.user.is_boss:
         return Response({
             'error': 'רק מנהל יכול להריץ שיבוץ'
@@ -358,18 +492,15 @@ def run_allocation(request):
             'error': 'אזור לא נמצא'
         }, status=status.HTTP_404_NOT_FOUND)
 
-    # Create allocation run record
     allocation_run = AllocationRun.objects.create(
         region=region,
         run_by=request.user
     )
 
     try:
-        # Import and run allocation algorithm
-        from allocation.solver import run_allocation_algorithm
+        from backend.allocation.solver import run_allocation_algorithm
         result = run_allocation_algorithm(region)
 
-        # Update run record
         allocation_run.status = AllocationRun.Status.COMPLETED
         allocation_run.students_processed = result.get('students_processed', 0)
         allocation_run.successful_assignments = result.get('successful_assignments', 0)
@@ -397,7 +528,6 @@ def run_allocation(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def allocation_history(request):
-    """Get allocation run history"""
     queryset = AllocationRun.objects.all()
 
     if not request.user.is_central_admin:
@@ -413,7 +543,6 @@ def allocation_history(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def statistics(request):
-    """Get dashboard statistics"""
     user = request.user
 
     if user.is_central_admin:
@@ -447,10 +576,8 @@ def statistics(request):
 
 
 # ===========================================
-# EXCEL UPLOAD AND SPLIT FUNCTIONALITY
+# EXCEL UPLOAD HELPERS
 # ===========================================
-
-# Region name mapping from Hebrew to region ID
 REGION_MAPPING = {
     'מעונות קנדה': 'canada',
     'מעונות ההסמכה': 'hasmaha',
@@ -468,23 +595,21 @@ REGION_MAPPING = {
     'מעונות כפר השמכה': 'kfar-hasmaha',
 }
 
+
 def get_or_create_region(region_name_hebrew):
-    """Get or create a region based on Hebrew name"""
     region_id = REGION_MAPPING.get(region_name_hebrew)
 
     if not region_id:
-        # Try to find by exact name match
         region = Region.objects.filter(name=region_name_hebrew).first()
         if region:
             return region
-        # Create new region with slugified ID
         region_id = region_name_hebrew.replace(' ', '-').replace('מעונות ', '')
 
-    region, created = Region.objects.get_or_create(
+    region, _ = Region.objects.get_or_create(
         id=region_id,
         defaults={
             'name': region_name_hebrew,
-            'name_en': region_name_hebrew,  # Will be updated manually
+            'name_en': region_name_hebrew,
             'is_active': True
         }
     )
@@ -492,7 +617,6 @@ def get_or_create_region(region_name_hebrew):
 
 
 def parse_religion(value):
-    """Parse religion from Hebrew to model choice"""
     if not value or pd.isna(value):
         return Student.Religion.NOT_SPECIFIED
     value = str(value).strip()
@@ -506,7 +630,6 @@ def parse_religion(value):
 
 
 def parse_gender(value):
-    """Parse gender from Hebrew to model choice"""
     if not value or pd.isna(value):
         return Student.Gender.MALE
     value = str(value).strip()
@@ -516,7 +639,6 @@ def parse_gender(value):
 
 
 def parse_nationality(value):
-    """Parse nationality from Hebrew to model choice"""
     if not value or pd.isna(value):
         return Student.Nationality.ISRAELI
     value = str(value).strip()
@@ -526,7 +648,6 @@ def parse_nationality(value):
 
 
 def parse_category(value):
-    """Parse student category from Hebrew"""
     if not value or pd.isna(value):
         return Student.StudentCategory.NEW
     value = str(value).strip()
@@ -542,37 +663,32 @@ def parse_category(value):
 
 
 def safe_str(value):
-    """Safely convert value to string"""
     if value is None or pd.isna(value):
         return ''
     return str(value).strip()
 
 
 def safe_int(value, default=0):
-    """Safely convert value to int"""
     if value is None or pd.isna(value):
         return default
     try:
         return int(float(value))
-    except:
+    except Exception:
         return default
 
 
+# ===========================================
+# EXCEL UPLOAD AND SPLIT FUNCTIONALITY
+# ===========================================
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def upload_excel(request):
-    """
-    Upload Excel file and split students by region.
-    Only Central Admin can use this endpoint.
-    """
-    # Check permission
     if not request.user.is_central_admin:
         return Response({
             'error': 'רק מנהל מרכזי יכול להעלות קבצים',
             'errorEn': 'Only Central Admin can upload files'
         }, status=status.HTTP_403_FORBIDDEN)
 
-    # Check for file
     if 'file' not in request.FILES:
         return Response({
             'error': 'לא נבחר קובץ',
@@ -581,14 +697,12 @@ def upload_excel(request):
 
     uploaded_file = request.FILES['file']
 
-    # Validate file extension
     if not uploaded_file.name.endswith(('.xlsx', '.xls')):
         return Response({
             'error': 'סוג קובץ לא נתמך. נא להעלות קובץ Excel (.xlsx או .xls)',
             'errorEn': 'Unsupported file type. Please upload an Excel file (.xlsx or .xls)'
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    # Create import batch record
     batch = ImportBatch.objects.create(
         uploaded_by=request.user,
         filename=uploaded_file.name,
@@ -596,29 +710,24 @@ def upload_excel(request):
     )
 
     try:
-        # Read all sheets from Excel
         excel_file = pd.ExcelFile(uploaded_file)
         all_students = []
 
         for sheet_name in excel_file.sheet_names:
             df = pd.read_excel(excel_file, sheet_name=sheet_name)
 
-            # Skip sheets that don't have student data
             if 'ת"ז ישראלית' not in df.columns:
                 continue
 
             for _, row in df.iterrows():
-                # Skip rows without student ID
                 student_id = safe_str(row.get('ת"ז ישראלית'))
                 if not student_id:
                     continue
 
-                # Get region from decision column
                 region_name = safe_str(row.get('אזור החלטה לאביב'))
                 if not region_name:
                     continue
 
-                # Only process approved students
                 decision_status = safe_str(row.get('החלטת מעונות - אביב'))
                 if decision_status == 'מבוטל':
                     continue
@@ -654,7 +763,6 @@ def upload_excel(request):
                 }
                 all_students.append(student_data)
 
-        # Group students by region
         region_counts = {}
         created_count = 0
         updated_count = 0
@@ -663,33 +771,30 @@ def upload_excel(request):
         for student_data in all_students:
             try:
                 region_name = student_data.pop('region_name')
-                sheet_name = student_data.pop('sheet_name')
+                student_data.pop('sheet_name', None)
 
-                # Get or create region
                 region = get_or_create_region(region_name)
 
-                # Count students per region
                 if region.id not in region_counts:
-                    region_counts[region.id] = {
-                        'region': region,
-                        'count': 0
-                    }
+                    region_counts[region.id] = {'region': region, 'count': 0}
                 region_counts[region.id]['count'] += 1
 
-                # Check if student exists
                 existing = Student.objects.filter(student_id=student_data['student_id']).first()
 
                 if existing:
-                    # Update existing student
                     for key, value in student_data.items():
                         setattr(existing, key, value)
                     existing.region = region
                     existing.batch = batch
                     existing.is_active = True
+                    existing.is_priority = student_data['disability_percentage'] > 0 or student_data['medical_approval']
+                    existing.priority_reason = (
+                        'נכות' if student_data['disability_percentage'] > 0
+                        else ('סיבה רפואית' if student_data['medical_approval'] else '')
+                    )
                     existing.save()
                     updated_count += 1
                 else:
-                    # Create new student
                     Student.objects.create(
                         region=region,
                         batch=batch,
@@ -703,17 +808,15 @@ def upload_excel(request):
                 errors.append(f"Error processing student {student_data.get('student_id', 'unknown')}: {str(e)}")
                 continue
 
-        # Mark any previous pending inbox items as superseded
-        for region_id, data in region_counts.items():
+        for region_id in region_counts.keys():
             RegionInbox.objects.filter(
                 region_id=region_id,
                 status=RegionInbox.Status.PENDING
             ).update(status=RegionInbox.Status.SUPERSEDED)
 
-        # Create region inbox items
         region_breakdown = []
         for region_id, data in region_counts.items():
-            inbox = RegionInbox.objects.create(
+            RegionInbox.objects.create(
                 region=data['region'],
                 batch=batch,
                 students_count=data['count'],
@@ -726,7 +829,6 @@ def upload_excel(request):
                 'count': data['count']
             })
 
-        # Update batch record
         batch.total_students = created_count + updated_count
         batch.status = ImportBatch.Status.COMPLETED
         batch.save()
@@ -740,7 +842,7 @@ def upload_excel(request):
             'created': created_count,
             'updated': updated_count,
             'region_breakdown': region_breakdown,
-            'errors': errors[:10] if errors else []  # Return first 10 errors
+            'errors': errors[:10] if errors else []
         })
 
     except Exception as e:
@@ -757,11 +859,9 @@ def upload_excel(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def list_batches(request):
-    """List all import batches (for Central Admin) or region-relevant batches"""
     if request.user.is_central_admin:
         batches = ImportBatch.objects.all()[:20]
     else:
-        # Get batches that have inbox items for user's region
         batch_ids = RegionInbox.objects.filter(
             region=request.user.region
         ).values_list('batch_id', flat=True)
@@ -774,9 +874,7 @@ def list_batches(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def region_inbox(request):
-    """Get inbox items for the current user's region"""
     if request.user.is_central_admin:
-        # Central admin sees all inbox items
         inbox_items = RegionInbox.objects.all()[:50]
     else:
         if not request.user.region:
@@ -793,7 +891,6 @@ def region_inbox(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def region_inbox_latest(request):
-    """Get the latest pending inbox item for the current user's region"""
     if request.user.is_central_admin:
         return Response({
             'error': 'מנהל מרכזי אינו מקבל הודעות תיבת דואר',
@@ -824,7 +921,6 @@ def region_inbox_latest(request):
 @api_view(['PUT'])
 @permission_classes([IsAuthenticated])
 def mark_inbox_viewed(request, inbox_id):
-    """Mark an inbox item as viewed"""
     try:
         inbox_item = RegionInbox.objects.get(id=inbox_id)
     except RegionInbox.DoesNotExist:
@@ -832,7 +928,6 @@ def mark_inbox_viewed(request, inbox_id):
             'error': 'הודעה לא נמצאה'
         }, status=status.HTTP_404_NOT_FOUND)
 
-    # Check permission
     if not request.user.is_central_admin and inbox_item.region != request.user.region:
         return Response({
             'error': 'אין הרשאה לצפות בהודעה זו'
@@ -850,7 +945,6 @@ def mark_inbox_viewed(request, inbox_id):
 @api_view(['PUT'])
 @permission_classes([IsAuthenticated])
 def mark_inbox_processed(request, inbox_id):
-    """Mark an inbox item as processed (after allocation run)"""
     try:
         inbox_item = RegionInbox.objects.get(id=inbox_id)
     except RegionInbox.DoesNotExist:
@@ -858,7 +952,6 @@ def mark_inbox_processed(request, inbox_id):
             'error': 'הודעה לא נמצאה'
         }, status=status.HTTP_404_NOT_FOUND)
 
-    # Check permission
     if not request.user.is_boss:
         return Response({
             'error': 'רק מנהל יכול לסמן הודעה כטופלה'
@@ -880,13 +973,10 @@ def mark_inbox_processed(request, inbox_id):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def allocation_summary(request):
-    """Get summary data for the allocation page"""
     user = request.user
 
     if user.is_central_admin:
-        # Central admin sees all
         students = Student.objects.filter(is_active=True)
-        regions = Region.objects.filter(is_active=True)
         rooms = Room.objects.filter(is_active=True)
         latest_inbox = None
     else:
@@ -896,16 +986,13 @@ def allocation_summary(request):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         students = Student.objects.filter(region=user.region, is_active=True)
-        regions = Region.objects.filter(id=user.region_id)
         rooms = Room.objects.filter(apartment__building__region=user.region, is_active=True)
 
-        # Get latest pending/viewed inbox item
         latest_inbox = RegionInbox.objects.filter(
             region=user.region,
             status__in=[RegionInbox.Status.PENDING, RegionInbox.Status.VIEWED]
         ).first()
 
-    # Calculate statistics
     total_students = students.count()
     unassigned_students = students.filter(assigned_room__isnull=True).count()
     assigned_students = total_students - unassigned_students
@@ -914,7 +1001,6 @@ def allocation_summary(request):
     total_capacity = sum(r.capacity for r in rooms)
     available_beds = sum(r.available_beds for r in rooms)
 
-    # Get latest batch info if inbox exists
     batch_info = None
     if latest_inbox:
         batch_info = {
@@ -925,11 +1011,9 @@ def allocation_summary(request):
             'status': latest_inbox.status,
         }
 
-    # Get students by category
     students_by_category = {}
     for cat in Student.StudentCategory:
-        count = students.filter(category=cat.value).count()
-        students_by_category[cat.value] = count
+        students_by_category[cat.value] = students.filter(category=cat.value).count()
 
     return Response({
         'total_students': total_students,
