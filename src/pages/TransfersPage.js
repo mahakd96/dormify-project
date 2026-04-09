@@ -1,10 +1,40 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { transferRequests as transferRequestsSeed, students, rooms, buildings, regions } from '../data/mockData';
-import { ArrowLeftRight, Check, X, Clock, Plus, MapPin, Home, History } from 'lucide-react';
+import {
+  transferRequests as transferRequestsSeed,
+  students,
+  rooms,
+  buildings,
+  regions,
+} from '../data/mockData';
+import {
+  ArrowLeftRight,
+  Check,
+  X,
+  Clock,
+  Plus,
+  MapPin,
+  Home,
+  History,
+} from 'lucide-react';
+
+function normalizeValue(value) {
+  if (value == null) return '';
+  return String(value).trim().toLowerCase();
+}
+
+function sameValue(a, b) {
+  return normalizeValue(a) === normalizeValue(b);
+}
 
 function TransfersPage({ language }) {
-  const { isCentralAdmin, getUserRegion, canApproveTransfer } = useAuth();
+  const {
+    isCentralAdmin,
+    isRegionBoss,
+    isEmployee,
+    getUserRegion,
+  } = useAuth();
+
   const userRegion = getUserRegion();
 
   const [transferRequests, setTransferRequests] = useState(transferRequestsSeed);
@@ -13,16 +43,20 @@ function TransfersPage({ language }) {
   const [showHistory, setShowHistory] = useState(false);
   const [selectedToRoomByTransfer, setSelectedToRoomByTransfer] = useState({});
 
-  // ✅ HARD GUARD: regional users can never stay on the "region" tab
+  const isLocalStaff = isRegionBoss() || isEmployee();
+
+  // non-central users never stay on region tab
   useEffect(() => {
-    if (!isCentralAdmin() && tab !== 'room') setTab('room');
+    if (!isCentralAdmin() && tab !== 'room') {
+      setTab('room');
+    }
   }, [tab, isCentralAdmin]);
 
   const t = {
     he: {
       title: 'בקשות העברה',
       subtitle: 'ניהול בקשות העברת סטודנטים',
-      roomTab: 'העברה בתוך/לאחר אישור',
+      roomTab: 'העברה בתוך אזור / שלב 2',
       regionTab: 'העברה בין אזורים / שינוי סוג מעונות',
       newRequest: 'בקשה חדשה',
       all: 'הכל',
@@ -45,15 +79,18 @@ function TransfersPage({ language }) {
       phaseHint:
         'בקשות בין אזורים/שינוי סוג מעונות מאושרות ע"י מנהל מרכזי. לאחר אישור נוצרת בקשת שיבוץ חדר (שלב 2) בתוך אזור היעד.',
       centralOnly: 'מאושר רק ע"י המנהל המרכזי',
-      regionStaffOnly: 'מאושר ע"י צוות האזור (רק בתוך האזור שלו)',
+      regionStaffOnly: 'מאושר רק בתוך האזור שלך',
       phase2Badge: 'שלב 2: שיבוץ באיזור יעד',
       internalBadge: 'העברה פנימית בתוך אזור',
       notAllowed: 'אין לך הרשאה לאשר בקשה זו',
+      localScopeOnly: 'צפייה ואישור רק בתחום האזור שלך',
+      requestTypeRegion: 'בקשת מעבר בין אזורים',
+      requestTypeRoom: 'בקשת שיבוץ / העברה מקומית',
     },
     en: {
       title: 'Transfer Requests',
       subtitle: 'Manage student transfers',
-      roomTab: 'Room transfers',
+      roomTab: 'Local / Phase 2 transfers',
       regionTab: 'Region / dorm-type change',
       newRequest: 'New Request',
       all: 'All',
@@ -76,29 +113,43 @@ function TransfersPage({ language }) {
       phaseHint:
         'Region/dorm-type change is approved by central office. After approval, Phase 2 room assignment is created inside the target region.',
       centralOnly: 'Central office approval only',
-      regionStaffOnly: 'Region staff approval (only within their region)',
+      regionStaffOnly: 'Approval only inside your region',
       phase2Badge: 'Phase 2: assignment in target region',
       internalBadge: 'Internal move within region',
       notAllowed: 'You are not allowed to approve this request',
-    }
+      localScopeOnly: 'Viewing and approving only inside your region',
+      requestTypeRegion: 'Cross-region request',
+      requestTypeRoom: 'Local room / assignment request',
+    },
   }[language];
 
   const inferRegionIdFromRoomId = (roomId) => {
     if (!roomId) return null;
-    const sorted = [...regions].sort((a, b) => String(b.id).length - String(a.id).length);
-    const match = sorted.find(r => roomId === r.id || roomId.startsWith(r.id + '-'));
+
+    const sorted = [...regions].sort(
+      (a, b) => String(b.id).length - String(a.id).length
+    );
+
+    const match = sorted.find(
+      (r) =>
+        sameValue(roomId, r.id) ||
+        normalizeValue(roomId).startsWith(`${normalizeValue(r.id)}-`)
+    );
+
     return match?.id ?? null;
   };
 
-  const getStudent = (studentId) => students.find(s => s.id === studentId);
-  const getBuilding = (buildingId) => buildings.find(b => b.id === buildingId);
-  const getRegion = (regionId) => regions.find(r => r.id === regionId);
+  const getStudent = (studentId) => students.find((s) => sameValue(s.id, studentId));
+  const getBuilding = (buildingId) => buildings.find((b) => sameValue(b.id, buildingId));
+  const getRegion = (regionId) => regions.find((r) => sameValue(r.id, regionId));
 
   const getRoomRegionId = (room) => {
     if (!room) return null;
     if (room.regionId) return room.regionId;
+
     const b = getBuilding(room.buildingId);
     if (b?.regionId) return b.regionId;
+
     return inferRegionIdFromRoomId(room.id);
   };
 
@@ -113,14 +164,25 @@ function TransfersPage({ language }) {
 
     const studentGender = student.gender;
     const allowedGender = room.allowedGender ?? room.gender ?? 'any';
-    if (allowedGender !== 'any' && studentGender && allowedGender !== studentGender) return false;
+
+    if (allowedGender !== 'any' && studentGender && allowedGender !== studentGender) {
+      return false;
+    }
 
     if (student.roomType && room.type && room.type !== student.roomType) return false;
-
     if (student.needsAccessibleRoom && room.isAccessible === false) return false;
 
-    if (transfer?.requestedDormType && room.type && room.type !== transfer.requestedDormType) return false;
-    if (transfer?.requestedDormGroup && room.dormGroup && room.dormGroup !== transfer.requestedDormGroup) return false;
+    if (transfer?.requestedDormType && room.type && room.type !== transfer.requestedDormType) {
+      return false;
+    }
+
+    if (
+      transfer?.requestedDormGroup &&
+      room.dormGroup &&
+      room.dormGroup !== transfer.requestedDormGroup
+    ) {
+      return false;
+    }
 
     return true;
   };
@@ -132,72 +194,106 @@ function TransfersPage({ language }) {
     if (tr.type === 'region') return 'region';
     if (tr.type === 'room') return 'room';
 
-    if (tr.requestedDormType || tr.requestedDormGroup || tr.requestedHousingType) return 'region';
+    if (tr.requestedDormType || tr.requestedDormGroup || tr.requestedHousingType) {
+      return 'region';
+    }
 
-    if (tr.toRegionId && tr.toRegionId !== student?.regionId) return 'region';
+    if (tr.toRegionId && !sameValue(tr.toRegionId, student?.regionId)) {
+      return 'region';
+    }
 
     return 'room';
   };
 
   const getRoomAssignmentMode = (transfer) => {
-    if (transfer.parentTransferId || transfer.targetRegionId || transfer.toRegionId) return 'phase2';
+    if (transfer.parentTransferId || transfer.targetRegionId || transfer.toRegionId) {
+      return 'phase2';
+    }
     return 'internal';
+  };
+
+  const getTransferRegions = (transfer, student) => {
+    const fromRegionId =
+      inferRegionIdFromRoomId(transfer.fromRoomId) ??
+      transfer.fromRegionId ??
+      student?.regionId ??
+      null;
+
+    const toRegionId =
+      transfer.targetRegionId ??
+      transfer.toRegionId ??
+      transfer.requestedRegionId ??
+      null;
+
+    return { fromRegionId, toRegionId };
+  };
+
+  const isTransferRelatedToUserRegion = (transfer) => {
+    if (isCentralAdmin()) return true;
+
+    const student = getStudent(transfer.studentId);
+    const type = getTransferType(transfer, student);
+    const mode = getRoomAssignmentMode(transfer);
+    const { fromRegionId, toRegionId } = getTransferRegions(transfer, student);
+
+    if (type === 'region') {
+      // local staff can only see region transfers if their area is involved
+      return sameValue(fromRegionId, userRegion) || sameValue(toRegionId, userRegion);
+    }
+
+    if (mode === 'internal') {
+      return sameValue(fromRegionId, userRegion);
+    }
+
+    // phase2 room assignment belongs to target region
+    return sameValue(toRegionId, userRegion);
   };
 
   const getEligibleTargetRooms = (transfer, student) => {
     const mode = getRoomAssignmentMode(transfer);
-    const internalRegionId = inferRegionIdFromRoomId(transfer.fromRoomId);
-    const phase2RegionId = transfer.targetRegionId || transfer.toRegionId || null;
-    const baseRegionId = mode === 'phase2' ? phase2RegionId : internalRegionId;
+    const { fromRegionId, toRegionId } = getTransferRegions(transfer, student);
+    const baseRegionId = mode === 'phase2' ? toRegionId : fromRegionId;
 
     return rooms
       .filter(isRoomAvailable)
-      .filter(r => getRoomRegionId(r) === baseRegionId)
-      .filter(r => r.id !== transfer.fromRoomId)
-      .filter(r => matchesStudentConstraints(r, student, transfer))
+      .filter((r) => sameValue(getRoomRegionId(r), baseRegionId))
+      .filter((r) => !sameValue(r.id, transfer.fromRoomId))
+      .filter((r) => matchesStudentConstraints(r, student, transfer))
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
   };
 
   const canSeeTransfer = (tr) => {
-    const student = getStudent(tr.studentId);
-    const type = getTransferType(tr, student);
-
     if (isCentralAdmin()) return true;
-
-    // Regional boss: ONLY room transfers are visible (no region transfers at all)
-    if (type !== 'room') return false;
-
-    const mode = getRoomAssignmentMode(tr);
-    if (mode !== 'internal') return false; // hide phase2 as well (optional but matches your ask)
-
-    const fromRegion = inferRegionIdFromRoomId(tr.fromRoomId) ?? student?.regionId ?? null;
-    return fromRegion === userRegion;
+    return isTransferRelatedToUserRegion(tr);
   };
 
-  // ✅ Local permission logic
   const canApproveLocal = (tr) => {
     if (tr.status !== 'pending') return false;
 
     const student = getStudent(tr.studentId);
     const type = getTransferType(tr, student);
 
-    if (isCentralAdmin()) {
-      // central uses your existing auth policy
-      return canApproveTransfer(tr);
-    }
+    if (isCentralAdmin()) return true;
 
-    // regional boss: can approve ONLY internal room transfers within their region
+    if (!isLocalStaff) return false;
+    if (!isTransferRelatedToUserRegion(tr)) return false;
+
+    // non-central users may approve only room / assignment requests in their own area
     if (type !== 'room') return false;
 
     const mode = getRoomAssignmentMode(tr);
-    if (mode !== 'internal') return false;
+    const { fromRegionId, toRegionId } = getTransferRegions(tr, student);
 
-    const fromRegion = inferRegionIdFromRoomId(tr.fromRoomId) ?? student?.regionId ?? null;
-    return fromRegion === userRegion;
+    if (mode === 'internal') {
+      return sameValue(fromRegionId, userRegion);
+    }
+
+    // phase2 belongs to target region
+    return sameValue(toRegionId, userRegion);
   };
 
   const filteredTransfers = useMemo(() => {
-    return transferRequests.filter(tr => {
+    return transferRequests.filter((tr) => {
       const student = getStudent(tr.studentId);
       const type = getTransferType(tr, student);
 
@@ -213,10 +309,10 @@ function TransfersPage({ language }) {
 
       return true;
     });
-  }, [transferRequests, tab, filter, showHistory, userRegion, isCentralAdmin]);
+  }, [transferRequests, tab, filter, showHistory, userRegion, isCentralAdmin, isRegionBoss, isEmployee]);
 
   const countByStatus = (status) => {
-    return transferRequests.filter(tr => {
+    return transferRequests.filter((tr) => {
       const student = getStudent(tr.studentId);
       const type = getTransferType(tr, student);
 
@@ -242,7 +338,6 @@ function TransfersPage({ language }) {
       return;
     }
 
-    // Central admin region approvals (kept as-is)
     if (type === 'region') {
       const targetRegionId = transfer.toRegionId || transfer.targetRegionId || null;
 
@@ -262,19 +357,19 @@ function TransfersPage({ language }) {
             targetRegionId,
             parentTransferId: transfer.id,
             requestedDormType: transfer.requestedDormType ?? null,
-            requestedDormGroup: transfer.requestedDormGroup ?? null
+            requestedDormGroup: transfer.requestedDormGroup ?? null,
           }
         : null;
 
-      setTransferRequests(prev => {
-        const updated = prev.map(p =>
+      setTransferRequests((prev) => {
+        const updated = prev.map((p) =>
           p.id === transfer.id
             ? {
                 ...p,
                 status: 'approved',
                 reviewedBy: 'central-office',
                 reviewedAt: new Date().toISOString(),
-                scope: 'REGION'
+                scope: 'REGION',
               }
             : p
         );
@@ -284,15 +379,14 @@ function TransfersPage({ language }) {
       return;
     }
 
-    // Room transfer approval (regional or central)
     const selectedTo = selectedToRoomByTransfer[transfer.id];
     if (!selectedTo) {
       alert(t.mustChooseRoom);
       return;
     }
 
-    setTransferRequests(prev =>
-      prev.map(p =>
+    setTransferRequests((prev) =>
+      prev.map((p) =>
         p.id === transfer.id
           ? {
               ...p,
@@ -300,7 +394,7 @@ function TransfersPage({ language }) {
               status: 'approved',
               reviewedBy: isCentralAdmin() ? 'central-office' : 'region-staff',
               reviewedAt: new Date().toISOString(),
-              scope: 'ROOM'
+              scope: 'ROOM',
             }
           : p
       )
@@ -316,15 +410,20 @@ function TransfersPage({ language }) {
       return;
     }
 
-    setTransferRequests(prev =>
-      prev.map(p =>
+    setTransferRequests((prev) =>
+      prev.map((p) =>
         p.id === transfer.id
           ? {
               ...p,
               status: 'rejected',
-              reviewedBy: type === 'region' ? 'central-office' : (isCentralAdmin() ? 'central-office' : 'region-staff'),
+              reviewedBy:
+                type === 'region'
+                  ? 'central-office'
+                  : isCentralAdmin()
+                  ? 'central-office'
+                  : 'region-staff',
               reviewedAt: new Date().toISOString(),
-              scope: type === 'region' ? 'REGION' : 'ROOM'
+              scope: type === 'region' ? 'REGION' : 'ROOM',
             }
           : p
       )
@@ -362,7 +461,6 @@ function TransfersPage({ language }) {
       return type === 'region' ? t.centralOnly : '';
     }
 
-    // regional users can only approve internal room transfers
     return t.regionStaffOnly;
   };
 
@@ -372,6 +470,7 @@ function TransfersPage({ language }) {
         <div>
           <h1>{t.title}</h1>
           <p>{t.subtitle}</p>
+          {isLocalStaff && <small className="scope-note">{t.localScopeOnly}</small>}
         </div>
         <button className="new-btn" onClick={() => {}}>
           <Plus size={18} /> {t.newRequest}
@@ -380,19 +479,24 @@ function TransfersPage({ language }) {
 
       <div className="tabs-bar">
         <div className="tabs">
-          <button className={`tab ${tab === 'room' ? 'active' : ''}`} onClick={() => setTab('room')}>
+          <button
+            className={`tab ${tab === 'room' ? 'active' : ''}`}
+            onClick={() => setTab('room')}
+          >
             <Home size={16} /> {t.roomTab}
           </button>
 
-          {/* ✅ Region tab exists ONLY for central admin */}
           {isCentralAdmin() && (
-            <button className={`tab ${tab === 'region' ? 'active' : ''}`} onClick={() => setTab('region')}>
+            <button
+              className={`tab ${tab === 'region' ? 'active' : ''}`}
+              onClick={() => setTab('region')}
+            >
               <MapPin size={16} /> {t.regionTab}
             </button>
           )}
         </div>
 
-        <button className="history-toggle" onClick={() => setShowHistory(v => !v)}>
+        <button className="history-toggle" onClick={() => setShowHistory((v) => !v)}>
           <History size={16} />
           {showHistory ? t.showHistory : t.activeOnly}
         </button>
@@ -400,7 +504,7 @@ function TransfersPage({ language }) {
 
       <div className="filters-bar">
         <div className="filter-tabs">
-          {['all', 'pending', 'approved', 'rejected'].map(status => (
+          {['all', 'pending', 'approved', 'rejected'].map((status) => (
             <button
               key={status}
               className={`filter-tab ${filter === status ? 'active' : ''}`}
@@ -417,16 +521,25 @@ function TransfersPage({ language }) {
 
       <div className="transfers-list">
         {filteredTransfers.length > 0 ? (
-          filteredTransfers.map(transfer => {
+          filteredTransfers.map((transfer) => {
             const student = getStudent(transfer.studentId);
             const type = getTransferType(transfer, student);
+            const mode = getRoomAssignmentMode(transfer);
 
-            const fromRegionId = inferRegionIdFromRoomId(transfer.fromRoomId) ?? student?.regionId ?? null;
+            const fromRegionId =
+              inferRegionIdFromRoomId(transfer.fromRoomId) ??
+              transfer.fromRegionId ??
+              student?.regionId ??
+              null;
+
+            const toRegionId =
+              transfer.toRegionId ??
+              transfer.targetRegionId ??
+              transfer.requestedRegionId ??
+              null;
+
             const fromRegion = getRegion(fromRegionId);
-
-            const toRegion = (transfer.toRegionId || transfer.targetRegionId)
-              ? getRegion(transfer.toRegionId || transfer.targetRegionId)
-              : null;
+            const toRegion = toRegionId ? getRegion(toRegionId) : null;
 
             const eligibleRooms = type === 'room' ? getEligibleTargetRooms(transfer, student) : [];
             const selectedToRoom = selectedToRoomByTransfer[transfer.id] ?? '';
@@ -440,18 +553,22 @@ function TransfersPage({ language }) {
                   <div className="student-info">
                     <div className="avatar">{student?.firstName?.[0] ?? '?'}</div>
                     <div>
-                      <span className="name">{student?.firstName} {student?.lastName}</span>
+                      <span className="name">
+                        {student?.firstName} {student?.lastName}
+                      </span>
                       <span className="id">{student?.studentId}</span>
                     </div>
                   </div>
                   {getStatusBadge(transfer.status)}
                 </div>
 
-                {type === 'room' && (
-                  <div className="meta-row">
-                    {getRoomModeBadge(transfer)}
-                  </div>
-                )}
+                <div className="meta-row">
+                  {type === 'room' ? (
+                    getRoomModeBadge(transfer)
+                  ) : (
+                    <span className="mode-badge">{t.requestTypeRegion}</span>
+                  )}
+                </div>
 
                 <div className="transfer-details">
                   {type === 'region' ? (
@@ -463,7 +580,9 @@ function TransfersPage({ language }) {
                       <ArrowLeftRight size={20} />
                       <div className="location">
                         <span className="label">{t.toRegion}</span>
-                        <span className="value">{toRegion?.name ?? transfer.toRegionId ?? transfer.targetRegionId ?? '-'}</span>
+                        <span className="value">
+                          {toRegion?.name ?? transfer.toRegionId ?? transfer.targetRegionId ?? '-'}
+                        </span>
                       </div>
                     </div>
                   ) : (
@@ -482,15 +601,17 @@ function TransfersPage({ language }) {
                               className="room-select"
                               value={selectedToRoom}
                               onChange={(e) =>
-                                setSelectedToRoomByTransfer(prev => ({
+                                setSelectedToRoomByTransfer((prev) => ({
                                   ...prev,
-                                  [transfer.id]: e.target.value
+                                  [transfer.id]: e.target.value,
                                 }))
                               }
                             >
                               <option value="">{t.chooseRoom}</option>
-                              {eligibleRooms.map(r => (
-                                <option key={r.id} value={r.id}>{r.id}</option>
+                              {eligibleRooms.map((r) => (
+                                <option key={r.id} value={r.id}>
+                                  {r.id}
+                                </option>
                               ))}
                             </select>
                           ) : (
@@ -507,6 +628,13 @@ function TransfersPage({ language }) {
                     <span className="label">{t.reason}:</span>
                     <span className="value">{transfer.reason}</span>
                   </div>
+
+                  {type === 'room' && mode === 'phase2' && (
+                    <div className="reason" style={{ marginTop: 8 }}>
+                      <span className="label">{t.toRegion}:</span>
+                      <span className="value">{toRegion?.name ?? toRegionId ?? '-'}</span>
+                    </div>
+                  )}
                 </div>
 
                 {transfer.status === 'pending' && (
@@ -546,6 +674,7 @@ function TransfersPage({ language }) {
         .page-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 18px; }
         .page-header h1 { font-size: 24px; font-weight: 800; margin-bottom: 4px; letter-spacing: -0.2px; }
         .page-header p { color: #64748b; }
+        .scope-note { color: #64748b; font-weight: 800; }
 
         .new-btn {
           display: flex; align-items: center; gap: 8px;

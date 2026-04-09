@@ -39,9 +39,9 @@ export const dormOffices = [
     dormIds: ['broshim', 'broshim-family', 'broshim-couples'],
   },
   {
-    id: 'canada-office',
+    id: 'Canada',
     name: 'משרד קנדה',
-    nameEn: 'Canada Office',
+    nameEn: 'Canada',
     dormIds: ['canada', 'canada-family', 'canada-couples'],
   },
   {
@@ -250,8 +250,8 @@ export const specialRequests = [
     id: 'sr-1',
     type: 'transfer',
     studentId: 'student-0',
-    current: { regionId: 'canada', buildingId: 'canada-1', apartmentId: 'canada-1-apt-1', roomId: 'canada-1-apt-1-room-A' },
-    requested: { regionId: 'canada' },
+    current: { regionId: 'Canada', buildingId: 'canada-1', apartmentId: 'canada-1-apt-1', roomId: 'canada-1-apt-1-room-A' },
+    requested: { regionId: 'Canada' },
     needs: { floorPreference: 1, requiresElevator: true, accessibleRoom: false, nearEntrance: false },
     note: 'בעיה עם שותף חדר + צורך בקומה נמוכה',
     status: 'pending',
