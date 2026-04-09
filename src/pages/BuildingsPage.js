@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { dormOffices, dorms, buildings, apartments, rooms, students as studentsSeed } from '../data/mockData';
 import {
@@ -16,8 +16,15 @@ import {
 } from 'lucide-react';
 
 function BuildingsPage({ language }) {
-  const { isCentralAdmin, getUserRegion, canEditRegion } = useAuth();
-  const userDormId = getUserRegion();
+  const {
+    isCentralAdmin,
+    isRegionBoss,
+    isEmployee,
+    getUserRegion,
+    canEditRegion,
+  } = useAuth();
+
+  const userRegionId = getUserRegion();
 
   const [studentsState, setStudentsState] = useState(() => [...studentsSeed]);
 
@@ -79,6 +86,15 @@ function BuildingsPage({ language }) {
       statsUnassigned: 'לא משוייכים',
       dragTip: 'שיוך סטודנטים לחדרים',
       viewOnly: 'צפייה בלבד (אין הרשאה לעריכה באיזור זה)',
+      noOffice: 'לא נמצא משרד מתאים לאזור של המשתמש',
+      noDorm: 'לא נמצא אזור/מעונות מתאים למשתמש',
+      buildingsList: 'רשימת בניינים',
+      items: 'פריטים',
+      emptyHelp: 'בחרי בניין ואז דירה — ותראי את החדרים והשיוכים.',
+      noAvailableStudents: 'אין סטודנטים פנויים לשיוך',
+      noResults: 'אין תוצאות',
+      clear: 'נקה',
+      allRegionsView: 'צפייה בכל האזורים',
     },
     en: {
       title: 'Buildings & Rooms',
@@ -114,39 +130,71 @@ function BuildingsPage({ language }) {
       statsUnassigned: 'Unassigned',
       dragTip: 'Drag students between rooms',
       viewOnly: 'View-only (no edit permission for this region)',
+      noOffice: 'No office found for this user region',
+      noDorm: 'No dorm/region found for this user',
+      buildingsList: 'Buildings list',
+      items: 'items',
+      emptyHelp: 'Pick a building and then an apartment to manage rooms.',
+      noAvailableStudents: 'No available students',
+      noResults: 'No results',
+      clear: 'Clear',
+      allRegionsView: 'Viewing all regions',
     },
   }[language];
 
-  const userDormObj = useMemo(() => dorms.find((d) => d.id === userDormId) || null, [userDormId]);
+  const canViewAllRegions = isCentralAdmin() || isRegionBoss();
+  const isOwnRegionOnly = isEmployee();
+
+  const userDormObj = useMemo(() => {
+    return dorms.find((d) => String(d.id) === String(userRegionId)) || null;
+  }, [userRegionId]);
+
   const userOfficeId = userDormObj?.officeId || null;
 
   const defaultOfficeId = useMemo(() => {
-    if (!isCentralAdmin()) return userOfficeId;
-    return dormOffices?.[0]?.id || '';
-  }, [isCentralAdmin, userOfficeId]);
+    if (canViewAllRegions) {
+      return userOfficeId || dormOffices?.[0]?.id || '';
+    }
+    return userOfficeId || '';
+  }, [canViewAllRegions, userOfficeId]);
 
   const [selectedOfficeId, setSelectedOfficeId] = useState(defaultOfficeId);
 
-  const effectiveOfficeId = isCentralAdmin() ? selectedOfficeId : userOfficeId;
+  useEffect(() => {
+    setSelectedOfficeId(defaultOfficeId);
+  }, [defaultOfficeId]);
+
+  const effectiveOfficeId = canViewAllRegions ? selectedOfficeId : userOfficeId;
 
   const dormsInOffice = useMemo(() => {
-    const office = dormOffices.find((o) => o.id === effectiveOfficeId);
+    const office = dormOffices.find((o) => String(o.id) === String(effectiveOfficeId));
     if (!office) return [];
-    const allowed = new Set(office.dormIds || []);
-    return dorms.filter((d) => allowed.has(d.id));
+    const allowed = new Set((office.dormIds || []).map(String));
+    return dorms.filter((d) => allowed.has(String(d.id)));
   }, [effectiveOfficeId]);
 
   const defaultDormId = useMemo(() => {
-    if (!isCentralAdmin()) return userDormId;
-    return dormsInOffice[0]?.id || '';
-  }, [isCentralAdmin, dormsInOffice, userDormId]);
+    if (canViewAllRegions) {
+      return userRegionId || dormsInOffice[0]?.id || '';
+    }
+    return userRegionId || '';
+  }, [canViewAllRegions, dormsInOffice, userRegionId]);
 
   const [selectedDormId, setSelectedDormId] = useState(defaultDormId);
 
-  const effectiveDormId = isCentralAdmin() ? selectedDormId : userDormId;
-  const effectiveDormObj = useMemo(() => dorms.find((d) => d.id === effectiveDormId) || null, [effectiveDormId]);
+  useEffect(() => {
+    setSelectedDormId(defaultDormId);
+  }, [defaultDormId]);
+
+  const effectiveDormId = canViewAllRegions ? selectedDormId : userRegionId;
+
+  const effectiveDormObj = useMemo(
+    () => dorms.find((d) => String(d.id) === String(effectiveDormId)) || null,
+    [effectiveDormId]
+  );
+
   const effectiveOfficeObj = useMemo(
-    () => dormOffices.find((o) => o.id === effectiveOfficeId) || null,
+    () => dormOffices.find((o) => String(o.id) === String(effectiveOfficeId)) || null,
     [effectiveOfficeId]
   );
 
@@ -161,23 +209,33 @@ function BuildingsPage({ language }) {
     setSelectedApartment(null);
   };
 
-  const getBuildingApartments = (buildingId) => apartments.filter((a) => a.buildingId === buildingId);
-  const getApartmentRooms = (apartmentId) => rooms.filter((r) => r.apartmentId === apartmentId);
-  const getRoomStudents = (roomId) => studentsState.filter((s) => s.assignedRoomId === roomId);
+  const getBuildingApartments = (buildingId) =>
+    apartments.filter((a) => String(a.buildingId) === String(buildingId));
 
-  const unassignedStudents = useMemo(() => studentsState.filter((s) => !s.assignedRoomId), [studentsState]);
+  const getApartmentRooms = (apartmentId) =>
+    rooms.filter((r) => String(r.apartmentId) === String(apartmentId));
+
+  const getRoomStudents = (roomId) =>
+    studentsState.filter((s) => String(s.assignedRoomId) === String(roomId));
+
+  const unassignedStudents = useMemo(
+    () => studentsState.filter((s) => !s.assignedRoomId),
+    [studentsState]
+  );
 
   const filteredBuildings = useMemo(() => {
     let list = buildings;
 
-    if (effectiveDormId) {
-      list = list.filter((b) => b.regionId === effectiveDormId);
+    if (isOwnRegionOnly && userRegionId) {
+      list = list.filter((b) => String(b.regionId) === String(userRegionId));
+    } else if (effectiveDormId) {
+      list = list.filter((b) => String(b.regionId) === String(effectiveDormId));
     }
 
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase();
       list = list.filter((b) => {
-        const dorm = dorms.find((d) => d.id === b.regionId);
+        const dorm = dorms.find((d) => String(d.id) === String(b.regionId));
         return (
           (b.name || '').toLowerCase().includes(q) ||
           (dorm?.name || '').toLowerCase().includes(q) ||
@@ -187,7 +245,7 @@ function BuildingsPage({ language }) {
     }
 
     return list;
-  }, [effectiveDormId, searchQuery]);
+  }, [effectiveDormId, isOwnRegionOnly, userRegionId, searchQuery]);
 
   const canDropIntoRoom = (room) => {
     const current = getRoomStudents(room.id).length;
@@ -196,20 +254,24 @@ function BuildingsPage({ language }) {
 
   const assignStudentToRoom = (studentId, roomId) => {
     if (!canEditThisDorm) return;
-    setStudentsState((prev) => prev.map((s) => (s.id === studentId ? { ...s, assignedRoomId: roomId } : s)));
+    setStudentsState((prev) =>
+      prev.map((s) => (String(s.id) === String(studentId) ? { ...s, assignedRoomId: roomId } : s))
+    );
   };
 
   const unassignStudent = (studentId) => {
     if (!canEditThisDorm) return;
-    setStudentsState((prev) => prev.map((s) => (s.id === studentId ? { ...s, assignedRoomId: null } : s)));
+    setStudentsState((prev) =>
+      prev.map((s) => (String(s.id) === String(studentId) ? { ...s, assignedRoomId: null } : s))
+    );
   };
 
   const swapStudents = (studentAId, roomAId, studentBId, roomBId) => {
     if (!canEditThisDorm) return;
     setStudentsState((prev) =>
       prev.map((s) => {
-        if (s.id === studentAId) return { ...s, assignedRoomId: roomBId };
-        if (s.id === studentBId) return { ...s, assignedRoomId: roomAId };
+        if (String(s.id) === String(studentAId)) return { ...s, assignedRoomId: roomBId };
+        if (String(s.id) === String(studentBId)) return { ...s, assignedRoomId: roomAId };
         return s;
       })
     );
@@ -218,18 +280,23 @@ function BuildingsPage({ language }) {
   const filteredUnassigned = useMemo(() => {
     const q = addModal.query.trim().toLowerCase();
     if (!q) return unassignedStudents;
-    return unassignedStudents.filter((s) => `${s.firstName} ${s.lastName}`.toLowerCase().includes(q));
+    return unassignedStudents.filter((s) =>
+      `${s.firstName} ${s.lastName}`.toLowerCase().includes(q)
+    );
   }, [unassignedStudents, addModal.query]);
 
-  const allRoomsInDorm = useMemo(() => rooms.filter((r) => r.regionId === effectiveDormId), [effectiveDormId]);
+  const allRoomsInDorm = useMemo(() => {
+    if (!effectiveDormId) return [];
+    return rooms.filter((r) => String(r.regionId) === String(effectiveDormId));
+  }, [effectiveDormId]);
 
   const filteredRoomsForMove = useMemo(() => {
     const q = moveModal.query.trim().toLowerCase();
     if (!q) return allRoomsInDorm;
 
     return allRoomsInDorm.filter((r) => {
-      const apt = apartments.find((a) => a.id === r.apartmentId);
-      const bld = buildings.find((b) => b.id === r.buildingId);
+      const apt = apartments.find((a) => String(a.id) === String(r.apartmentId));
+      const bld = buildings.find((b) => String(b.id) === String(r.buildingId));
 
       const hay = [
         r.id,
@@ -262,8 +329,9 @@ function BuildingsPage({ language }) {
   const handleOfficeChange = (nextOfficeId) => {
     setSelectedOfficeId(nextOfficeId);
 
-    const office = dormOffices.find((o) => o.id === nextOfficeId);
-    const nextDormId = office?.dormIds?.[0] || '';
+    const office = dormOffices.find((o) => String(o.id) === String(nextOfficeId));
+    const nextDormId =
+      office?.dormIds?.find((id) => dorms.some((d) => String(d.id) === String(id))) || '';
 
     setSelectedDormId(nextDormId);
     safeResetSelection();
@@ -275,12 +343,13 @@ function BuildingsPage({ language }) {
   };
 
   const selectedApartmentObj = useMemo(
-    () => (selectedApartment ? apartments.find((a) => a.id === selectedApartment) : null),
+    () => (selectedApartment ? apartments.find((a) => String(a.id) === String(selectedApartment)) : null),
     [selectedApartment]
   );
+
   const selectedBuildingObj = useMemo(() => {
     if (!selectedApartmentObj) return null;
-    return buildings.find((b) => b.id === selectedApartmentObj.buildingId) || null;
+    return buildings.find((b) => String(b.id) === String(selectedApartmentObj.buildingId)) || null;
   }, [selectedApartmentObj]);
 
   const selectedApartmentRooms = useMemo(() => {
@@ -288,8 +357,15 @@ function BuildingsPage({ language }) {
     return getApartmentRooms(selectedApartment);
   }, [selectedApartment]);
 
-  const assignedCount = useMemo(() => studentsState.filter((s) => !!s.assignedRoomId).length, [studentsState]);
-  const unassignedCount = useMemo(() => studentsState.filter((s) => !s.assignedRoomId).length, [studentsState]);
+  const assignedCount = useMemo(
+    () => studentsState.filter((s) => !!s.assignedRoomId).length,
+    [studentsState]
+  );
+
+  const unassignedCount = useMemo(
+    () => studentsState.filter((s) => !s.assignedRoomId).length,
+    [studentsState]
+  );
 
   const apartmentsCountInFiltered = useMemo(() => {
     let total = 0;
@@ -311,6 +387,8 @@ function BuildingsPage({ language }) {
   }, [filteredBuildings]);
 
   const viewOnlyTitle = !canEditThisDorm ? t.viewOnly : '';
+  const showSelectors = canViewAllRegions;
+  const hasUserRegionMismatch = !isCentralAdmin() && !userDormObj;
 
   return (
     <div className="bp-shell">
@@ -326,6 +404,7 @@ function BuildingsPage({ language }) {
                 {t.dragTip}
               </span>
               {!canEditThisDorm && <span className="bp-viewOnly">{t.viewOnly}</span>}
+              {isRegionBoss() && <span className="bp-viewOnly">{t.allRegionsView}</span>}
             </div>
           </div>
 
@@ -339,6 +418,12 @@ function BuildingsPage({ language }) {
           </div>
         </div>
 
+        {hasUserRegionMismatch && (
+          <div className="bp-warningBox">
+            {t.noDorm} ({String(userRegionId ?? '')})
+          </div>
+        )}
+
         <div className="bp-controls">
           <div className="bp-selectCard">
             <div className="bp-selectGrid">
@@ -347,12 +432,19 @@ function BuildingsPage({ language }) {
                 <select
                   value={effectiveOfficeId || ''}
                   onChange={(e) => handleOfficeChange(e.target.value)}
+                  disabled={!showSelectors}
                 >
-                  {dormOffices.map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {language === 'he' ? o.name : o.nameEn}
-                    </option>
-                  ))}
+                  {showSelectors
+                    ? dormOffices.map((o) => (
+                        <option key={o.id} value={o.id}>
+                          {language === 'he' ? o.name : o.nameEn}
+                        </option>
+                      ))
+                    : effectiveOfficeObj && (
+                        <option value={effectiveOfficeObj.id}>
+                          {language === 'he' ? effectiveOfficeObj.name : effectiveOfficeObj.nameEn}
+                        </option>
+                      )}
                 </select>
               </div>
 
@@ -361,12 +453,19 @@ function BuildingsPage({ language }) {
                 <select
                   value={effectiveDormId || ''}
                   onChange={(e) => handleDormChange(e.target.value)}
+                  disabled={!showSelectors}
                 >
-                  {dormsInOffice.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {language === 'he' ? d.name : d.nameEn}
-                    </option>
-                  ))}
+                  {showSelectors
+                    ? dormsInOffice.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {language === 'he' ? d.name : d.nameEn}
+                        </option>
+                      ))
+                    : effectiveDormObj && (
+                        <option value={effectiveDormObj.id}>
+                          {language === 'he' ? effectiveDormObj.name : effectiveDormObj.nameEn}
+                        </option>
+                      )}
                 </select>
               </div>
             </div>
@@ -382,7 +481,7 @@ function BuildingsPage({ language }) {
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
               {searchQuery?.trim() && (
-                <button className="bp-clear" onClick={() => setSearchQuery('')} title="Clear">
+                <button className="bp-clear" onClick={() => setSearchQuery('')} title={t.clear}>
                   <X size={16} />
                 </button>
               )}
@@ -413,12 +512,12 @@ function BuildingsPage({ language }) {
           </div>
         </div>
 
-        {isCentralAdmin() && (
+        {showSelectors && (
           <div className="bp-chipRow">
             {dormsInOffice.slice(0, 14).map((d) => (
               <button
                 key={d.id}
-                className={`bp-chip ${effectiveDormId === d.id ? 'active' : ''}`}
+                className={`bp-chip ${String(effectiveDormId) === String(d.id) ? 'active' : ''}`}
                 onClick={() => handleDormChange(d.id)}
                 title={language === 'he' ? d.name : d.nameEn}
               >
@@ -435,10 +534,10 @@ function BuildingsPage({ language }) {
             <div className="bp-panelHeader">
               <div className="bp-panelHeaderLeft">
                 <Building2 size={18} />
-                <span className="bp-panelTitle">{language === 'he' ? 'רשימת בניינים' : 'Buildings list'}</span>
+                <span className="bp-panelTitle">{t.buildingsList}</span>
               </div>
               <span className="bp-panelMeta">
-                {filteredBuildings.length} {language === 'he' ? 'פריטים' : 'items'}
+                {filteredBuildings.length} {t.items}
               </span>
             </div>
 
@@ -468,7 +567,9 @@ function BuildingsPage({ language }) {
                           </span>
                         </div>
                       </div>
-                      <div className="bp-bldChevron">{isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}</div>
+                      <div className="bp-bldChevron">
+                        {isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+                      </div>
                     </button>
 
                     {isExpanded && (
@@ -511,7 +612,9 @@ function BuildingsPage({ language }) {
                   <div className="bp-workHeaderTop">
                     <div className="bp-workTitle">
                       <div className="bp-workTitleLine">
-                        <span className="bp-workH">{t.apartment} {selectedApartmentObj?.number}</span>
+                        <span className="bp-workH">
+                          {t.apartment} {selectedApartmentObj?.number}
+                        </span>
                         {selectedApartmentObj?.isReserved && (
                           <span className="bp-reservedBadge">
                             <Star size={14} />
@@ -523,7 +626,9 @@ function BuildingsPage({ language }) {
                       <div className="bp-breadcrumb">
                         <span className="bp-breadItem">{selectedBuildingObj?.name}</span>
                         <span className="bp-dotSmall">•</span>
-                        <span className="bp-breadItem">{language === 'he' ? effectiveDormObj?.name : effectiveDormObj?.nameEn}</span>
+                        <span className="bp-breadItem">
+                          {language === 'he' ? effectiveDormObj?.name : effectiveDormObj?.nameEn}
+                        </span>
                       </div>
                     </div>
 
@@ -535,7 +640,9 @@ function BuildingsPage({ language }) {
                         </div>
                         <button
                           className="bp-swapCancel"
-                          onClick={() => setSwapMode({ active: false, studentId: null, fromRoomId: null })}
+                          onClick={() =>
+                            setSwapMode({ active: false, studentId: null, fromRoomId: null })
+                          }
                         >
                           {t.cancel}
                         </button>
@@ -618,7 +725,11 @@ function BuildingsPage({ language }) {
                                     if (!swapMode.active) return;
 
                                     if (!swapMode.studentId) {
-                                      setSwapMode({ active: true, studentId: student.id, fromRoomId: room.id });
+                                      setSwapMode({
+                                        active: true,
+                                        studentId: student.id,
+                                        fromRoomId: room.id,
+                                      });
                                       return;
                                     }
 
@@ -709,11 +820,7 @@ function BuildingsPage({ language }) {
                   <Building2 size={44} />
                 </div>
                 <div className="bp-emptyText">{t.selectBuilding}</div>
-                <div className="bp-emptySubText">
-                  {language === 'he'
-                    ? 'בחרי בניין ואז דירה — ותראי את החדרים והשיוכים.'
-                    : 'Pick a building and then an apartment to manage rooms.'}
-                </div>
+                <div className="bp-emptySubText">{t.emptyHelp}</div>
               </div>
             )}
           </div>
@@ -752,7 +859,7 @@ function BuildingsPage({ language }) {
             <div className="bp-modalList">
               {filteredUnassigned.length === 0 ? (
                 <div className="bp-modalEmpty">
-                  <span>{language === 'he' ? 'אין סטודנטים פנויים לשיוך' : 'No available students'}</span>
+                  <span>{t.noAvailableStudents}</span>
                 </div>
               ) : (
                 filteredUnassigned.map((s) => (
@@ -761,7 +868,7 @@ function BuildingsPage({ language }) {
                     className="bp-modalItem"
                     onClick={() => {
                       if (!canEditThisDorm) return;
-                      const targetRoom = rooms.find((r) => r.id === addModal.roomId);
+                      const targetRoom = rooms.find((r) => String(r.id) === String(addModal.roomId));
                       if (!targetRoom) return;
                       if (!canDropIntoRoom(targetRoom)) return;
                       assignStudentToRoom(s.id, addModal.roomId);
@@ -790,7 +897,9 @@ function BuildingsPage({ language }) {
       {moveModal.open && (
         <div
           className="bp-modalBackdrop"
-          onClick={() => setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' })}
+          onClick={() =>
+            setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' })
+          }
         >
           <div className="bp-modal" onClick={(e) => e.stopPropagation()}>
             <div className="bp-modalHeader">
@@ -800,7 +909,9 @@ function BuildingsPage({ language }) {
               </div>
               <button
                 className="bp-closeBtn"
-                onClick={() => setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' })}
+                onClick={() =>
+                  setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' })
+                }
                 title={t.close}
               >
                 <X size={18} />
@@ -819,26 +930,28 @@ function BuildingsPage({ language }) {
             <div className="bp-modalList">
               {filteredRoomsForMove.length === 0 ? (
                 <div className="bp-modalEmpty">
-                  <span>{language === 'he' ? 'אין תוצאות' : 'No results'}</span>
+                  <span>{t.noResults}</span>
                 </div>
               ) : (
                 filteredRoomsForMove.map((r) => {
-                  const apt = apartments.find((a) => a.id === r.apartmentId);
-                  const bld = buildings.find((b) => b.id === r.buildingId);
+                  const apt = apartments.find((a) => String(a.id) === String(r.apartmentId));
+                  const bld = buildings.find((b) => String(b.id) === String(r.buildingId));
                   const count = getRoomStudents(r.id).length;
                   const full = count >= (Number(r.capacity) || 0);
 
                   return (
                     <button
                       key={r.id}
-                      className={`bp-modalItem ${full ? 'disabled' : ''} ${moveModal.toRoomId === r.id ? 'active' : ''}`}
+                      className={`bp-modalItem ${full ? 'disabled' : ''} ${
+                        moveModal.toRoomId === r.id ? 'active' : ''
+                      }`}
                       onClick={() => {
                         if (!canEditThisDorm) return;
                         if (full) return;
                         setMoveModal((prev) => ({ ...prev, toRoomId: r.id }));
                       }}
                       disabled={full || !canEditThisDorm}
-                      title={!canEditThisDorm ? t.viewOnly : (full ? t.roomFull : r.id)}
+                      title={!canEditThisDorm ? t.viewOnly : full ? t.roomFull : r.id}
                     >
                       <div className="bp-modalItemLeft">
                         <Home size={14} />
@@ -858,7 +971,9 @@ function BuildingsPage({ language }) {
             <div className="bp-modalFooter">
               <button
                 className="bp-btn secondary"
-                onClick={() => setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' })}
+                onClick={() =>
+                  setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' })
+                }
               >
                 {t.cancel}
               </button>
@@ -915,6 +1030,17 @@ function BuildingsPage({ language }) {
           margin-bottom: 14px;
         }
 
+        .bp-warningBox{
+          margin-bottom: 12px;
+          padding: 10px 12px;
+          border-radius: 12px;
+          background: rgba(180, 83, 9, 0.14);
+          border: 1px solid rgba(180, 83, 9, 0.25);
+          color: #92400e;
+          font-weight: 800;
+          font-size: 13px;
+        }
+
         .bp-titleRow{
           display:flex;
           align-items:flex-end;
@@ -936,6 +1062,7 @@ function BuildingsPage({ language }) {
           gap:10px;
           color: var(--muted);
           font-size: 13px;
+          flex-wrap: wrap;
         }
         .bp-subText{ font-weight: 600; }
         .bp-dot{ opacity: .6; }
