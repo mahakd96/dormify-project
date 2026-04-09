@@ -71,10 +71,10 @@ WSGI_APPLICATION = 'dormify.wsgi.application'
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": "dormify_db",
-        "USER": "postgres",
-        "PASSWORD": "9696",
-        "HOST": "127.0.0.1",
+        "NAME": "dormify",
+        "USER": "dormify_user",
+        "PASSWORD": "dormify_pass",
+        "HOST": "db",
         "PORT": "5432",
     }
 }
