@@ -16,10 +16,10 @@ from .models import (
 # ===========================================
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
-    list_display = ['email', 'first_name', 'last_name', 'role', 'region', 'is_active']
-    list_filter = ['role', 'region', 'is_active']
-    search_fields = ['email', 'first_name', 'last_name']
-    ordering = ['email']
+    list_display = ['email', 'first_name', 'last_name', 'role', 'region']
+    list_filter = ['first_name', 'last_name', 'role', 'region']
+    search_fields = ['email', 'first_name', 'last_name', 'region', 'role']
+    ordering = ['role']
 
     fieldsets = BaseUserAdmin.fieldsets + (
         ('Role & Region', {'fields': ('role', 'region', 'phone')}),
@@ -31,8 +31,8 @@ class UserAdmin(BaseUserAdmin):
 # ===========================================
 @admin.register(Region)
 class RegionAdmin(admin.ModelAdmin):
-    list_display = ['id', 'name', 'name_en', 'is_active']
-    search_fields = ['name', 'name_en']
+    list_display = ['id', 'name']
+    search_fields = ['name']
 
 
 # ===========================================
