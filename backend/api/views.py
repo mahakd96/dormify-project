@@ -233,11 +233,10 @@ class RegionViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = Region.objects.filter(is_active=True)
+        queryset = Region.objects.all()
         if self.request.user.is_central_admin:
             return queryset
-        return queryset.filter(id=self.request.user.region_id)
-
+        return queryset.filter(pk=self.request.user.region_id)
 
 # ===========================================
 # BUILDING VIEWS
@@ -477,16 +476,16 @@ def run_allocation(request):
             'error': 'רק מנהל יכול להריץ שיבוץ'
         }, status=status.HTTP_403_FORBIDDEN)
 
-    region_id = request.data.get('region_id')
-    if not region_id:
+    region_name = request.data.get('region_name')
+    if not region_name:
         if request.user.is_central_admin:
             return Response({
                 'error': 'נדרש לבחור אזור'
             }, status=status.HTTP_400_BAD_REQUEST)
-        region_id = request.user.region_id
+        region_name = request.user.region.name
 
     try:
-        region = Region.objects.get(id=region_id)
+        region = Region.objects.get(pk=region_name)
     except Region.DoesNotExist:
         return Response({
             'error': 'אזור לא נמצא'
@@ -609,8 +608,6 @@ def get_or_create_region(region_name_hebrew):
         id=region_id,
         defaults={
             'name': region_name_hebrew,
-            'name_en': region_name_hebrew,
-            'is_active': True
         }
     )
     return region
