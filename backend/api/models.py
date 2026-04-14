@@ -62,11 +62,6 @@ class Region(models.Model):
 
     id = models.CharField(max_length=50, primary_key=True)  # e.g. 'canada'
     name = models.CharField(max_length=100)
-    name_en = models.CharField(max_length=100)
-    description = models.TextField(blank=True)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = _('אזור')
@@ -95,7 +90,6 @@ class Office(models.Model):
         blank=True,
         related_name='offices'
     )
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         verbose_name = _('משרד')
@@ -136,8 +130,6 @@ class StaffProfile(models.Model):
         on_delete=models.CASCADE,
         related_name='staff_profiles'
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = _('פרופיל עובד')
