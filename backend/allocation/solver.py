@@ -21,6 +21,7 @@ NUM_SEARCH_WORKERS = 8
 def _is_constraint_hard(config, key):
     """
     Check if a constraint is enforced strictly.
+
     Used to decide whether the solver must block invalid assignments.
     """
     c = config.get(key, {})
@@ -30,6 +31,7 @@ def _is_constraint_hard(config, key):
 def _is_constraint_soft(config, key):
     """
     Check if a constraint is a soft preference.
+
     Used to guide optimization without blocking assignments.
     """
     c = config.get(key, {})
@@ -39,6 +41,7 @@ def _is_constraint_soft(config, key):
 def _constraint_weight(config, key, default=0):
     """
     Get the weight of a soft constraint.
+
     Controls how strongly the solver prefers this rule.
     """
     c = config.get(key, {})
@@ -48,6 +51,7 @@ def _constraint_weight(config, key, default=0):
 def _safe_str(v):
     """
     Safely convert a value to a clean string.
+
     Prevents issues from None or inconsistent imported values.
     """
     return str(v).strip() if v is not None else ""
@@ -56,6 +60,7 @@ def _safe_str(v):
 def _safe_lower(v):
     """
     Safely convert a value to lowercase string.
+
     Used for normalized text comparisons.
     """
     return _safe_str(v).lower()
@@ -64,6 +69,7 @@ def _safe_lower(v):
 def _parse_bool_yes(v):
     """
     Parse yes-like values into boolean.
+
     Helps normalize imported textual flags.
     """
     return _safe_lower(v) in {"כן", "yes", "true", "1"}
@@ -72,6 +78,7 @@ def _parse_bool_yes(v):
 def _get_student_gender(student):
     """
     Return the student's gender.
+
     Used in gender-based placement rules.
     """
     return getattr(student, "gender", None)
@@ -80,6 +87,7 @@ def _get_student_gender(student):
 def _get_student_priority(student):
     """
     Check if the student is priority.
+
     Used for reserved beds and priority allocation logic.
     """
     return bool(getattr(student, "is_priority", False))
@@ -88,6 +96,7 @@ def _get_student_priority(student):
 def _get_student_religion(student):
     """
     Return the student's religion value.
+
     Used for religion-based matching rules.
     """
     return _safe_str(
@@ -99,6 +108,7 @@ def _get_student_religion(student):
 def _get_student_sector(student):
     """
     Return the student's sector value.
+
     Used for sector-based matching rules.
     """
     return _safe_str(
@@ -111,6 +121,7 @@ def _get_student_sector(student):
 def _get_student_religious_pref(student):
     """
     Return the student's religious placement preference.
+
     Used for ReligiousTogether logic.
     """
     return _safe_str(
@@ -122,6 +133,7 @@ def _get_student_religious_pref(student):
 def _get_student_academic_points(student):
     """
     Return student's academic points as float.
+
     Used to derive year-group rules.
     """
     value = getattr(student, "academic_points_total", None)
@@ -134,6 +146,7 @@ def _get_student_academic_points(student):
 def _get_student_year_group(student):
     """
     Convert academic points into year group.
+
     Used for avoidYearMix constraint.
     """
     pts = _get_student_academic_points(student)
@@ -147,6 +160,7 @@ def _get_student_year_group(student):
 def _collect_special_status_text(student):
     """
     Merge special status fields into one normalized text.
+
     Used for Atudai and Hasmaha detection.
     """
     parts = [
@@ -161,6 +175,7 @@ def _collect_special_status_text(student):
 def _is_atudai(student):
     """
     Check if student belongs to Atudai category.
+
     Used for avoidAtudaimWithHasmaha rule.
     """
     return "עתודאי" in _collect_special_status_text(student)
@@ -169,6 +184,7 @@ def _is_atudai(student):
 def _is_hasmaha(student):
     """
     Check if student belongs to Hasmaha category.
+
     Used for avoidAtudaimWithHasmaha rule.
     """
     return "הסמכה" in _collect_special_status_text(student)
@@ -177,6 +193,7 @@ def _is_hasmaha(student):
 def _get_student_roommate_ids(student):
     """
     Return normalized roommate request ids.
+
     Used for roommate matching logic.
     """
     roommate_ids = getattr(student, "roommate_request_ids", None)
@@ -190,6 +207,7 @@ def _get_student_roommate_ids(student):
 def _students_mutually_requested_each_other(s1, s2):
     """
     Check if both students requested each other.
+
     Used for strong roommate pairing.
     """
     s1_requests = set(_get_student_roommate_ids(s1))
@@ -200,6 +218,7 @@ def _students_mutually_requested_each_other(s1, s2):
 def _students_one_sided_roommate_request(s1, s2):
     """
     Check if only one student requested the other.
+
     Used for softer roommate preference tracking.
     """
     s1_requests = set(_get_student_roommate_ids(s1))
@@ -210,6 +229,7 @@ def _students_one_sided_roommate_request(s1, s2):
 def _needs_accessibility(student):
     """
     Check if student needs accessible housing.
+
     Used to filter invalid apartment choices.
     """
     return bool(getattr(student, "needs_accessibility", False))
@@ -218,6 +238,7 @@ def _needs_accessibility(student):
 def _apartment_is_accessible(apartment):
     """
     Check if apartment is accessible.
+
     Used for accessibility compatibility.
     """
     return bool(getattr(apartment, "is_accessible", False))
@@ -226,6 +247,7 @@ def _apartment_is_accessible(apartment):
 def _apartment_allows_gender(apartment, student):
     """
     Validate gender compatibility with apartment.
+
     Prevents invalid gender assignments.
     """
     category = _safe_str(getattr(apartment, "category", ""))
@@ -249,6 +271,7 @@ def _apartment_allows_gender(apartment, student):
 def _room_reserved_ok(room, student):
     """
     Check if student may use a reserved room.
+
     Blocks non-priority students from reserved apartments.
     """
     apartment = getattr(room, "apartment", None)
@@ -260,6 +283,7 @@ def _room_reserved_ok(room, student):
 def _students_same_requested_religious_pref(s1, s2):
     """
     Check if students share compatible religious preference.
+
     Used for ReligiousTogether constraint.
     """
     p1 = _get_student_religious_pref(s1)
@@ -275,6 +299,7 @@ def _students_same_requested_religious_pref(s1, s2):
 def _students_same_religion(s1, s2):
     """
     Check if students share the same religion.
+
     Used for sameReligion preference.
     """
     r1 = _get_student_religion(s1)
@@ -285,6 +310,7 @@ def _students_same_religion(s1, s2):
 def _students_same_sector(s1, s2):
     """
     Check if students share the same sector.
+
     Used for sectorMatching preference.
     """
     sec1 = _get_student_sector(s1)
@@ -295,6 +321,7 @@ def _students_same_sector(s1, s2):
 def _should_avoid_year_mix(s1, s2):
     """
     Check if students create forbidden year mix.
+
     Used for avoidYearMix rule.
     """
     return {_get_student_year_group(s1), _get_student_year_group(s2)} == {"year1", "year3_4"}
@@ -303,6 +330,7 @@ def _should_avoid_year_mix(s1, s2):
 def _should_avoid_atudaim_hasmaha_mix(s1, s2):
     """
     Check if students create forbidden status mix.
+
     Used for avoidAtudaimWithHasmaha rule.
     """
     return (_is_atudai(s1) and _is_hasmaha(s2)) or (_is_atudai(s2) and _is_hasmaha(s1))
@@ -311,6 +339,7 @@ def _should_avoid_atudaim_hasmaha_mix(s1, s2):
 def _ensure_beds_for_room(room):
     """
     Create missing beds for a room if needed.
+
     Keeps room capacity aligned with actual bed objects.
     """
     existing_beds = list(room.beds.all())
@@ -329,6 +358,7 @@ def _ensure_beds_for_room(room):
 def _assign_student_to_bed(student, bed):
     """
     Create an active bed assignment for a student.
+
     Used to save final solver results.
     """
     return BedAssignment.objects.create(
@@ -342,6 +372,7 @@ def _assign_student_to_bed(student, bed):
 def _can_student_use_bed(student, bed, room, apartment, hard_same_gender):
     """
     Check if a bed is feasible for a student.
+
     Used to remove invalid bed choices before modeling.
     """
     if hard_same_gender and not _apartment_allows_gender(apartment, student):
@@ -356,6 +387,7 @@ def _can_student_use_bed(student, bed, room, apartment, hard_same_gender):
 def _build_feasible_bed_maps(students, candidate_beds, room_by_bed, apartment_by_bed, hard_same_gender):
     """
     Build feasible bed lists per student.
+
     Used to reduce model size and prevent invalid variables.
     """
     student_candidate_beds = {}
@@ -377,6 +409,7 @@ def _build_feasible_bed_maps(students, candidate_beds, room_by_bed, apartment_by
 def _build_room_and_apartment_maps(students, rooms, apartments, student_candidate_beds, beds_by_room, beds_by_apartment):
     """
     Build feasible room/apartment maps per student.
+
     Used to define linking variables efficiently.
     """
     student_candidate_rooms = defaultdict(list)
@@ -401,6 +434,7 @@ def _build_room_and_apartment_maps(students, rooms, apartments, student_candidat
 def _build_feasible_pair_apartment_keys(students, apartments, student_candidate_apartments, hard_same_gender):
     """
     Build feasible same-apartment pair keys only when needed.
+
     Used to reduce pair-variable explosion.
     """
     pair_apartment_keys = []
@@ -417,6 +451,7 @@ def _build_feasible_pair_apartment_keys(students, apartments, student_candidate_
 def _collect_active_bed_ids():
     """
     Return all currently active occupied bed ids.
+
     Used to filter unavailable beds before solving.
     """
     return set(
@@ -429,6 +464,7 @@ def _collect_active_bed_ids():
 def _prepare_candidate_beds(rooms):
     """
     Load all available candidate beds from rooms.
+
     Used as the physical allocation pool.
     """
     candidate_beds = []
@@ -458,6 +494,7 @@ def _prepare_candidate_beds(rooms):
 def _priority_students_have_enough_supply(priority_students, student_candidate_beds):
     """
     Check if priority students have enough distinct feasible beds.
+
     Used before enforcing hard priority assignment.
     """
     distinct_beds = set()
@@ -467,9 +504,10 @@ def _priority_students_have_enough_supply(priority_students, student_candidate_b
 
 
 @transaction.atomic
-def run_improvedortools_allocation(students, rooms, constraints_config):
+def run_improved_ortools_allocation(students, rooms, constraints_config):
     """
     Run the dorm allocation solver using apartment-based logic.
+
     Creates feasible assignments while respecting hard constraints
     and optimizing soft preferences.
     """
@@ -499,10 +537,10 @@ def run_improvedortools_allocation(students, rooms, constraints_config):
 
     candidate_beds, room_by_bed, apartment_by_bed, beds_by_room, beds_by_apartment = _prepare_candidate_beds(rooms)
 
-    if not  candidate_beds:
+    if not candidate_beds:
         results["conflicts"] = len(students)
         results["warnings"].append("No free beds available.")
-        return  results
+        return results
 
     hard_same_gender = _is_constraint_hard(constraints_config, "sameGender")
     hard_priority_first = _is_constraint_hard(constraints_config, "priorityFirst")
@@ -537,8 +575,9 @@ def run_improvedortools_allocation(students, rooms, constraints_config):
         hard_same_gender,
     )
 
-    model  = cp_model.CpModel()
-    x =  {}
+    model = cp_model.CpModel()
+
+    x = {}
     for s_id, bed_id in feasible_x_keys:
         x[(s_id, bed_id)] = model.NewBoolVar(f"x_s{s_id}_b{bed_id}")
 
@@ -548,7 +587,7 @@ def run_improvedortools_allocation(students, rooms, constraints_config):
             r[(s.id, room_id)] = model.NewBoolVar(f"r_s{s.id}_room{room_id}")
 
     a = {}
-    for  s in students:
+    for s in students:
         for apt_id in student_candidate_apartments[s.id]:
             a[(s.id, apt_id)] = model.NewBoolVar(f"a_s{s.id}_apt{apt_id}")
 
@@ -558,7 +597,7 @@ def run_improvedortools_allocation(students, rooms, constraints_config):
             f"same_apt_s{s1_id}_s{s2_id}_a{apt_id}"
         )
 
-    for  s in students:
+    for s in students:
         student_x_vars = [x[(s.id, bed_id)] for bed_id in student_candidate_beds[s.id]]
         if student_x_vars:
             model.Add(sum(student_x_vars) <= 1)
@@ -616,7 +655,7 @@ def run_improvedortools_allocation(students, rooms, constraints_config):
                     model.Add(
                         sum(same_apartment[(s1.id, s2.id, apt_id)] for apt_id in common_apartments) ==
                         sum(a[(s2.id, apt_id)] for apt_id in student_candidate_apartments[s2.id])
-                   )
+                    )
 
     if hard_priority_first:
         priority_students = [s for s in students if _get_student_priority(s)]
@@ -628,7 +667,8 @@ def run_improvedortools_allocation(students, rooms, constraints_config):
                         model.Add(sum(feasible_vars) == 1)
             else:
                 results["warnings"].append(
-                    "Priority bed shortage detected. Hard priority rule was relaxed to avoid infeasibility."        )
+                    "Priority bed shortage detected. Hard priority rule was relaxed to avoid infeasibility."
+                )
 
     objective_terms = []
 
@@ -682,11 +722,11 @@ def run_improvedortools_allocation(students, rooms, constraints_config):
     else:
         model.Maximize(0)
 
-    solver =  cp_model.CpSolver()
+    solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = MAX_SOLVER_TIME_SECONDS
     solver.parameters.num_search_workers = NUM_SEARCH_WORKERS
 
-    status =  solver.Solve(model)
+    status = solver.Solve(model)
 
     status_map = {
         cp_model.OPTIMAL: "OPTIMAL",
@@ -699,13 +739,13 @@ def run_improvedortools_allocation(students, rooms, constraints_config):
     results["solver_status"] = status_map.get(status, str(status))
     results["wall_time"] = solver.WallTime()
 
-    if status  not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         results["conflicts"] = len(students)
         if results["students_with_no_feasible_beds"]:
             results["warnings"].append(
                 f"Students with no feasible beds: {results['students_with_no_feasible_beds']}"
             )
-        return  results
+        return results
 
     try:
         results["objective_value"] = solver.ObjectiveValue()
@@ -714,7 +754,7 @@ def run_improvedortools_allocation(students, rooms, constraints_config):
 
     assigned_students = set()
 
-    for  s in students:
+    for s in students:
         for bed_id in student_candidate_beds[s.id]:
             if solver.Value(x[(s.id, bed_id)]) == 1:
                 bed = next((b for b in candidate_beds if b.id == bed_id), None)
@@ -749,4 +789,4 @@ def run_improvedortools_allocation(students, rooms, constraints_config):
             f"Students with no feasible beds: {results['students_with_no_feasible_beds']}"
         )
 
-    return  results
+    return results
