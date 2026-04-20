@@ -12,9 +12,10 @@ from django.utils import timezone
 from django.db import transaction
 from django.db.models import Q
 import pandas as pd
+from django.core.exceptions import ValidationError
 
 from .models import (
-    User, Region, Office, StaffProfile, DormType, Building, Floor, Apartment, Room, Bed,
+    User, Region, Office, StaffProfile, DormType, Building, Apartment, Room, Bed,
     Student, BedAssignment, MovementRequest, Transfer,
     AllocationRun, ImportBatch, RegionInbox
 )
@@ -146,6 +147,12 @@ def ensure_room_beds(room: Room):
 
 
 def get_free_bed(room: Room):
+    if not room.is_active:
+        return None
+    if not room.apartment.is_active:
+        return None
+    if not room.apartment.building.is_active:
+        return None
     ensure_room_beds(room)
     occupied_bed_ids = BedAssignment.objects.filter(
         bed__room=room,
@@ -163,49 +170,84 @@ def end_active_bed_assignments(student: Student):
         ended_at=timezone.now()
     )
 
+def validate_apartment_assignment(student: Student, room: Room):
+    apartment = room.apartment
 
-def assign_student_to_room(student: Student, room: Room, assigned_by: User, assignment_type=BedAssignment.AssignmentType.MANUAL):
+    if not apartment.is_active:
+        raise ValueError(f'Apartment is inactive: {apartment.get_inactive_reason_display()}')
+
+    if apartment.category == Apartment.Category.MALE and student.gender != Student.Gender.MALE:
+        raise ValueError('This apartment is for male students only.')
+
+    if apartment.category == Apartment.Category.FEMALE and student.gender != Student.Gender.FEMALE:
+        raise ValueError('This apartment is for female students only.')
+
+def assign_student_to_room(
+    student: Student,
+    room: Room,
+    assigned_by: User,
+    assignment_type=BedAssignment.AssignmentType.MANUAL
+):
     """
-    Creates/updates the normalized bed assignment,
-    and also keeps Student.assigned_room updated for frontend compatibility.
+    Creates a new active bed assignment
+    and keeps Student.assigned_room synced.
     """
+    validate_apartment_assignment(student, room)
     free_bed = get_free_bed(room)
     if not free_bed:
         raise ValueError('No available bed in selected room.')
 
-    end_active_bed_assignments(student)
+    with transaction.atomic():
+        end_active_bed_assignments(student)
 
-    assignment = BedAssignment.objects.create(
-        student=student,
-        bed=free_bed,
-        status=BedAssignment.Status.ACTIVE,
-        assignment_type=assignment_type,
-        assigned_by=assigned_by
-    )
+        assignment = BedAssignment(
+            student=student,
+            bed=free_bed,
+            status=BedAssignment.Status.ACTIVE,
+            assignment_type=assignment_type,
+            assigned_by=assigned_by
+        )
+        assignment.full_clean()
+        assignment.save()
 
-    student.assigned_room = room
-    student.save(update_fields=['assigned_room', 'updated_at'])
+        student.assigned_room = room
+        student.save(update_fields=['assigned_room', 'updated_at'])
 
     return assignment
-
 
 def infer_movement_type(from_room: Room, to_room: Room):
     if not from_room or not to_room:
         return MovementRequest.MovementType.INTERNAL
 
-    from_region = from_room.region if from_room else None
-    to_region = to_room.region if to_room else None
+    from_region = (
+        from_room.apartment.building.dorm_type.region
+        if from_room and from_room.apartment and from_room.apartment.building
+        else None
+    )
+    to_region = (
+        to_room.apartment.building.dorm_type.region
+        if to_room and to_room.apartment and to_room.apartment.building
+        else None
+    )
 
     if from_region and to_region and from_region != to_region:
         return MovementRequest.MovementType.REGION_CHANGE
 
-    from_dorm_type = from_room.apartment.dorm_type_id if from_room and from_room.apartment else None
-    to_dorm_type = to_room.apartment.dorm_type_id if to_room and to_room.apartment else None
+    from_dorm_type = (
+        from_room.apartment.building.dorm_type_id
+        if from_room and from_room.apartment and from_room.apartment.building
+        else None
+    )
+    to_dorm_type = (
+        to_room.apartment.building.dorm_type_id
+        if to_room and to_room.apartment and to_room.apartment.building
+        else None
+    )
+
     if from_dorm_type != to_dorm_type:
         return MovementRequest.MovementType.DORM_TYPE_CHANGE
 
     return MovementRequest.MovementType.INTERNAL
-
 
 def user_can_approve_transfer(user: User, transfer: Transfer):
     """
@@ -218,8 +260,8 @@ def user_can_approve_transfer(user: User, transfer: Transfer):
     if not user.is_boss or not user.region:
         return False
 
-    same_from_region = transfer.from_room.region == user.region
-    same_to_region = transfer.to_room.region == user.region
+    same_from_region = (transfer.from_room.apartment.building.dorm_type.region == user.region )
+    same_to_region = (transfer.to_room.apartment.building.dorm_type.region == user.region)
 
     # regional boss only internal/same-region approval
     return same_from_region and same_to_region
@@ -233,11 +275,10 @@ class RegionViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = Region.objects.filter(is_active=True)
+        queryset = Region.objects.all()
         if self.request.user.is_central_admin:
             return queryset
-        return queryset.filter(id=self.request.user.region_id)
-
+        return queryset.filter(pk=self.request.user.region_id)
 
 # ===========================================
 # BUILDING VIEWS
@@ -248,12 +289,25 @@ class BuildingViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = Building.objects.filter(is_active=True)
-        return filter_by_region(queryset, self.request.user)
+        user = self.request.user
+
+        if user.is_central_admin:
+            return queryset
+        if not user.region:
+            return queryset.none()
+        return queryset.filter(dorm_type__region=user.region)
 
     @action(detail=True, methods=['get'])
     def apartments(self, request, pk=None):
         building = self.get_object()
         apartments = building.apartments.filter(is_active=True)
+        category = request.query_params.get('category')
+        if category:
+            apartments = apartments.filter(category=category)
+
+        apartment_type = request.query_params.get('apartment_type')
+        if apartment_type:
+            apartments = apartments.filter(apartment_type=apartment_type)
         serializer = ApartmentSerializer(apartments, many=True)
         return Response({'apartments': serializer.data})
 
@@ -281,24 +335,34 @@ class StudentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = Student.objects.filter(is_active=True)
-        queryset = filter_by_region(queryset, self.request.user)
+        queryset = Student.objects.all()
+        if not self.request.user.is_central_admin:
+            if not self.request.user.region:
+                return queryset.none()
+            queryset = queryset.filter(
+                accepted_dorm_type__region=self.request.user.region
+            )
 
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
                 Q(first_name__icontains=search) |
                 Q(last_name__icontains=search) |
-                Q(student_id__icontains=search)
+                Q(student_id__icontains=search)|
+                Q(business_partner_id__icontains=search)
             )
 
         gender = self.request.query_params.get('gender')
         if gender and gender != 'all':
             queryset = queryset.filter(gender=gender)
 
-        religion = self.request.query_params.get('religion')
-        if religion and religion != 'all':
-            queryset = queryset.filter(religion=religion)
+        requested_religion = self.request.query_params.get('requested_religion')
+        if requested_religion and requested_religion != 'all':
+            queryset = queryset.filter(requested_religion=requested_religion)
+
+        religious = self.request.query_params.get('religious')
+        if religious and religious != 'all':
+            queryset = queryset.filter(religious=religious)
 
         status_filter = self.request.query_params.get('status')
         if status_filter == 'assigned':
@@ -329,7 +393,10 @@ class TransferViewSet(viewsets.ModelViewSet):
         )
 
         if not self.request.user.is_central_admin:
-            queryset = queryset.filter(student__region=self.request.user.region)
+            queryset = queryset.filter(
+                Q(from_room__apartment__building__dorm_type__region=self.request.user.region) |
+                Q(to_room__apartment__building__dorm_type__region=self.request.user.region)
+            )
 
         status_filter = self.request.query_params.get('status')
         if status_filter and status_filter != 'all':
@@ -344,7 +411,7 @@ class TransferViewSet(viewsets.ModelViewSet):
 
         if not from_room:
             raise permissions.ValidationError('הסטודנט אינו משויך כרגע לחדר מקור')
-
+        validate_apartment_assignment(student, to_room)
         movement_type = infer_movement_type(from_room, to_room)
 
         transfer = serializer.save(
@@ -355,8 +422,10 @@ class TransferViewSet(viewsets.ModelViewSet):
 
         current_assignment = student.current_assignment
         target_bed = get_free_bed(to_room)
+        if not target_bed:
+            raise permissions.ValidationError('אין מיטה פנויה בחדר היעד')
 
-        movement_request = MovementRequest.objects.create(
+        movement_request = MovementRequest(
             student=student,
             from_assignment=current_assignment,
             to_bed=target_bed,
@@ -365,6 +434,9 @@ class TransferViewSet(viewsets.ModelViewSet):
             reason=transfer.reason,
             requested_by=self.request.user
         )
+        movement_request.full_clean()
+        movement_request.save()
+
         transfer.movement_request = movement_request
         transfer.save(update_fields=['movement_request', 'updated_at'])
 
@@ -416,7 +488,9 @@ class TransferViewSet(viewsets.ModelViewSet):
                     transfer.movement_request.to_bed = new_assignment.bed
                     transfer.movement_request.status = MovementRequest.Status.COMPLETED
                     transfer.movement_request.approved_by = request.user
+                    transfer.movement_request.reviewed_at = timezone.now()
                     transfer.movement_request.completed_at = timezone.now()
+                    transfer.movement_request.full_clean()
                     transfer.movement_request.save()
 
             return Response({
@@ -424,9 +498,13 @@ class TransferViewSet(viewsets.ModelViewSet):
                 'transfer': TransferSerializer(transfer).data
             })
 
-        except ValueError as e:
+
+        except (ValueError, ValidationError) as e:
+
             return Response({
+
                 'error': str(e)
+
             }, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['put'])
@@ -443,10 +521,12 @@ class TransferViewSet(viewsets.ModelViewSet):
                 'error': 'הבקשה כבר טופלה'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        if not request.user.is_central_admin and transfer.student.region != request.user.region:
-            return Response({
-                'error': 'אין הרשאה לדחות בקשה זו'
-            }, status=status.HTTP_403_FORBIDDEN)
+        if not request.user.is_central_admin:
+            transfer_region = transfer.to_room.apartment.building.dorm_type.region
+            if transfer_region != request.user.region:
+                return Response({
+                    'error': 'אין הרשאה לדחות בקשה זו'
+                }, status=status.HTTP_403_FORBIDDEN)
 
         transfer.status = Transfer.Status.REJECTED
         transfer.reviewed_by = request.user
@@ -455,10 +535,12 @@ class TransferViewSet(viewsets.ModelViewSet):
         transfer.save()
 
         if transfer.movement_request:
-            transfer.movement_request.status = MovementRequest.Status.REJECTED
-            transfer.movement_request.approved_by = request.user
-            transfer.movement_request.completed_at = timezone.now()
-            transfer.movement_request.save()
+                transfer.movement_request.status = MovementRequest.Status.REJECTED
+                transfer.movement_request.approved_by = request.user
+                transfer.movement_request.reviewed_at = timezone.now()
+                transfer.movement_request.completed_at = None
+                transfer.movement_request.full_clean()
+                transfer.movement_request.save()
 
         return Response({
             'message': 'הבקשה נדחתה',
@@ -477,16 +559,16 @@ def run_allocation(request):
             'error': 'רק מנהל יכול להריץ שיבוץ'
         }, status=status.HTTP_403_FORBIDDEN)
 
-    region_id = request.data.get('region_id')
-    if not region_id:
+    region_name = request.data.get('region_name')
+    if not region_name:
         if request.user.is_central_admin:
             return Response({
                 'error': 'נדרש לבחור אזור'
             }, status=status.HTTP_400_BAD_REQUEST)
-        region_id = request.user.region_id
+        region_name = request.user.region.name
 
     try:
-        region = Region.objects.get(id=region_id)
+        region = Region.objects.get(pk=region_name)
     except Region.DoesNotExist:
         return Response({
             'error': 'אזור לא נמצא'
@@ -546,16 +628,17 @@ def statistics(request):
     user = request.user
 
     if user.is_central_admin:
-        students = Student.objects.filter(is_active=True)
+        students = Student.objects.all()
         buildings = Building.objects.filter(is_active=True)
         rooms = Room.objects.filter(is_active=True)
         transfers = Transfer.objects.filter(status=Transfer.Status.PENDING)
     else:
-        students = Student.objects.filter(region=user.region, is_active=True)
-        buildings = Building.objects.filter(region=user.region, is_active=True)
-        rooms = Room.objects.filter(apartment__building__region=user.region, is_active=True)
+        students = Student.objects.filter(accepted_dorm_type__region=user.region)
+        buildings = Building.objects.filter(dorm_type__region=user.region, is_active=True)
+        rooms = Room.objects.filter(apartment__building__dorm_type__region=user.region, is_active=True)
         transfers = Transfer.objects.filter(
-            student__region=user.region,
+            Q(from_room__apartment__building__dorm_type__region=user.region) |
+            Q(to_room__apartment__building__dorm_type__region=user.region),
             status=Transfer.Status.PENDING
         )
 
@@ -609,25 +692,41 @@ def get_or_create_region(region_name_hebrew):
         id=region_id,
         defaults={
             'name': region_name_hebrew,
-            'name_en': region_name_hebrew,
-            'is_active': True
         }
     )
     return region
-
-
-def parse_religion(value):
+def parse_requested_religion(value):
     if not value or pd.isna(value):
         return Student.Religion.NOT_SPECIFIED
+
     value = str(value).strip()
-    if 'חילוני' in value:
-        return Student.Religion.SECULAR
-    elif 'דתי' in value:
-        return Student.Religion.RELIGIOUS
-    elif 'מסורתי' in value:
-        return Student.Religion.TRADITIONAL
+
+    if 'מוסל' in value:
+        return Student.Religion.Muslim
+    elif 'יהוד' in value:
+        return Student.Religion.Jewish
+    elif 'נוצר' in value:
+        return Student.Religion.Christian
+    elif 'דרוז' in value:
+        return Student.Religion.Druze
+
     return Student.Religion.NOT_SPECIFIED
 
+
+def parse_religious(value):
+    if not value or pd.isna(value):
+        return Student.Religious.NOT_SPECIFIED
+
+    value = str(value).strip()
+
+    if 'דתי' in value:
+        return Student.Religious.RELIGIOUS
+    elif 'לא משנה' in value:
+        return Student.Religious.NO_PREFERENCE
+    elif 'לא צוין' in value:
+        return Student.Religious.NOT_SPECIFIED
+
+    return Student.Religious.NOT_SPECIFIED
 
 def parse_gender(value):
     if not value or pd.isna(value):
@@ -742,23 +841,42 @@ def upload_excel(request):
                     'phone': safe_str(row.get('טלפון 1')),
                     'phone_secondary': safe_str(row.get('טלפון 2')),
                     'city': safe_str(row.get('שם ישוב')),
+
                     'gender': parse_gender(row.get('תיאור מגדר')),
-                    'religion': parse_religion(row.get('החלטה אחרונה - דתי לצורך שיבוץ תיאור')),
-                    'nationality': parse_nationality(row.get('תיאור קוד לאום מבוקש')),
+
+                    # דת אמיתית של הסטודנט - רק אם יש לך עמודה מתאימה באמת
+                    # אם אין עמודה כזאת, עדיף לא להכניס בכלל ולתת לברירת המחדל לעבוד
+                    'requested_religion': parse_requested_religion(row.get('שם העמודה המתאימה')),
+                    # דתי לצורך שיבוץ
+                    'religious': parse_religious(row.get('החלטה אחרונה - דתי לצורך שיבוץ תיאור')),
+
                     'category': parse_category(row.get('תיאור קבוצת הקצאה')),
                     'housing_type': safe_str(row.get('תיאור סוג מגורים')),
                     'allocation_group': safe_str(row.get('קבוצת הקצאה')),
-                    'region_name': region_name,
-                    'disability_percentage': safe_int(row.get('%נכות')),
-                    'medical_approval': safe_str(row.get('סיבה רפואית מאושרת מרופאת הטכניון')) == 'כן',
+
                     'current_address': safe_str(row.get('כתובת במעונות נוכחית')),
-                    'current_region_name': safe_str(row.get('אזור מגורים נוכחי')),
-                    'decision_status': decision_status,
+                    'current_dorm_type': safe_str(row.get('אזור מגורים נוכחי')),
+
                     'roommate_request_1': safe_str(row.get('החלטה אחרונה: שם חבר 1')),
                     'roommate_request_2': safe_str(row.get('החלטה אחרונה: שם חבר 2')),
                     'roommate_request_3': safe_str(row.get('החלטה אחרונה: שם חבר 3')),
                     'roommate_request_4': safe_str(row.get('החלטה אחרונה: שם חבר 4')),
                     'roommate_request_5': safe_str(row.get('החלטה אחרונה: שם חבר 5')),
+
+                    'roommate_request_flag_1': safe_str(row.get('בקשה לגור עם סטודנטים חבר1')) == 'כן',
+                    'roommate_request_flag_2': safe_str(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר2')) == 'כן',
+                    'roommate_request_flag_3': safe_str(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר3')) == 'כן',
+                    'roommate_request_flag_4': safe_str(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר4')) == 'כן',
+                    'roommate_request_flag_5': safe_str(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר5')) == 'כן',
+
+                    'special_status_1': safe_str(row.get('תאור סטטוס מיוחד1')),
+                    'special_status_2': safe_str(row.get('תאור סטטוס מיוחד2')),
+                    'special_status_3': safe_str(row.get('תאור סטטוס מיוחד3')),
+                    'special_status_4': safe_str(row.get('תאור סטטוס מיוחד4')),
+
+                    # אם זה השדה שאת רוצה לשמור כנקודות לימוד
+                    'study_points': safe_int(row.get('נ.אקדמי מצטבר'), default=None),
+
                     'sheet_name': sheet_name,
                 }
                 all_students.append(student_data)
@@ -770,7 +888,6 @@ def upload_excel(request):
 
         for student_data in all_students:
             try:
-                region_name = student_data.pop('region_name')
                 student_data.pop('sheet_name', None)
 
                 region = get_or_create_region(region_name)
@@ -976,7 +1093,7 @@ def allocation_summary(request):
     user = request.user
 
     if user.is_central_admin:
-        students = Student.objects.filter(is_active=True)
+        students = Student.objects.all()
         rooms = Room.objects.filter(is_active=True)
         latest_inbox = None
     else:
@@ -985,8 +1102,8 @@ def allocation_summary(request):
                 'error': 'משתמש לא משויך לאזור'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        students = Student.objects.filter(region=user.region, is_active=True)
-        rooms = Room.objects.filter(apartment__building__region=user.region, is_active=True)
+        students = Student.objects.filter(accepted_dorm_type__region=user.region)
+        rooms = Room.objects.filter(apartment__building__dorm_type__region=user.region, is_active=True)
 
         latest_inbox = RegionInbox.objects.filter(
             region=user.region,
@@ -997,7 +1114,6 @@ def allocation_summary(request):
     unassigned_students = students.filter(assigned_room__isnull=True).count()
     assigned_students = total_students - unassigned_students
     priority_students = students.filter(is_priority=True).count()
-
     total_capacity = sum(r.capacity for r in rooms)
     available_beds = sum(r.available_beds for r in rooms)
 
@@ -1014,7 +1130,6 @@ def allocation_summary(request):
     students_by_category = {}
     for cat in Student.StudentCategory:
         students_by_category[cat.value] = students.filter(category=cat.value).count()
-
     return Response({
         'total_students': total_students,
         'unassigned_students': unassigned_students,

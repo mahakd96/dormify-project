@@ -58,15 +58,10 @@ class User(AbstractUser):
 # REGION / OFFICE / STAFF
 # ===========================================
 class Region(models.Model):
-    """Dormitory regions (Canada, Mizrah, Taub, etc.)"""
+    """Dormitory regions (Canada, Mizrah,  etc.)"""
 
     id = models.CharField(max_length=50, primary_key=True)  # e.g. 'canada'
     name = models.CharField(max_length=100)
-    name_en = models.CharField(max_length=100)
-    description = models.TextField(blank=True)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = _('אזור')
@@ -95,7 +90,6 @@ class Office(models.Model):
         blank=True,
         related_name='offices'
     )
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         verbose_name = _('משרד')
@@ -136,8 +130,6 @@ class StaffProfile(models.Model):
         on_delete=models.CASCADE,
         related_name='staff_profiles'
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = _('פרופיל עובד')
@@ -151,103 +143,81 @@ class StaffProfile(models.Model):
 # BUILDING / FLOOR / APARTMENT / ROOM / BED
 # ===========================================
 class DormType(models.Model):
+    code = models.PositiveIntegerField(unique=True)
     name = models.CharField(max_length=100, unique=True)
-    description = models.TextField(blank=True)
+    region = models.ForeignKey(
+        Region,
+        on_delete=models.PROTECT,
+        related_name='dorm_types'
+    )
 
     class Meta:
-        verbose_name = _('סוג מעונות')
+        verbose_name = _('סוג מעון')
         verbose_name_plural = _('סוגי מעונות')
-        ordering = ['name']
+        ordering = ['code']
 
     def __str__(self):
-        return self.name
+        return f"{self.code} - {self.name} ({self.region.name})"
 
 
 class Building(models.Model):
-    region = models.ForeignKey(
-        Region,
-        on_delete=models.CASCADE,
-        related_name='buildings'
+    number = models.PositiveIntegerField(unique=True)
+    dorm_type = models.ForeignKey(
+        DormType,
+        on_delete=models.PROTECT,
+        related_name='buildings',
     )
-    name = models.CharField(max_length=100)
-    floors = models.PositiveIntegerField(default=1)
-    apartments_per_floor = models.PositiveIntegerField(default=4)
-    image_url = models.URLField(blank=True)
-    address = models.CharField(max_length=255, blank=True)
     is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
     class Meta:
         verbose_name = _('בניין')
         verbose_name_plural = _('בניינים')
-        ordering = ['region', 'name']
+        ordering = ['number']
 
     def __str__(self):
-        return f"{self.name} - {self.region.name}"
-
-
-class Floor(models.Model):
-    number = models.PositiveIntegerField()
-    building = models.ForeignKey(
-        Building,
-        on_delete=models.CASCADE,
-        related_name='floor_objects'
-    )
-
-    class Meta:
-        verbose_name = _('קומה')
-        verbose_name_plural = _('קומות')
-        ordering = ['building', 'number']
-        unique_together = ['building', 'number']
-
-    def __str__(self):
-        return f"Floor {self.number} - {self.building.name}"
+        return f"Building {self.number} - {self.dorm_type.name}"
 
 
 class Apartment(models.Model):
-    """
-    Keep existing fields for frontend compatibility:
-    - building
-    - number
-    - floor (int)
-    Add optional normalized links:
-    - floor_ref
-    - dorm_type
-    """
+    class Category(models.TextChoices):
+        MALE = 'male', _('זכר')
+        FEMALE = 'female', _('נקבה')
+
+    class ApartmentType(models.TextChoices):
+        SINGLE = 'single', _('רווקים')
+        COUPLE = 'couple', _('זוגות')
+        FAMILY = 'family', _('משפחה')
+
+    class InactiveReason(models.TextChoices):
+        RESERVED = 'reserved', _('שמורה')
+        MAINTENANCE = 'maintenance', _('תחזוקה')
+        RENOVATION = 'renovation', _('שיפוץ')
+        STAFF_USE = 'staff_use', _('שימוש מנהלתי')
+        OTHER = 'other', _('אחר')
+
     building = models.ForeignKey(
         Building,
         on_delete=models.CASCADE,
         related_name='apartments'
     )
     number = models.CharField(max_length=20)
-    floor = models.PositiveIntegerField()
-    floor_ref = models.ForeignKey(
-        Floor,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='apartments'
+    category = models.CharField(max_length=10, choices=Category.choices)
+    apartment_type = models.CharField(
+        max_length=10,
+        choices=ApartmentType.choices
     )
-    dorm_type = models.ForeignKey(
-        DormType,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='apartments'
-    )
-    category = models.CharField(max_length=100, blank=True)
-    room_count = models.PositiveIntegerField(default=2)
-    is_reserved = models.BooleanField(default=False)
-    reserved_reason = models.CharField(max_length=255, blank=True)
+    room_count = models.PositiveIntegerField()
+    apartment_capacity = models.PositiveIntegerField()
     is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    inactive_reason = models.CharField(
+        max_length=20,
+        choices=InactiveReason.choices,
+        blank=True
+    )
 
     class Meta:
         verbose_name = _('דירה')
         verbose_name_plural = _('דירות')
-        ordering = ['building', 'floor', 'number']
+        ordering = ['building', 'number']
         unique_together = ['building', 'number']
 
     def __str__(self):
@@ -255,8 +225,11 @@ class Apartment(models.Model):
 
     @property
     def region(self):
-        return self.building.region
+        return self.building.dorm_type.region
 
+    @property
+    def dorm_type(self):
+        return self.building.dorm_type
 
 class Room(models.Model):
     """
@@ -269,10 +242,8 @@ class Room(models.Model):
         related_name='rooms'
     )
     name = models.CharField(max_length=50)  # keeps old frontend working
-    capacity = models.PositiveIntegerField(default=2)
+    capacity = models.PositiveIntegerField()
     is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = _('חדר')
@@ -293,34 +264,32 @@ class Room(models.Model):
 
     @property
     def region(self):
-        return self.apartment.building.region
+        return self.apartment.building.dorm_type.region
 
     @property
     def current_occupancy(self):
-        bed_count = self.beds.count()
-        if bed_count > 0:
-            return BedAssignment.objects.filter(
-                bed__room=self,
-                status=BedAssignment.Status.ACTIVE
-            ).count()
-        return self.students.filter(is_active=True).count()
+        return BedAssignment.objects.filter(
+            bed__room=self,
+            status=BedAssignment.Status.ACTIVE
+        ).count()
 
     @property
     def is_full(self):
-        if self.beds.exists():
-            return self.available_beds <= 0
-        return self.current_occupancy >= self.capacity
+        if not self.is_active:
+            return True
+        return self.available_beds <= 0
 
     @property
     def available_beds(self):
-        if self.beds.exists():
-            used = BedAssignment.objects.filter(
-                bed__room=self,
-                status=BedAssignment.Status.ACTIVE
-            ).values('bed_id').distinct().count()
-            return max(self.beds.count() - used, 0)
-        return max(self.capacity - self.current_occupancy, 0)
+        if not self.is_active:
+            return 0
 
+        used = BedAssignment.objects.filter(
+            bed__room=self,
+            status=BedAssignment.Status.ACTIVE
+        ).values('bed_id').distinct().count()
+
+        return max(self.beds.count() - used, 0)
 
 class Bed(models.Model):
     label = models.CharField(max_length=20)
@@ -353,9 +322,15 @@ class Student(models.Model):
         FEMALE = 'female', _('נקבה')
 
     class Religion(models.TextChoices):
-        SECULAR = 'secular', _('חילוני')
+        Muslim = 'Muslims', _('מוסלמי')
+        Jewish = 'Jewish', _('יהודי')
+        Christian = 'Christian', _('נוצרי')
+        Druze = 'Druze', _('דרוזי')
+        NOT_SPECIFIED = 'not_specified', _('לא צוין')
+
+    class Religious(models.TextChoices):
         RELIGIOUS = 'religious', _('דתי')
-        TRADITIONAL = 'traditional', _('מסורתי')
+        NO_PREFERENCE = 'no_preference', _('לא משנה')
         NOT_SPECIFIED = 'not_specified', _('לא צוין')
 
     class Nationality(models.TextChoices):
@@ -369,7 +344,6 @@ class Student(models.Model):
         LEAVING = 'leaving', _('עזיבה')
 
     student_id = models.CharField(max_length=20, unique=True)
-    business_partner_id = models.CharField(max_length=20, blank=True)
     first_name = models.CharField(max_length=100)
     last_name = models.CharField(max_length=100)
     email = models.EmailField(blank=True)
@@ -377,19 +351,22 @@ class Student(models.Model):
     phone = models.CharField(max_length=20, blank=True)
     phone_secondary = models.CharField(max_length=20, blank=True)
     city = models.CharField(max_length=100, blank=True)
-
+    business_partner_id = models.CharField(max_length=20, blank=True)
     gender = models.CharField(max_length=10, choices=Gender.choices)
-    religion = models.CharField(max_length=20, choices=Religion.choices, default=Religion.NOT_SPECIFIED)
-    nationality = models.CharField(max_length=20, choices=Nationality.choices, default=Nationality.ISRAELI)
+    requested_religion = models.CharField(max_length=20, choices=Religion.choices, default=Religion.NOT_SPECIFIED)
     category = models.CharField(max_length=20, choices=StudentCategory.choices, default=StudentCategory.NEW)
-
+    ## סוג המעון שאליו נרשם הסטודנט - רווקים\ זוגות\ משפחות
     housing_type = models.CharField(max_length=100, blank=True)
+    ## סטודנטים חדשים\ עוזבים\ עוברים\ נשארים\ תוכניות מיוחדות ....
     allocation_group = models.CharField(max_length=50, blank=True)
-
-    region = models.ForeignKey(
-        Region,
-        on_delete=models.CASCADE,
-        related_name='students'
+    # #סוג המעון שאליו הסטודנט התקבל
+    accepted_dorm_type = models.ForeignKey(
+        DormType,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='accepted_students',
+        verbose_name=_('סוג מעונות אליו התקבל הסטודנט')
     )
 
     batch = models.ForeignKey(
@@ -399,25 +376,50 @@ class Student(models.Model):
         blank=True,
         related_name='students'
     )
+    religious = models.CharField(
+        max_length=20,
+        choices=Religious.choices,
+        default=Religious.NOT_SPECIFIED
+    )
 
     roommate_request_1 = models.CharField(max_length=100, blank=True)
     roommate_request_2 = models.CharField(max_length=100, blank=True)
     roommate_request_3 = models.CharField(max_length=100, blank=True)
     roommate_request_4 = models.CharField(max_length=100, blank=True)
     roommate_request_5 = models.CharField(max_length=100, blank=True)
+    ##האם התקבלה ההחלטה או לא
+    roommate_request_flag_1 = models.BooleanField(default=False)
+    roommate_request_flag_2 = models.BooleanField(default=False)
+    roommate_request_flag_3 = models.BooleanField(default=False)
+    roommate_request_flag_4 = models.BooleanField(default=False)
+    roommate_request_flag_5 = models.BooleanField(default=False)
+    ##סטטוס מיוחד
+    special_status_1 = models.CharField(max_length=100, blank=True)
+    special_status_2 = models.CharField(max_length=100, blank=True)
+    special_status_3 = models.CharField(max_length=100, blank=True)
+    special_status_4 = models.CharField(max_length=100, blank=True)
 
     is_priority = models.BooleanField(default=False)
     priority_reason = models.CharField(max_length=255, blank=True)
-    disability_percentage = models.PositiveIntegerField(default=0)
-    medical_approval = models.BooleanField(default=False)
+    study_points = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name=_('נקודות לימוד')
+    )
 
     current_address = models.CharField(max_length=255, blank=True)
-    current_region_name = models.CharField(max_length=100, blank=True)
+    current_dorm_type = models.CharField(max_length=100, blank=True)
+    # # מתי הסטודנט נכנס למעונות, מתי הסטודנט עזב המעונות
+    move_in_date = models.DateField(null=True, blank=True)
+    move_out_date = models.DateField(null=True, blank=True)
 
-    decision_status = models.CharField(max_length=50, blank=True)
-    decision_date = models.DateField(null=True, blank=True)
+    ## מתי הפעם האחרונה שנוסף סטודנט או נעשה שינוי במערכת- זה קשור יותר להיסטוריה
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
-    # keep for frontend compatibility
+    ## לאיזה חדר הסטודנט משוייך כרגע
     assigned_room = models.ForeignKey(
         Room,
         on_delete=models.SET_NULL,
@@ -425,12 +427,6 @@ class Student(models.Model):
         blank=True,
         related_name='students'
     )
-
-    status = models.CharField(max_length=50, blank=True)
-
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = _('סטודנט')
@@ -445,6 +441,14 @@ class Student(models.Model):
         return f"{self.first_name} {self.last_name}"
 
     @property
+    def housing_gender(self):
+        mapping = {
+            'רווקים': 'male',
+            'רווקות': 'female',
+        }
+        return mapping.get(self.housing_type)
+
+    @property
     def is_assigned(self):
         return self.assigned_room is not None
 
@@ -456,7 +460,6 @@ class Student(models.Model):
     def current_bed(self):
         assignment = self.current_assignment
         return assignment.bed if assignment else None
-
 
 # ===========================================
 # BED ASSIGNMENTS / MOVEMENTS
@@ -475,12 +478,12 @@ class BedAssignment(models.Model):
 
     student = models.ForeignKey(
         Student,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='bed_assignments'
     )
     bed = models.ForeignKey(
         Bed,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='assignments'
     )
     status = models.CharField(
@@ -507,6 +510,18 @@ class BedAssignment(models.Model):
         verbose_name = _('שיבוץ מיטה')
         verbose_name_plural = _('שיבוצי מיטות')
         ordering = ['-assigned_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['bed'],
+                condition=models.Q(status='active'),
+                name='unique_active_assignment_per_bed'
+            ),
+            models.UniqueConstraint(
+                fields=['student'],
+                condition=models.Q(status='active'),
+                name='unique_active_assignment_per_student'
+            ),
+        ]
 
     def __str__(self):
         return f"{self.student.full_name} -> {self.bed}"
@@ -521,6 +536,25 @@ class BedAssignment(models.Model):
                 qs = qs.exclude(pk=self.pk)
             if qs.exists():
                 raise ValidationError('This bed already has an active assignment.')
+
+            student_qs = BedAssignment.objects.filter(
+                student=self.student,
+                status=self.Status.ACTIVE
+            )
+            if self.pk:
+                student_qs = student_qs.exclude(pk=self.pk)
+            if student_qs.exists():
+                raise ValidationError('This student already has an active bed assignment.')
+
+        if self.status == self.Status.ACTIVE and self.ended_at is not None:
+            raise ValidationError('Active assignment cannot have an ended_at value.')
+
+        if self.status in (self.Status.ENDED, self.Status.CANCELLED) and self.ended_at is None:
+            raise ValidationError('Ended or cancelled assignment must have ended_at.')
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class MovementRequest(models.Model):
@@ -538,7 +572,7 @@ class MovementRequest(models.Model):
 
     student = models.ForeignKey(
         Student,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='movement_requests'
     )
     from_assignment = models.ForeignKey(
@@ -581,6 +615,7 @@ class MovementRequest(models.Model):
         related_name='approved_movements'
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -590,6 +625,26 @@ class MovementRequest(models.Model):
 
     def __str__(self):
         return f"{self.student.full_name} - {self.get_movement_type_display()} - {self.get_status_display()}"
+
+    def clean(self):
+        if self.status == self.Status.PENDING:
+            if self.approved_by is not None or self.reviewed_at is not None or self.completed_at is not None:
+                raise ValidationError('Pending request cannot have approval/completion data.')
+
+        if self.status == self.Status.APPROVED:
+            if self.approved_by is None or self.reviewed_at is None:
+                raise ValidationError('Approved request must have approved_by and reviewed_at.')
+
+        if self.status == self.Status.REJECTED:
+            if self.approved_by is None or self.reviewed_at is None:
+                raise ValidationError('Rejected request must have approved_by and reviewed_at.')
+
+        if self.status == self.Status.COMPLETED:
+            if self.approved_by is None or self.reviewed_at is None or self.completed_at is None:
+                raise ValidationError('Completed request must have approval and completion timestamps.')
+
+        if self.status in [self.Status.APPROVED, self.Status.COMPLETED] and self.to_bed is None:
+            raise ValidationError('Approved or completed request must have target bed.')
 
 
 # ===========================================
