@@ -8,6 +8,9 @@ from datetime import timedelta
 from dotenv import load_dotenv
 from corsheaders.defaults import default_headers
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR.parent / ".env")
+
 # Load environment variables
 load_dotenv()
 
@@ -71,11 +74,11 @@ WSGI_APPLICATION = 'dormify.wsgi.application'
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": "dormify_db",
-        "USER": "postgres",
-        "PASSWORD": "9696",
-        "HOST": "127.0.0.1",
-        "PORT": "5432",
+        "NAME": os.getenv("DB_NAME"),
+        "USER": os.getenv("DB_USER"),
+        "PASSWORD": os.getenv("DB_PASSWORD"),
+        "HOST": os.getenv("DB_HOST"),
+        "PORT": os.getenv("DB_PORT", "5432"),
     }
 }
 
