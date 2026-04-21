@@ -18,7 +18,8 @@ function LoginPage() {
   const demoAccounts = useMemo(
     () => [
       { email: 'admin@technion.ac.il', password: 'admin123', role: 'מנהל מרכזי' },
-      { email: 'canada@technion.ac.il', password: 'test123', role: 'מנהל אזור קנדה' },
+      { email: 'canada@technion.ac.il', password: 'canadaboss123', role: 'מנהל אזור קנדה' },
+        { email: 'canadaem@technion.ac.il', password: 'canada123456', role: 'עובד' },
     ],
     []
   );
