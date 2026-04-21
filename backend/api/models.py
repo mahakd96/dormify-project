@@ -143,12 +143,14 @@ class StaffProfile(models.Model):
 # BUILDING / FLOOR / APARTMENT / ROOM / BED
 # ===========================================
 class DormType(models.Model):
-    code = models.PositiveIntegerField(unique=True)
+    code = models.PositiveIntegerField(null=True, blank=True, unique=True)
     name = models.CharField(max_length=100, unique=True)
     region = models.ForeignKey(
         Region,
         on_delete=models.PROTECT,
-        related_name='dorm_types'
+        related_name='dorm_types',
+        null=True,
+        blank=True
     )
 
     class Meta:
@@ -161,11 +163,13 @@ class DormType(models.Model):
 
 
 class Building(models.Model):
-    number = models.PositiveIntegerField(unique=True)
+    number = models.PositiveIntegerField(null=True, blank=True)
     dorm_type = models.ForeignKey(
         DormType,
         on_delete=models.PROTECT,
         related_name='buildings',
+        null=True,
+        blank=True
     )
     is_active = models.BooleanField(default=True)
     class Meta:
@@ -174,7 +178,8 @@ class Building(models.Model):
         ordering = ['number']
 
     def __str__(self):
-        return f"Building {self.number} - {self.dorm_type.name}"
+        dorm_type_name = self.dorm_type.name if self.dorm_type else "No Dorm Type"
+        return f"Building {self.number} - {dorm_type_name}"
 
 
 class Apartment(models.Model):
@@ -203,10 +208,12 @@ class Apartment(models.Model):
     category = models.CharField(max_length=10, choices=Category.choices)
     apartment_type = models.CharField(
         max_length=10,
-        choices=ApartmentType.choices
+        choices=ApartmentType.choices,
+        null=True,
+        blank=True
     )
     room_count = models.PositiveIntegerField()
-    apartment_capacity = models.PositiveIntegerField()
+    apartment_capacity = models.PositiveIntegerField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     inactive_reason = models.CharField(
         max_length=20,
@@ -651,8 +658,6 @@ class MovementRequest(models.Model):
 # KEEP EXISTING TRANSFER MODEL FOR FRONTEND
 # ===========================================
 class Transfer(models.Model):
-    """Keep existing transfer model so current frontend does not break"""
-
     class Status(models.TextChoices):
         PENDING = 'pending', _('ממתין')
         APPROVED = 'approved', _('אושר')
@@ -660,21 +665,20 @@ class Transfer(models.Model):
 
     student = models.ForeignKey(
         Student,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='transfers'
     )
     from_room = models.ForeignKey(
         Room,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='transfers_from'
     )
     to_room = models.ForeignKey(
         Room,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='transfers_to'
     )
     reason = models.TextField(blank=True)
-    movement_type = models.CharField(max_length=30, blank=True)
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
@@ -683,7 +687,7 @@ class Transfer(models.Model):
 
     requested_by = models.ForeignKey(
         User,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='requested_transfers'
     )
     reviewed_by = models.ForeignKey(
@@ -696,7 +700,6 @@ class Transfer(models.Model):
     reviewed_at = models.DateTimeField(null=True, blank=True)
     rejection_reason = models.TextField(blank=True)
 
-    # optional normalized link
     movement_request = models.OneToOneField(
         MovementRequest,
         on_delete=models.SET_NULL,
@@ -716,7 +719,29 @@ class Transfer(models.Model):
     def __str__(self):
         return f"העברה: {self.student} - {self.get_status_display()}"
 
+    def clean(self):
+        if self.from_room_id and self.to_room_id and self.from_room_id == self.to_room_id:
+            raise ValidationError('Source room and target room cannot be the same.')
 
+        if self.status == self.Status.PENDING:
+            if self.reviewed_by is not None or self.reviewed_at is not None:
+                raise ValidationError('Pending transfer cannot have review data.')
+            if self.rejection_reason:
+                raise ValidationError('Pending transfer cannot have rejection_reason.')
+
+        if self.status == self.Status.APPROVED:
+            if self.reviewed_by is None or self.reviewed_at is None:
+                raise ValidationError('Approved transfer must have reviewed_by and reviewed_at.')
+            if self.rejection_reason:
+                raise ValidationError('Approved transfer cannot have rejection_reason.')
+
+        if self.status == self.Status.REJECTED:
+            if self.reviewed_by is None or self.reviewed_at is None:
+                raise ValidationError('Rejected transfer must have reviewed_by and reviewed_at.')
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 # ===========================================
 # ALLOCATION / IMPORT / INBOX
 # ===========================================
@@ -728,12 +753,14 @@ class AllocationRun(models.Model):
 
     region = models.ForeignKey(
         Region,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='allocation_runs'
     )
     run_by = models.ForeignKey(
         User,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name='allocation_runs'
     )
     status = models.CharField(
@@ -760,6 +787,29 @@ class AllocationRun(models.Model):
     def __str__(self):
         return f"שיבוץ {self.region} - {self.started_at.strftime('%Y-%m-%d %H:%M')}"
 
+    def clean(self):
+        if self.status == self.Status.RUNNING:
+            if self.completed_at is not None:
+                raise ValidationError('Running allocation cannot have completed_at.')
+            if self.error_message:
+                raise ValidationError('Running allocation cannot have error_message.')
+
+        if self.status == self.Status.COMPLETED:
+            if self.completed_at is None:
+                raise ValidationError('Completed allocation must have completed_at.')
+            if self.error_message:
+                raise ValidationError('Completed allocation should not have error_message.')
+
+        if self.status == self.Status.FAILED:
+            if self.completed_at is None:
+                raise ValidationError('Failed allocation must have completed_at.')
+            if not self.error_message:
+                raise ValidationError('Failed allocation should include error_message.')
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
 
 class ImportBatch(models.Model):
     class Status(models.TextChoices):
@@ -769,7 +819,7 @@ class ImportBatch(models.Model):
 
     uploaded_by = models.ForeignKey(
         User,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='import_batches'
     )
     filename = models.CharField(max_length=255)
@@ -790,6 +840,20 @@ class ImportBatch(models.Model):
     def __str__(self):
         return f"Batch {self.id} - {self.filename} ({self.created_at.strftime('%Y-%m-%d %H:%M')})"
 
+    def clean(self):
+        if self.status == self.Status.PROCESSING and self.error_message:
+            raise ValidationError('Processing batch cannot have error_message.')
+
+        if self.status == self.Status.COMPLETED and self.error_message:
+            raise ValidationError('Completed batch should not have error_message.')
+
+        if self.status == self.Status.FAILED and not self.error_message:
+            raise ValidationError('Failed batch should include error_message.')
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
 
 class RegionInbox(models.Model):
     class Status(models.TextChoices):
@@ -800,12 +864,12 @@ class RegionInbox(models.Model):
 
     region = models.ForeignKey(
         Region,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='inbox_items'
     )
     batch = models.ForeignKey(
         ImportBatch,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name='region_inboxes'
     )
     students_count = models.PositiveIntegerField(default=0)
@@ -826,3 +890,20 @@ class RegionInbox(models.Model):
 
     def __str__(self):
         return f"Inbox: {self.region.name} - {self.students_count} students (Batch {self.batch_id})"
+
+    def clean(self):
+        if self.status == self.Status.PENDING:
+            if self.viewed_at is not None or self.processed_at is not None:
+                raise ValidationError('Pending inbox item cannot have viewed_at or processed_at.')
+
+        if self.status == self.Status.VIEWED:
+            if self.viewed_at is None:
+                raise ValidationError('Viewed inbox item must have viewed_at.')
+
+        if self.status == self.Status.PROCESSED:
+            if self.processed_at is None:
+                raise ValidationError('Processed inbox item must have processed_at.')
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
