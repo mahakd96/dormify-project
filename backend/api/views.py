@@ -417,7 +417,6 @@ class TransferViewSet(viewsets.ModelViewSet):
         transfer = serializer.save(
             requested_by=self.request.user,
             from_room=from_room,
-            movement_type=movement_type
         )
 
         current_assignment = student.current_assignment
@@ -474,7 +473,8 @@ class TransferViewSet(viewsets.ModelViewSet):
                 student = transfer.student
                 assignment_type = (
                     BedAssignment.AssignmentType.PHASE2
-                    if transfer.movement_type == MovementRequest.MovementType.PHASE2
+                    if transfer.movement_request
+                       and transfer.movement_request.movement_type == MovementRequest.MovementType.PHASE2
                     else BedAssignment.AssignmentType.TRANSFER
                 )
                 new_assignment = assign_student_to_room(
@@ -559,16 +559,20 @@ def run_allocation(request):
             'error': 'רק מנהל יכול להריץ שיבוץ'
         }, status=status.HTTP_403_FORBIDDEN)
 
-    region_name = request.data.get('region_name')
-    if not region_name:
+    region_id = request.data.get('region_id')
+    if not region_id:
         if request.user.is_central_admin:
             return Response({
                 'error': 'נדרש לבחור אזור'
             }, status=status.HTTP_400_BAD_REQUEST)
-        region_name = request.user.region.name
+        if not request.user.region_id:
+            return Response({
+                'error': 'המשתמש לא משויך לאזור'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        region_id = request.user.region_id
 
     try:
-        region = Region.objects.get(pk=region_name)
+        region = Region.objects.get(pk=region_id)
     except Region.DoesNotExist:
         return Response({
             'error': 'אזור לא נמצא'
@@ -589,6 +593,7 @@ def run_allocation(request):
         allocation_run.roommate_matches = result.get('roommate_matches', 0)
         allocation_run.conflicts = result.get('conflicts', 0)
         allocation_run.completed_at = timezone.now()
+        allocation_run.error_message = ''
         allocation_run.save()
 
         return Response({
@@ -926,10 +931,14 @@ def upload_excel(request):
                 continue
 
         for region_id in region_counts.keys():
-            RegionInbox.objects.filter(
+            pending_items = RegionInbox.objects.filter(
                 region_id=region_id,
                 status=RegionInbox.Status.PENDING
-            ).update(status=RegionInbox.Status.SUPERSEDED)
+            )
+
+            for inbox_item in pending_items:
+                inbox_item.status = RegionInbox.Status.SUPERSEDED
+                inbox_item.save()
 
         region_breakdown = []
         for region_id, data in region_counts.items():
