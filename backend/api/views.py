@@ -1,17 +1,16 @@
-"""
-DORMIFY - API Views
-Safe merged version
-"""
+from decimal import Decimal, InvalidOperation
+import re
+import pandas as pd
 
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
+
 from django.utils import timezone
 from django.db import transaction
 from django.db.models import Q
-import pandas as pd
 from django.core.exceptions import ValidationError
 
 from .models import (
@@ -27,9 +26,6 @@ from .serializers import (
 )
 
 
-# ===========================================
-# AUTHENTICATION VIEWS
-# ===========================================
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def login_view(request):
@@ -112,9 +108,6 @@ def change_password_view(request):
     })
 
 
-# ===========================================
-# PERMISSION HELPERS
-# ===========================================
 class IsCentralAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
         return request.user.is_authenticated and request.user.is_central_admin
@@ -134,10 +127,6 @@ def filter_by_region(queryset, user, region_field='region'):
 
 
 def ensure_room_beds(room: Room):
-    """
-    If room has no Bed records yet, create beds automatically based on capacity.
-    This keeps old room-based frontend working while enabling new bed-level model.
-    """
     existing = room.beds.count()
     if existing >= room.capacity:
         return
@@ -153,11 +142,14 @@ def get_free_bed(room: Room):
         return None
     if not room.apartment.building.is_active:
         return None
+
     ensure_room_beds(room)
+
     occupied_bed_ids = BedAssignment.objects.filter(
         bed__room=room,
         status=BedAssignment.Status.ACTIVE
     ).values_list('bed_id', flat=True)
+
     return room.beds.exclude(id__in=occupied_bed_ids).order_by('id').first()
 
 
@@ -169,6 +161,7 @@ def end_active_bed_assignments(student: Student):
         status=BedAssignment.Status.ENDED,
         ended_at=timezone.now()
     )
+
 
 def validate_apartment_assignment(student: Student, room: Room):
     apartment = room.apartment
@@ -182,16 +175,13 @@ def validate_apartment_assignment(student: Student, room: Room):
     if apartment.category == Apartment.Category.FEMALE and student.gender != Student.Gender.FEMALE:
         raise ValueError('This apartment is for female students only.')
 
+
 def assign_student_to_room(
     student: Student,
     room: Room,
     assigned_by: User,
     assignment_type=BedAssignment.AssignmentType.MANUAL
 ):
-    """
-    Creates a new active bed assignment
-    and keeps Student.assigned_room synced.
-    """
     validate_apartment_assignment(student, room)
     free_bed = get_free_bed(room)
     if not free_bed:
@@ -214,6 +204,7 @@ def assign_student_to_room(
         student.save(update_fields=['assigned_room', 'updated_at'])
 
     return assignment
+
 
 def infer_movement_type(from_room: Room, to_room: Room):
     if not from_room or not to_room:
@@ -249,27 +240,20 @@ def infer_movement_type(from_room: Room, to_room: Room):
 
     return MovementRequest.MovementType.INTERNAL
 
+
 def user_can_approve_transfer(user: User, transfer: Transfer):
-    """
-    Central admin: can approve everything
-    Region boss: only same-region internal moves
-    """
     if user.is_central_admin:
         return True
 
     if not user.is_boss or not user.region:
         return False
 
-    same_from_region = (transfer.from_room.apartment.building.dorm_type.region == user.region )
-    same_to_region = (transfer.to_room.apartment.building.dorm_type.region == user.region)
+    same_from_region = transfer.from_room.apartment.building.dorm_type.region == user.region
+    same_to_region = transfer.to_room.apartment.building.dorm_type.region == user.region
 
-    # regional boss only internal/same-region approval
     return same_from_region and same_to_region
 
 
-# ===========================================
-# REGION VIEWS
-# ===========================================
 class RegionViewSet(viewsets.ModelViewSet):
     serializer_class = RegionSerializer
     permission_classes = [IsAuthenticated]
@@ -280,9 +264,7 @@ class RegionViewSet(viewsets.ModelViewSet):
             return queryset
         return queryset.filter(pk=self.request.user.region_id)
 
-# ===========================================
-# BUILDING VIEWS
-# ===========================================
+
 class BuildingViewSet(viewsets.ModelViewSet):
     serializer_class = BuildingSerializer
     permission_classes = [IsAuthenticated]
@@ -301,6 +283,7 @@ class BuildingViewSet(viewsets.ModelViewSet):
     def apartments(self, request, pk=None):
         building = self.get_object()
         apartments = building.apartments.filter(is_active=True)
+
         category = request.query_params.get('category')
         if category:
             apartments = apartments.filter(category=category)
@@ -308,6 +291,7 @@ class BuildingViewSet(viewsets.ModelViewSet):
         apartment_type = request.query_params.get('apartment_type')
         if apartment_type:
             apartments = apartments.filter(apartment_type=apartment_type)
+
         serializer = ApartmentSerializer(apartments, many=True)
         return Response({'apartments': serializer.data})
 
@@ -327,15 +311,13 @@ class BuildingViewSet(viewsets.ModelViewSet):
         return Response({'rooms': serializer.data})
 
 
-# ===========================================
-# STUDENT VIEWS
-# ===========================================
 class StudentViewSet(viewsets.ModelViewSet):
     serializer_class = StudentSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         queryset = Student.objects.all()
+
         if not self.request.user.is_central_admin:
             if not self.request.user.region:
                 return queryset.none()
@@ -348,7 +330,7 @@ class StudentViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(
                 Q(first_name__icontains=search) |
                 Q(last_name__icontains=search) |
-                Q(student_id__icontains=search)|
+                Q(student_id__icontains=search) |
                 Q(business_partner_id__icontains=search)
             )
 
@@ -380,9 +362,6 @@ class StudentViewSet(viewsets.ModelViewSet):
         serializer.save()
 
 
-# ===========================================
-# TRANSFER VIEWS
-# ===========================================
 class TransferViewSet(viewsets.ModelViewSet):
     serializer_class = TransferSerializer
     permission_classes = [IsAuthenticated]
@@ -411,12 +390,14 @@ class TransferViewSet(viewsets.ModelViewSet):
 
         if not from_room:
             raise permissions.ValidationError('הסטודנט אינו משויך כרגע לחדר מקור')
+
         validate_apartment_assignment(student, to_room)
         movement_type = infer_movement_type(from_room, to_room)
 
         transfer = serializer.save(
             requested_by=self.request.user,
             from_room=from_room,
+            movement_type=movement_type
         )
 
         current_assignment = student.current_assignment
@@ -473,10 +454,10 @@ class TransferViewSet(viewsets.ModelViewSet):
                 student = transfer.student
                 assignment_type = (
                     BedAssignment.AssignmentType.PHASE2
-                    if transfer.movement_request
-                       and transfer.movement_request.movement_type == MovementRequest.MovementType.PHASE2
+                    if transfer.movement_type == MovementRequest.MovementType.PHASE2
                     else BedAssignment.AssignmentType.TRANSFER
                 )
+
                 new_assignment = assign_student_to_room(
                     student=student,
                     room=transfer.to_room,
@@ -498,13 +479,9 @@ class TransferViewSet(viewsets.ModelViewSet):
                 'transfer': TransferSerializer(transfer).data
             })
 
-
         except (ValueError, ValidationError) as e:
-
             return Response({
-
                 'error': str(e)
-
             }, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['put'])
@@ -535,12 +512,12 @@ class TransferViewSet(viewsets.ModelViewSet):
         transfer.save()
 
         if transfer.movement_request:
-                transfer.movement_request.status = MovementRequest.Status.REJECTED
-                transfer.movement_request.approved_by = request.user
-                transfer.movement_request.reviewed_at = timezone.now()
-                transfer.movement_request.completed_at = None
-                transfer.movement_request.full_clean()
-                transfer.movement_request.save()
+            transfer.movement_request.status = MovementRequest.Status.REJECTED
+            transfer.movement_request.approved_by = request.user
+            transfer.movement_request.reviewed_at = timezone.now()
+            transfer.movement_request.completed_at = None
+            transfer.movement_request.full_clean()
+            transfer.movement_request.save()
 
         return Response({
             'message': 'הבקשה נדחתה',
@@ -548,9 +525,6 @@ class TransferViewSet(viewsets.ModelViewSet):
         })
 
 
-# ===========================================
-# ALLOCATION VIEWS
-# ===========================================
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def run_allocation(request):
@@ -559,15 +533,16 @@ def run_allocation(request):
             'error': 'רק מנהל יכול להריץ שיבוץ'
         }, status=status.HTTP_403_FORBIDDEN)
 
-    region_id = request.data.get('region_id')
+    region_id = request.data.get('region_id') or request.data.get('region_name')
+
     if not region_id:
         if request.user.is_central_admin:
             return Response({
                 'error': 'נדרש לבחור אזור'
             }, status=status.HTTP_400_BAD_REQUEST)
-        if not request.user.region_id:
+        if not request.user.region:
             return Response({
-                'error': 'המשתמש לא משויך לאזור'
+                'error': 'המשתמש אינו משויך לאזור'
             }, status=status.HTTP_400_BAD_REQUEST)
         region_id = request.user.region_id
 
@@ -593,7 +568,6 @@ def run_allocation(request):
         allocation_run.roommate_matches = result.get('roommate_matches', 0)
         allocation_run.conflicts = result.get('conflicts', 0)
         allocation_run.completed_at = timezone.now()
-        allocation_run.error_message = ''
         allocation_run.save()
 
         return Response({
@@ -624,9 +598,6 @@ def allocation_history(request):
     return Response({'runs': serializer.data})
 
 
-# ===========================================
-# STATISTICS VIEW
-# ===========================================
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def statistics(request):
@@ -663,107 +634,24 @@ def statistics(request):
     })
 
 
-# ===========================================
-# EXCEL UPLOAD HELPERS
-# ===========================================
-REGION_MAPPING = {
-    'מעונות קנדה': 'canada',
-    'מעונות ההסמכה': 'hasmaha',
-    'מעונות מזרח': 'mizrah',
-    'מעונות מזרח חדש': 'mizrach-hadash',
-    'מעונות מזרח ישן': 'mizrach-yashan',
-    'מעונות טאוב': 'taub',
-    'מעונות שרמן': 'sherman',
-    'מעונות איינשטיין': 'einstein',
-    'מעונות ריפקין': 'rifkin',
-    'מעונות סנאט': 'senate',
-    'מעונות ברושים': 'broshim',
-    'מעונות נווה אמריקה': 'neve-america',
-    'מעונות סגל זוטר': 'segal-zutar',
-    'מעונות כפר השמכה': 'kfar-hasmaha',
+EXCEL_DORM_TYPE_TO_REGION = {
+    'קנדה': 'canada',
+    'ברושים': 'broshim',
+    'מגדל המזרח': 'mizrah',
+    'הטכניון': 'technion',
+}
+
+ALLOWED_DECISION_STATUSES = {
+    'החלטה חיובית',
 }
 
 
-def get_or_create_region(region_name_hebrew):
-    region_id = REGION_MAPPING.get(region_name_hebrew)
-
-    if not region_id:
-        region = Region.objects.filter(name=region_name_hebrew).first()
-        if region:
-            return region
-        region_id = region_name_hebrew.replace(' ', '-').replace('מעונות ', '')
-
-    region, _ = Region.objects.get_or_create(
-        id=region_id,
-        defaults={
-            'name': region_name_hebrew,
-        }
-    )
-    return region
-def parse_requested_religion(value):
-    if not value or pd.isna(value):
-        return Student.Religion.NOT_SPECIFIED
-
-    value = str(value).strip()
-
-    if 'מוסל' in value:
-        return Student.Religion.Muslim
-    elif 'יהוד' in value:
-        return Student.Religion.Jewish
-    elif 'נוצר' in value:
-        return Student.Religion.Christian
-    elif 'דרוז' in value:
-        return Student.Religion.Druze
-
-    return Student.Religion.NOT_SPECIFIED
-
-
-def parse_religious(value):
-    if not value or pd.isna(value):
-        return Student.Religious.NOT_SPECIFIED
-
-    value = str(value).strip()
-
-    if 'דתי' in value:
-        return Student.Religious.RELIGIOUS
-    elif 'לא משנה' in value:
-        return Student.Religious.NO_PREFERENCE
-    elif 'לא צוין' in value:
-        return Student.Religious.NOT_SPECIFIED
-
-    return Student.Religious.NOT_SPECIFIED
-
-def parse_gender(value):
-    if not value or pd.isna(value):
-        return Student.Gender.MALE
-    value = str(value).strip()
-    if 'נקבה' in value:
-        return Student.Gender.FEMALE
-    return Student.Gender.MALE
-
-
-def parse_nationality(value):
-    if not value or pd.isna(value):
-        return Student.Nationality.ISRAELI
-    value = str(value).strip()
-    if 'בינלאומי' in value:
-        return Student.Nationality.INTERNATIONAL
-    return Student.Nationality.ISRAELI
-
-
-def parse_category(value):
-    if not value or pd.isna(value):
-        return Student.StudentCategory.NEW
-    value = str(value).strip()
-    if 'חדשים' in value:
-        return Student.StudentCategory.NEW
-    elif 'ממשיכים' in value:
-        return Student.StudentCategory.CONTINUING
-    elif 'מעברים' in value:
-        return Student.StudentCategory.TRANSFER
-    elif 'עזיבה' in value:
-        return Student.StudentCategory.LEAVING
-    return Student.StudentCategory.NEW
+def slugify_hebrew(value: str) -> str:
+    value = safe_str(value)
+    value = value.replace('״', '').replace('"', '').replace("'", "")
+    value = value.replace('/', '-').replace('\\', '-')
+    value = re.sub(r'\s+', '-', value.strip())
+    return value.lower()
 
 
 def safe_str(value):
@@ -773,7 +661,7 @@ def safe_str(value):
 
 
 def safe_int(value, default=0):
-    if value is None or pd.isna(value):
+    if value is None or pd.isna(value) or value == '':
         return default
     try:
         return int(float(value))
@@ -781,9 +669,205 @@ def safe_int(value, default=0):
         return default
 
 
-# ===========================================
-# EXCEL UPLOAD AND SPLIT FUNCTIONALITY
-# ===========================================
+def safe_decimal(value, default=None):
+    if value is None or pd.isna(value) or value == '':
+        return default
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return default
+
+
+def parse_yes_no_code(value):
+    value = safe_str(value).lower()
+
+    yes_values = {'1', 'כן', 'yes', 'true', '136'}
+    no_values = {'0', 'לא', 'no', 'false', '135', ''}
+
+    if value in yes_values:
+        return True
+    if value in no_values:
+        return False
+    return False
+
+
+def parse_requested_religion(value):
+    value = safe_str(value)
+
+    if not value:
+        return Student.Religion.NOT_SPECIFIED
+
+    if 'מוסל' in value or 'muslim' in value.lower():
+        return Student.Religion.Muslim
+    if 'יהוד' in value or 'jew' in value.lower():
+        return Student.Religion.Jewish
+    if 'נוצר' in value or 'christ' in value.lower():
+        return Student.Religion.Christian
+    if 'דרוז' in value or 'druze' in value.lower():
+        return Student.Religion.Druze
+
+    return Student.Religion.NOT_SPECIFIED
+
+
+def parse_religious(value):
+    value = safe_str(value)
+
+    if not value:
+        return Student.Religious.NOT_SPECIFIED
+
+    if value in ['כן', 'דתי', 'religious']:
+        return Student.Religious.RELIGIOUS
+    if value in ['לא', 'לא משנה', 'no_preference']:
+        return Student.Religious.NO_PREFERENCE
+    return Student.Religious.NOT_SPECIFIED
+
+
+def parse_gender_from_housing_type(housing_type, existing_student=None):
+    housing_type = safe_str(housing_type)
+
+    if 'רווקות' in housing_type:
+        return Student.Gender.FEMALE
+    if 'רווקים' in housing_type:
+        return Student.Gender.MALE
+
+    if existing_student and existing_student.gender:
+        return existing_student.gender
+
+    return Student.Gender.MALE
+
+
+def parse_category(value):
+    value = safe_str(value)
+
+    if not value:
+        return Student.StudentCategory.NEW
+
+    if 'חדש' in value:
+        return Student.StudentCategory.NEW
+    if 'ממשיכ' in value or 'ותיק' in value:
+        return Student.StudentCategory.CONTINUING
+    if 'מעבר' in value:
+        return Student.StudentCategory.TRANSFER
+    if 'עזיב' in value:
+        return Student.StudentCategory.LEAVING
+
+    return Student.StudentCategory.NEW
+
+
+def extract_roommate_flag(value):
+    return parse_yes_no_code(value)
+
+
+def normalize_phone(value):
+    value = safe_str(value)
+    return value.replace('.0', '') if value else ''
+
+
+def get_or_create_region_by_id(region_id, region_name=None):
+    region_id = safe_str(region_id)
+    region_name = safe_str(region_name) or region_id
+
+    region, _ = Region.objects.get_or_create(
+        id=region_id,
+        defaults={'name': region_name}
+    )
+    return region
+
+
+def get_or_create_dorm_type_from_excel(dorm_code, dorm_name):
+    dorm_name = safe_str(dorm_name)
+    dorm_code_int = safe_int(dorm_code, default=None)
+
+    if not dorm_name and dorm_code_int is None:
+        return None
+
+    dorm_type = None
+
+    if dorm_code_int is not None:
+        dorm_type = DormType.objects.filter(code=dorm_code_int).select_related('region').first()
+
+    if not dorm_type and dorm_name:
+        dorm_type = DormType.objects.filter(name=dorm_name).select_related('region').first()
+
+    if dorm_type:
+        return dorm_type
+
+    region_id = EXCEL_DORM_TYPE_TO_REGION.get(dorm_name)
+    if region_id:
+        region = get_or_create_region_by_id(region_id, dorm_name)
+    else:
+        generated_region_id = slugify_hebrew(dorm_name) or f"dorm-{dorm_code_int or 'unknown'}"
+        region = get_or_create_region_by_id(generated_region_id, dorm_name)
+
+    if dorm_code_int is None:
+        existing_max = DormType.objects.order_by('-code').values_list('code', flat=True).first()
+        dorm_code_int = (existing_max or 0) + 1
+
+    dorm_type, _ = DormType.objects.get_or_create(
+        code=dorm_code_int,
+        defaults={
+            'name': dorm_name or f'Dorm {dorm_code_int}',
+            'region': region,
+        }
+    )
+
+    updated = False
+    if dorm_name and dorm_type.name != dorm_name:
+        dorm_type.name = dorm_name
+        updated = True
+    if dorm_type.region_id != region.id:
+        dorm_type.region = region
+        updated = True
+    if updated:
+        dorm_type.save(update_fields=['name', 'region'])
+
+    return dorm_type
+
+
+def build_student_payload_from_row(row, existing_student=None):
+    housing_type = safe_str(row.get('החלטה-תאור סוג מגורים'))
+    accepted_dorm_type = get_or_create_dorm_type_from_excel(
+        row.get('החלטה-בחירת סוג מעון1'),
+        row.get('החלטה-תאור קוד חברה1')
+    )
+
+    return {
+        'student_id': safe_str(row.get('ת"ז ישראלית')),
+        'first_name': safe_str(row.get('שם פרטי')),
+        'last_name': safe_str(row.get('שם משפחה')),
+        'phone': normalize_phone(row.get('טלפון 1')),
+        'phone_secondary': normalize_phone(row.get('טלפון חירום')),
+        'email': safe_str(row.get('אימייל 1')),
+        'city': safe_str(row.get('שם ישוב')),
+        'gender': parse_gender_from_housing_type(housing_type, existing_student=existing_student),
+        'requested_religion': parse_requested_religion(row.get('החלטה-תאור קוד לאום מבוקש')),
+        'religious': parse_religious(row.get('החלטה אחרונה - דתי לצורך שיבוץ תיאור')),
+        'category': parse_category(row.get('החלטה-תאור קבוצת הקצאה')),
+        'housing_type': housing_type,
+        'allocation_group': safe_str(row.get('החלטה-קבוצת הקצאה')),
+        'accepted_dorm_type': accepted_dorm_type,
+        'roommate_request_1': safe_str(row.get('החלטה אחרונה: שם חבר 1')),
+        'roommate_request_2': safe_str(row.get('החלטה אחרונה: שם חבר 2')),
+        'roommate_request_3': safe_str(row.get('החלטה אחרונה: שם חבר 3')),
+        'roommate_request_4': safe_str(row.get('החלטה אחרונה: שם חבר 4')),
+        'roommate_request_5': safe_str(row.get('החלטה אחרונה: שם חבר 5')),
+        'roommate_request_flag_1': extract_roommate_flag(row.get('בקשה לגור עם סטודנטים חבר1')),
+        'roommate_request_flag_2': extract_roommate_flag(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר2')),
+        'roommate_request_flag_3': extract_roommate_flag(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר3')),
+        'roommate_request_flag_4': extract_roommate_flag(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר4')),
+        'roommate_request_flag_5': extract_roommate_flag(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר5')),
+        'special_status_1': safe_str(row.get('תאור סטטוס מיוחד1')),
+        'special_status_2': safe_str(row.get('תאור סטטוס מיוחד2')),
+        'special_status_3': safe_str(row.get('תאור סטטוס מיוחד3')),
+        'special_status_4': safe_str(row.get('תאור סטטוס מיוחד4')),
+        'study_points': safe_decimal(row.get('נ.אקדמי מצטבר'), default=None),
+        'current_address': safe_str(row.get('כ.נוכחית-כתובת במעונות-תיאור')),
+        'current_dorm_type': safe_str(row.get('החלטה-תאור קוד חברה1')),
+        'is_priority': parse_yes_no_code(row.get('החלטה-זקוק להנגשה')),
+        'priority_reason': 'נגישות' if parse_yes_no_code(row.get('החלטה-זקוק להנגשה')) else '',
+    }
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def upload_excel(request):
@@ -815,130 +899,82 @@ def upload_excel(request):
 
     try:
         excel_file = pd.ExcelFile(uploaded_file)
-        all_students = []
+        created_count = 0
+        updated_count = 0
+        skipped_count = 0
+        errors = []
+        region_counts = {}
 
         for sheet_name in excel_file.sheet_names:
             df = pd.read_excel(excel_file, sheet_name=sheet_name)
 
-            if 'ת"ז ישראלית' not in df.columns:
+            required_columns = ['ת"ז ישראלית', 'שם פרטי', 'שם משפחה']
+            missing_required = [col for col in required_columns if col not in df.columns]
+            if missing_required:
+                errors.append(
+                    f"Sheet '{sheet_name}' missing required columns: {', '.join(missing_required)}"
+                )
                 continue
 
-            for _, row in df.iterrows():
-                student_id = safe_str(row.get('ת"ז ישראלית'))
-                if not student_id:
+            for idx, row in df.iterrows():
+                try:
+                    student_id = safe_str(row.get('ת"ז ישראלית'))
+                    if not student_id:
+                        skipped_count += 1
+                        continue
+
+                    decision_status = safe_str(row.get('החלטה-החלטת מעונות - תאור'))
+                    if decision_status and decision_status not in ALLOWED_DECISION_STATUSES:
+                        skipped_count += 1
+                        continue
+
+                    existing = Student.objects.filter(student_id=student_id).select_related(
+                        'accepted_dorm_type',
+                        'accepted_dorm_type__region'
+                    ).first()
+
+                    student_payload = build_student_payload_from_row(row, existing_student=existing)
+                    accepted_dorm_type = student_payload.get('accepted_dorm_type')
+
+                    if accepted_dorm_type is None:
+                        skipped_count += 1
+                        errors.append(
+                            f"Student {student_id}: could not resolve accepted dorm type from columns "
+                            f"'החלטה-בחירת סוג מעון1' / 'החלטה-תאור קוד חברה1'"
+                        )
+                        continue
+
+                    target_region = accepted_dorm_type.region
+
+                    if existing:
+                        for key, value in student_payload.items():
+                            setattr(existing, key, value)
+                        existing.batch = batch
+                        existing.save()
+                        updated_count += 1
+                    else:
+                        Student.objects.create(
+                            batch=batch,
+                            **student_payload
+                        )
+                        created_count += 1
+
+                    if target_region.id not in region_counts:
+                        region_counts[target_region.id] = {
+                            'region': target_region,
+                            'count': 0
+                        }
+                    region_counts[target_region.id]['count'] += 1
+
+                except Exception as e:
+                    errors.append(f"Sheet '{sheet_name}', row {idx + 2}: {str(e)}")
                     continue
-
-                region_name = safe_str(row.get('אזור החלטה לאביב'))
-                if not region_name:
-                    continue
-
-                decision_status = safe_str(row.get('החלטת מעונות - אביב'))
-                if decision_status == 'מבוטל':
-                    continue
-
-                student_data = {
-                    'student_id': student_id,
-                    'business_partner_id': safe_str(row.get('שותף עסקי')),
-                    'first_name': safe_str(row.get('שם פרטי')),
-                    'last_name': safe_str(row.get('שם משפחה')),
-                    'email': safe_str(row.get('אימייל 1')),
-                    'email_secondary': safe_str(row.get('אימייל 2')),
-                    'phone': safe_str(row.get('טלפון 1')),
-                    'phone_secondary': safe_str(row.get('טלפון 2')),
-                    'city': safe_str(row.get('שם ישוב')),
-
-                    'gender': parse_gender(row.get('תיאור מגדר')),
-
-                    # דת אמיתית של הסטודנט - רק אם יש לך עמודה מתאימה באמת
-                    # אם אין עמודה כזאת, עדיף לא להכניס בכלל ולתת לברירת המחדל לעבוד
-                    'requested_religion': parse_requested_religion(row.get('שם העמודה המתאימה')),
-                    # דתי לצורך שיבוץ
-                    'religious': parse_religious(row.get('החלטה אחרונה - דתי לצורך שיבוץ תיאור')),
-
-                    'category': parse_category(row.get('תיאור קבוצת הקצאה')),
-                    'housing_type': safe_str(row.get('תיאור סוג מגורים')),
-                    'allocation_group': safe_str(row.get('קבוצת הקצאה')),
-
-                    'current_address': safe_str(row.get('כתובת במעונות נוכחית')),
-                    'current_dorm_type': safe_str(row.get('אזור מגורים נוכחי')),
-
-                    'roommate_request_1': safe_str(row.get('החלטה אחרונה: שם חבר 1')),
-                    'roommate_request_2': safe_str(row.get('החלטה אחרונה: שם חבר 2')),
-                    'roommate_request_3': safe_str(row.get('החלטה אחרונה: שם חבר 3')),
-                    'roommate_request_4': safe_str(row.get('החלטה אחרונה: שם חבר 4')),
-                    'roommate_request_5': safe_str(row.get('החלטה אחרונה: שם חבר 5')),
-
-                    'roommate_request_flag_1': safe_str(row.get('בקשה לגור עם סטודנטים חבר1')) == 'כן',
-                    'roommate_request_flag_2': safe_str(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר2')) == 'כן',
-                    'roommate_request_flag_3': safe_str(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר3')) == 'כן',
-                    'roommate_request_flag_4': safe_str(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר4')) == 'כן',
-                    'roommate_request_flag_5': safe_str(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר5')) == 'כן',
-
-                    'special_status_1': safe_str(row.get('תאור סטטוס מיוחד1')),
-                    'special_status_2': safe_str(row.get('תאור סטטוס מיוחד2')),
-                    'special_status_3': safe_str(row.get('תאור סטטוס מיוחד3')),
-                    'special_status_4': safe_str(row.get('תאור סטטוס מיוחד4')),
-
-                    # אם זה השדה שאת רוצה לשמור כנקודות לימוד
-                    'study_points': safe_int(row.get('נ.אקדמי מצטבר'), default=None),
-
-                    'sheet_name': sheet_name,
-                }
-                all_students.append(student_data)
-
-        region_counts = {}
-        created_count = 0
-        updated_count = 0
-        errors = []
-
-        for student_data in all_students:
-            try:
-                student_data.pop('sheet_name', None)
-
-                region = get_or_create_region(region_name)
-
-                if region.id not in region_counts:
-                    region_counts[region.id] = {'region': region, 'count': 0}
-                region_counts[region.id]['count'] += 1
-
-                existing = Student.objects.filter(student_id=student_data['student_id']).first()
-
-                if existing:
-                    for key, value in student_data.items():
-                        setattr(existing, key, value)
-                    existing.region = region
-                    existing.batch = batch
-                    existing.is_active = True
-                    existing.is_priority = student_data['disability_percentage'] > 0 or student_data['medical_approval']
-                    existing.priority_reason = (
-                        'נכות' if student_data['disability_percentage'] > 0
-                        else ('סיבה רפואית' if student_data['medical_approval'] else '')
-                    )
-                    existing.save()
-                    updated_count += 1
-                else:
-                    Student.objects.create(
-                        region=region,
-                        batch=batch,
-                        is_priority=student_data['disability_percentage'] > 0 or student_data['medical_approval'],
-                        priority_reason='נכות' if student_data['disability_percentage'] > 0 else ('סיבה רפואית' if student_data['medical_approval'] else ''),
-                        **student_data
-                    )
-                    created_count += 1
-
-            except Exception as e:
-                errors.append(f"Error processing student {student_data.get('student_id', 'unknown')}: {str(e)}")
-                continue
 
         for region_id in region_counts.keys():
-            pending_items = RegionInbox.objects.filter(
+            RegionInbox.objects.filter(
                 region_id=region_id,
                 status=RegionInbox.Status.PENDING
-            )
-
-            for inbox_item in pending_items:
-                inbox_item.status = RegionInbox.Status.SUPERSEDED
-                inbox_item.save()
+            ).update(status=RegionInbox.Status.SUPERSEDED)
 
         region_breakdown = []
         for region_id, data in region_counts.items():
@@ -947,8 +983,9 @@ def upload_excel(request):
                 batch=batch,
                 students_count=data['count'],
                 status=RegionInbox.Status.PENDING,
-                message=f'התקבלו {data["count"]} סטודנטים לשיבוץ מלשכת המעונות המרכזית'
+                message=f'התקבלו {data["count"]} סטודנטים חדשים לשיבוץ'
             )
+
             region_breakdown.append({
                 'region_id': region_id,
                 'region_name': data['region'].name,
@@ -957,7 +994,7 @@ def upload_excel(request):
 
         batch.total_students = created_count + updated_count
         batch.status = ImportBatch.Status.COMPLETED
-        batch.save()
+        batch.save(update_fields=['total_students', 'status'])
 
         return Response({
             'success': True,
@@ -967,14 +1004,15 @@ def upload_excel(request):
             'total_students': batch.total_students,
             'created': created_count,
             'updated': updated_count,
+            'skipped': skipped_count,
             'region_breakdown': region_breakdown,
-            'errors': errors[:10] if errors else []
+            'errors': errors[:20]
         })
 
     except Exception as e:
         batch.status = ImportBatch.Status.FAILED
         batch.error_message = str(e)
-        batch.save()
+        batch.save(update_fields=['status', 'error_message'])
 
         return Response({
             'error': f'שגיאה בעיבוד הקובץ: {str(e)}',
@@ -1139,6 +1177,7 @@ def allocation_summary(request):
     students_by_category = {}
     for cat in Student.StudentCategory:
         students_by_category[cat.value] = students.filter(category=cat.value).count()
+
     return Response({
         'total_students': total_students,
         'unassigned_students': unassigned_students,
