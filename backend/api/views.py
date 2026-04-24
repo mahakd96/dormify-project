@@ -758,7 +758,6 @@ def run_allocation(request):
         allocation_run.roommate_matches = roommate_matches
         allocation_run.conflicts = result.get('conflicts', 0)
         allocation_run.completed_at = timezone.now()
-        allocation_run.error_message = ''
         allocation_run.save()
 
         # ============================================================
