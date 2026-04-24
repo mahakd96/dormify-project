@@ -139,9 +139,7 @@ class StaffProfile(models.Model):
         return f"{self.user.email} - {self.get_role_display()}"
 
 
-# ===========================================
-# BUILDING / FLOOR / APARTMENT / ROOM / BED
-# ===========================================
+
 class DormType(models.Model):
     code = models.PositiveIntegerField(null=True, blank=True, unique=True)
     name = models.CharField(max_length=100, unique=True)
@@ -320,9 +318,7 @@ class Bed(models.Model):
         return self.assignments.filter(status=BedAssignment.Status.ACTIVE).exists()
 
 
-# ===========================================
-# STUDENT
-# ===========================================
+
 class Student(models.Model):
     class Gender(models.TextChoices):
         MALE = 'male', _('זכר')
@@ -350,6 +346,12 @@ class Student(models.Model):
         TRANSFER = 'transfer', _('מעברים')
         LEAVING = 'leaving', _('עזיבה')
 
+    class PlacementSector(models.TextChoices):
+        JEWISH = 'jewish', _('יהודי')
+        ARAB = 'arab', _('ערבי')
+        OTHER = 'other', _('אחר')
+        UNKNOWN = 'unknown', _('לא ידוע')
+
     student_id = models.CharField(max_length=20, unique=True)
     first_name = models.CharField(max_length=100)
     last_name = models.CharField(max_length=100)
@@ -361,12 +363,16 @@ class Student(models.Model):
     business_partner_id = models.CharField(max_length=20, blank=True)
     gender = models.CharField(max_length=10, choices=Gender.choices)
     requested_religion = models.CharField(max_length=20, choices=Religion.choices, default=Religion.NOT_SPECIFIED)
+
+    placement_sector = models.CharField(
+        max_length=20,
+        choices=PlacementSector.choices,
+        default=PlacementSector.UNKNOWN,
+    )
+
     category = models.CharField(max_length=20, choices=StudentCategory.choices, default=StudentCategory.NEW)
-    ## סוג המעון שאליו נרשם הסטודנט - רווקים\ זוגות\ משפחות
     housing_type = models.CharField(max_length=100, blank=True)
-    ## סטודנטים חדשים\ עוזבים\ עוברים\ נשארים\ תוכניות מיוחדות ....
     allocation_group = models.CharField(max_length=50, blank=True)
-    # #סוג המעון שאליו הסטודנט התקבל
     accepted_dorm_type = models.ForeignKey(
         DormType,
         on_delete=models.SET_NULL,
@@ -394,13 +400,25 @@ class Student(models.Model):
     roommate_request_3 = models.CharField(max_length=100, blank=True)
     roommate_request_4 = models.CharField(max_length=100, blank=True)
     roommate_request_5 = models.CharField(max_length=100, blank=True)
-    ##האם התקבלה ההחלטה או לא
+
+    roommate_request_student_id_1 = models.CharField(max_length=20, blank=True)
+    roommate_request_student_id_2 = models.CharField(max_length=20, blank=True)
+    roommate_request_student_id_3 = models.CharField(max_length=20, blank=True)
+    roommate_request_student_id_4 = models.CharField(max_length=20, blank=True)
+    roommate_request_student_id_5 = models.CharField(max_length=20, blank=True)
+
     roommate_request_flag_1 = models.BooleanField(default=False)
     roommate_request_flag_2 = models.BooleanField(default=False)
     roommate_request_flag_3 = models.BooleanField(default=False)
     roommate_request_flag_4 = models.BooleanField(default=False)
     roommate_request_flag_5 = models.BooleanField(default=False)
-    ##סטטוס מיוחד
+
+    roommate_request_flag_1 = models.BooleanField(default=False)
+    roommate_request_flag_2 = models.BooleanField(default=False)
+    roommate_request_flag_3 = models.BooleanField(default=False)
+    roommate_request_flag_4 = models.BooleanField(default=False)
+    roommate_request_flag_5 = models.BooleanField(default=False)
+
     special_status_1 = models.CharField(max_length=100, blank=True)
     special_status_2 = models.CharField(max_length=100, blank=True)
     special_status_3 = models.CharField(max_length=100, blank=True)
@@ -418,15 +436,12 @@ class Student(models.Model):
 
     current_address = models.CharField(max_length=255, blank=True)
     current_dorm_type = models.CharField(max_length=100, blank=True)
-    # # מתי הסטודנט נכנס למעונות, מתי הסטודנט עזב המעונות
     move_in_date = models.DateField(null=True, blank=True)
     move_out_date = models.DateField(null=True, blank=True)
 
-    ## מתי הפעם האחרונה שנוסף סטודנט או נעשה שינוי במערכת- זה קשור יותר להיסטוריה
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    ## לאיזה חדר הסטודנט משוייך כרגע
     assigned_room = models.ForeignKey(
         Room,
         on_delete=models.SET_NULL,
@@ -468,9 +483,7 @@ class Student(models.Model):
         assignment = self.current_assignment
         return assignment.bed if assignment else None
 
-# ===========================================
-# BED ASSIGNMENTS / MOVEMENTS
-# ===========================================
+
 class BedAssignment(models.Model):
     class Status(models.TextChoices):
         ACTIVE = 'active', _('פעיל')
@@ -654,9 +667,7 @@ class MovementRequest(models.Model):
             raise ValidationError('Approved or completed request must have target bed.')
 
 
-# ===========================================
-# KEEP EXISTING TRANSFER MODEL FOR FRONTEND
-# ===========================================
+
 class Transfer(models.Model):
     class Status(models.TextChoices):
         PENDING = 'pending', _('ממתין')
@@ -786,7 +797,6 @@ class AllocationRun(models.Model):
 
     def __str__(self):
         return f"שיבוץ {self.region} - {self.started_at.strftime('%Y-%m-%d %H:%M')}"
-
     def clean(self):
         if self.status == self.Status.RUNNING:
             if self.completed_at is not None:
