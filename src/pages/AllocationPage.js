@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { allocationAPI, inboxAPI } from '../services/api';
 import {
@@ -15,14 +16,14 @@ import {
   Calendar,
   Loader,
   XCircle,
+  BarChart3,
 } from 'lucide-react';
 
-function AllocationPage({ language }) {
-  // ✅ AuthContext now provides canRunAllocation() + getUserRegion() normalized
+function AllocationPage({ language = 'he' }) {
+  const navigate = useNavigate();
   const { isCentralAdmin, getUserRegion, canRunAllocation } = useAuth();
 
-  // ✅ Use a stable boolean for effects (avoids re-running effect on every render)
-  const central = isCentralAdmin?.() === true;
+  const central = typeof isCentralAdmin === 'function' ? isCentralAdmin() === true : false;
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -46,140 +47,302 @@ function AllocationPage({ language }) {
     avoidAtudaimWithHasmaha: { enabled: true, strict: false, critical: false, weight: 4 },
   });
 
-  const t = {
-    he: {
-      title: 'שיבוץ סטודנטים',
-      subtitle: 'הפעלת אלגוריתם השיבוץ החכם',
-      runAllocation: 'הפעל שיבוץ',
-      running: 'מריץ שיבוץ...',
-      constraints: 'אילוצי שיבוץ',
-      strict: 'חובה',
-      flexible: 'גמיש',
-      critical: 'קריטי',
-      weight: 'משקל',
-      weightHint: 'כמה חשוב האילוץ באופטימיזציה (0–10)',
-      studentsToAssign: 'סטודנטים לשיבוץ',
-      availableBeds: 'מיטות פנויות',
-      results: 'תוצאות השיבוץ',
-      assigned: 'שובצו בהצלחה',
-      roommateMatches: 'התאמות שותפים',
-      conflicts: 'התנגשויות',
-      viewResults: 'צפה בתוצאות',
-      noStudents: 'אין סטודנטים לשיבוץ',
-      loading: 'טוען נתונים...',
-      error: 'שגיאה בטעינת הנתונים',
-      retry: 'נסה שוב',
-      notification: 'הודעה מלשכת המעונות המרכזית',
-      receivedStudents: 'התקבלו סטודנטים לשיבוץ',
-      batchId: 'מספר קובץ',
-      receivedAt: 'התקבל בתאריך',
-      studentsBreakdown: 'פירוט סטודנטים',
-      newStudents: 'חדשים',
-      continuing: 'ממשיכים',
-      transfers: 'מעברים',
-      leaving: 'עוזבים',
-      priorityStudents: 'סטודנטים בעדיפות',
-      sameGender: 'אותו מגדר בדירה',
-      sameReligion: 'אותה דת בדירה',
-      roommateMatch: 'התאמת שותפים מבוקשים',
-      priorityFirst: 'סטודנטים בעדיפות קודם',
-      roommatePositiveOnly: '100% תשובות חיוביות למבקשים להיות יחד',
-      ReligiousTogether: '100% התאמות חיוביות דירת דתיים/ות',
-      sectorMatching: 'התאמה לפי שייכות',
-      avoidYearMix_1_with_3_4: 'לא לשבץ שנה א׳ עם שנה ג׳/ד׳',
-      avoidAtudaimWithHasmaha: 'לא לשבץ הסמכה עם עתודאים',
-      noRegion: 'לא נמצא אזור למשתמש.',
+  const t = useMemo(
+    () =>
+      ({
+        he: {
+          title: 'שיבוץ סטודנטים',
+          subtitle: 'הפעלת אלגוריתם השיבוץ החכם',
+          runAllocation: 'הפעל שיבוץ',
+          running: 'מריץ שיבוץ...',
+          constraints: 'אילוצי שיבוץ',
+          strict: 'חובה',
+          flexible: 'גמיש',
+          critical: 'קריטי',
+          weight: 'משקל',
+          weightHint: 'כמה חשוב האילוץ באופטימיזציה (0–10)',
+          studentsToAssign: 'סטודנטים לשיבוץ',
+          availableBeds: 'מיטות פנויות',
+          results: 'תוצאות השיבוץ',
+          assigned: 'שובצו בהצלחה',
+          roommateMatches: 'התאמות שותפים',
+          conflicts: 'התנגשויות',
+          viewResults: 'צפה בתוצאות',
+          noStudents: 'אין סטודנטים לשיבוץ',
+          loading: 'טוען נתונים...',
+          error: 'שגיאה בטעינת הנתונים',
+          retry: 'נסה שוב',
+          notification: 'הודעה מלשכת המעונות המרכזית',
+          receivedStudents: 'התקבלו סטודנטים לשיבוץ',
+          batchId: 'מספר קובץ',
+          receivedAt: 'התקבל בתאריך',
+          studentsBreakdown: 'פירוט סטודנטים',
+          newStudents: 'חדשים',
+          continuing: 'ממשיכים',
+          transfers: 'מעברים',
+          leaving: 'עוזבים',
+          priorityStudents: 'סטודנטים בעדיפות',
+          sameGender: 'אותו מגדר בדירה',
+          sameReligion: 'אותה דת בדירה',
+          roommateMatch: 'התאמת שותפים מבוקשים',
+          priorityFirst: 'סטודנטים בעדיפות קודם',
+          roommatePositiveOnly: '100% תשובות חיוביות למבקשים להיות יחד',
+          ReligiousTogether: '100% התאמות חיוביות דירת דתיים/ות',
+          sectorMatching: 'התאמה לפי שייכות',
+          avoidYearMix_1_with_3_4: 'לא לשבץ שנה א׳ עם שנה ג׳/ד׳',
+          avoidAtudaimWithHasmaha: 'לא לשבץ הסמכה עם עתודאים',
+          noRegion: 'לא נמצא אזור למשתמש.',
+          malformedSummary: 'התקבלו נתוני שיבוץ לא תקינים.',
+          noPermission: 'אין הרשאה להריץ שיבוץ בחשבון זה.',
+          pending: 'ממתין לטיפול',
+          viewed: 'נצפה',
+          unknownError: 'שגיאה לא ידועה',
+          noResultsYet: 'עדיין אין תוצאות זמינות. הריצי שיבוץ כדי להפיק תוצאות.',
+          resultsHint: 'כפתור התוצאות יופעל לאחר הרצת שיבוץ מוצלחת.',
+          currentStatus: 'סטטוס נוכחי',
+        },
+        en: {
+          title: 'Student Allocation',
+          subtitle: 'Run the smart allocation algorithm',
+          runAllocation: 'Run Allocation',
+          running: 'Running allocation...',
+          constraints: 'Allocation Constraints',
+          strict: 'Strict',
+          flexible: 'Flexible',
+          critical: 'Critical',
+          weight: 'Weight',
+          weightHint: 'How important in optimization (0–10)',
+          studentsToAssign: 'Students to assign',
+          availableBeds: 'Available beds',
+          results: 'Allocation Results',
+          assigned: 'Successfully assigned',
+          roommateMatches: 'Roommate matches',
+          conflicts: 'Conflicts',
+          viewResults: 'View Results',
+          noStudents: 'No students to assign',
+          loading: 'Loading data...',
+          error: 'Error loading data',
+          retry: 'Try again',
+          notification: 'Notification from Central Housing Office',
+          receivedStudents: 'Students received for allocation',
+          batchId: 'Batch ID',
+          receivedAt: 'Received on',
+          studentsBreakdown: 'Students breakdown',
+          newStudents: 'New',
+          continuing: 'Continuing',
+          transfers: 'Transfers',
+          leaving: 'Leaving',
+          priorityStudents: 'Priority students',
+          sameGender: 'Same gender in apartment',
+          sameReligion: 'Same religion in apartment',
+          roommateMatch: 'Match roommate requests',
+          priorityFirst: 'Priority students first',
+          roommatePositiveOnly: '100% positive roommate matches',
+          ReligiousTogether: '100% positive religious apartment matches',
+          sectorMatching: 'Sector matching',
+          avoidYearMix_1_with_3_4: 'Avoid mixing 1st year with 3rd/4th',
+          avoidAtudaimWithHasmaha: 'Avoid mixing graduate with atudaim',
+          noRegion: 'User region was not found.',
+          malformedSummary: 'Malformed allocation summary response.',
+          noPermission: 'You do not have permission to run allocation on this account.',
+          pending: 'Pending',
+          viewed: 'Viewed',
+          unknownError: 'Unknown error',
+          noResultsYet: 'No results are available yet. Run allocation to generate results.',
+          resultsHint: 'The results button will be enabled after a successful run.',
+          currentStatus: 'Current status',
+        },
+      }[language] || {
+        title: 'Student Allocation',
+        subtitle: 'Run the smart allocation algorithm',
+        runAllocation: 'Run Allocation',
+        running: 'Running allocation...',
+        constraints: 'Allocation Constraints',
+        strict: 'Strict',
+        flexible: 'Flexible',
+        critical: 'Critical',
+        weight: 'Weight',
+        weightHint: 'How important in optimization (0–10)',
+        studentsToAssign: 'Students to assign',
+        availableBeds: 'Available beds',
+        results: 'Allocation Results',
+        assigned: 'Successfully assigned',
+        roommateMatches: 'Roommate matches',
+        conflicts: 'Conflicts',
+        viewResults: 'View Results',
+        noStudents: 'No students to assign',
+        loading: 'Loading data...',
+        error: 'Error loading data',
+        retry: 'Try again',
+        notification: 'Notification from Central Housing Office',
+        receivedStudents: 'Students received for allocation',
+        batchId: 'Batch ID',
+        receivedAt: 'Received on',
+        studentsBreakdown: 'Students breakdown',
+        newStudents: 'New',
+        continuing: 'Continuing',
+        transfers: 'Transfers',
+        leaving: 'Leaving',
+        priorityStudents: 'Priority students',
+        sameGender: 'Same gender in apartment',
+        sameReligion: 'Same religion in apartment',
+        roommateMatch: 'Match roommate requests',
+        priorityFirst: 'Priority students first',
+        roommatePositiveOnly: '100% positive roommate matches',
+        ReligiousTogether: '100% positive religious apartment matches',
+        sectorMatching: 'Sector matching',
+        avoidYearMix_1_with_3_4: 'Avoid mixing 1st year with 3rd/4th',
+        avoidAtudaimWithHasmaha: 'Avoid mixing graduate with atudaim',
+        noRegion: 'User region was not found.',
+        malformedSummary: 'Malformed allocation summary response.',
+        noPermission: 'You do not have permission to run allocation on this account.',
+        pending: 'Pending',
+        viewed: 'Viewed',
+        unknownError: 'Unknown error',
+        noResultsYet: 'No results are available yet. Run allocation to generate results.',
+        resultsHint: 'The results button will be enabled after a successful run.',
+        currentStatus: 'Current status',
+      }),
+    [language]
+  );
+
+  const unwrapResponse = useCallback((res) => {
+    if (res && typeof res === 'object' && 'data' in res) return res.data;
+    return res;
+  }, []);
+
+  const getErrorMessage = useCallback(
+    (err) => {
+      if (!err) return t.unknownError;
+      if (typeof err === 'string') return err;
+
+      const data = err?.response?.data;
+      if (typeof data === 'string') return data;
+      if (data?.error) return data.error;
+      if (data?.message) return data.message;
+      if (err?.message) return err.message;
+
+      return t.unknownError;
     },
-    en: {
-      title: 'Student Allocation',
-      subtitle: 'Run the smart allocation algorithm',
-      runAllocation: 'Run Allocation',
-      running: 'Running allocation...',
-      constraints: 'Allocation Constraints',
-      strict: 'Strict',
-      flexible: 'Flexible',
-      critical: 'Critical',
-      weight: 'Weight',
-      weightHint: 'How important in optimization (0–10)',
-      studentsToAssign: 'Students to assign',
-      availableBeds: 'Available beds',
-      results: 'Allocation Results',
-      assigned: 'Successfully assigned',
-      roommateMatches: 'Roommate matches',
-      conflicts: 'Conflicts',
-      viewResults: 'View Results',
-      noStudents: 'No students to assign',
-      loading: 'Loading data...',
-      error: 'Error loading data',
-      retry: 'Try again',
-      notification: 'Notification from Central Housing Office',
-      receivedStudents: 'Students received for allocation',
-      batchId: 'Batch ID',
-      receivedAt: 'Received on',
-      studentsBreakdown: 'Students breakdown',
-      newStudents: 'New',
-      continuing: 'Continuing',
-      transfers: 'Transfers',
-      leaving: 'Leaving',
-      priorityStudents: 'Priority students',
-      sameGender: 'Same gender in apartment',
-      sameReligion: 'Same religion in apartment',
-      roommateMatch: 'Match roommate requests',
-      priorityFirst: 'Priority students first',
-      roommatePositiveOnly: '100% positive roommate matches',
-      ReligiousTogether: '100% positive religious apartment matches',
-      sectorMatching: 'Sector matching',
-      avoidYearMix_1_with_3_4: 'Avoid mixing 1st year with 3rd/4th',
-      avoidAtudaimWithHasmaha: 'Avoid mixing graduate with atudaim',
-      noRegion: 'User region was not found.',
+    [t.unknownError]
+  );
+
+  const normalizeInboxStatus = useCallback((statusValue) => {
+    const s = String(statusValue || '').trim().toLowerCase();
+    if (s === 'pending') return 'pending';
+    if (s === 'viewed') return 'viewed';
+    if (s === 'processed') return 'processed';
+    return s;
+  }, []);
+
+  const safeSummary = useCallback(
+    (raw) => {
+      const data = unwrapResponse(raw);
+
+      if (!data || typeof data !== 'object') {
+        throw new Error(t.malformedSummary);
+      }
+
+      return {
+        total_students: Number(data.total_students) || 0,
+        unassigned_students: Number(data.unassigned_students) || 0,
+        assigned_students: Number(data.assigned_students) || 0,
+        available_beds: Number(data.available_beds) || 0,
+        priority_students: Number(data.priority_students) || 0,
+        total_capacity: Number(data.total_capacity) || 0,
+        occupancy_rate: Number(data.occupancy_rate) || 0,
+        latest_inbox: data.latest_inbox && typeof data.latest_inbox === 'object' ? data.latest_inbox : null,
+        students_by_category:
+          data.students_by_category && typeof data.students_by_category === 'object'
+            ? {
+                new: Number(data.students_by_category.new) || 0,
+                continuing: Number(data.students_by_category.continuing) || 0,
+                transfer: Number(data.students_by_category.transfer) || 0,
+                leaving: Number(data.students_by_category.leaving) || 0,
+              }
+            : null,
+        region: data.region && typeof data.region === 'object' ? data.region : null,
+        ...data,
+      };
     },
-  }[language];
+    [t.malformedSummary, unwrapResponse]
+  );
+
+  const safeInbox = useCallback(
+    (raw) => {
+      const data = unwrapResponse(raw);
+
+      if (!data || typeof data !== 'object') return null;
+      if (!data.inbox || typeof data.inbox !== 'object') return null;
+
+      return {
+        ...data.inbox,
+        status: normalizeInboxStatus(data.inbox.status),
+      };
+    },
+    [normalizeInboxStatus, unwrapResponse]
+  );
+
+  const resolveRegionId = useCallback(() => {
+    const regionValue = typeof getUserRegion === 'function' ? getUserRegion() : null;
+
+    if (!regionValue) {
+      return summary?.region?.id || summary?.region?.name || null;
+    }
+
+    if (typeof regionValue === 'string' || typeof regionValue === 'number') {
+      return regionValue;
+    }
+
+    if (typeof regionValue === 'object') {
+      return regionValue.id || regionValue.name || regionValue.region || null;
+    }
+
+    return summary?.region?.id || summary?.region?.name || null;
+  }, [getUserRegion, summary]);
+
+  const loadPage = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const summaryRaw = await allocationAPI.getSummary();
+      const normalizedSummary = safeSummary(summaryRaw);
+      setSummary(normalizedSummary);
+
+      if (!central) {
+        try {
+          const inboxRaw = await inboxAPI.getLatest();
+          const inbox = safeInbox(inboxRaw);
+
+          if (inbox) {
+            setInboxItem(inbox);
+
+            if (inbox.status === 'pending' && inbox.id) {
+              Promise.resolve(inboxAPI.markViewed(inbox.id)).catch((err) => {
+                console.warn('markViewed failed:', err);
+              });
+            }
+          } else {
+            setInboxItem(null);
+          }
+        } catch (inboxErr) {
+          console.warn('inbox getLatest failed:', inboxErr);
+          setInboxItem(null);
+        }
+      } else {
+        setInboxItem(null);
+      }
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [central, getErrorMessage, safeInbox, safeSummary]);
 
   useEffect(() => {
-    let alive = true;
-
-    const load = async () => {
-      setLoading(true);
-      setError(null);
-
-      try {
-        const summaryData = await allocationAPI.getSummary();
-        if (!alive) return;
-        setSummary(summaryData);
-
-        // ✅ avoid calling isCentralAdmin() inside effect dependencies and avoid function-ref dependency
-        if (!central) {
-          try {
-            const inboxData = await inboxAPI.getLatest();
-            if (!alive) return;
-
-            if (inboxData?.inbox) {
-              setInboxItem(inboxData.inbox);
-
-              if (inboxData.inbox.status === 'pending') {
-                await inboxAPI.markViewed(inboxData.inbox.id);
-              }
-            }
-          } catch (e) {
-            // keep silent for UX, but you can uncomment for debugging:
-            // console.warn('inboxAPI.getLatest failed', e);
-          }
-        }
-      } catch (err) {
-        if (!alive) return;
-        setError(err?.message || 'Unknown error');
-      } finally {
-        if (!alive) return;
-        setLoading(false);
-      }
-    };
-
-    load();
-
-    return () => {
-      alive = false;
-    };
-  }, [central]);
+    loadPage();
+  }, [loadPage]);
 
   const toggleConstraintEnabled = (key) => {
     setConstraints((prev) => {
@@ -190,7 +353,9 @@ function AllocationPage({ language }) {
   };
 
   const setConstraintWeight = (key, nextWeight) => {
-    const w = Math.max(0, Math.min(10, Number(nextWeight)));
+    const parsed = Number(nextWeight);
+    const w = Number.isFinite(parsed) ? Math.max(0, Math.min(10, parsed)) : 0;
+
     setConstraints((prev) => {
       const current = prev[key];
       if (!current) return prev;
@@ -211,6 +376,20 @@ function AllocationPage({ language }) {
     return out;
   }, [constraints]);
 
+  const handleViewResults = useCallback(() => {
+    if (!result) return;
+
+    navigate('/allocation/results', {
+      state: {
+        result,
+        summary,
+        constraints: effectiveConfig,
+        region: summary?.region || null,
+        generatedAt: new Date().toISOString(),
+      },
+    });
+  }, [navigate, result, summary, effectiveConfig]);
+
   const runAllocation = async () => {
     setIsRunning(true);
     setProgress(0);
@@ -222,8 +401,8 @@ function AllocationPage({ language }) {
     }, 200);
 
     try {
-      // ✅ Guard region id (prevents crashes & confusing “Unknown error”)
-      const regionId = getUserRegion?.();
+      const regionId = resolveRegionId();
+
       if (!regionId) {
         clearInterval(progressInterval);
         setProgress(0);
@@ -232,36 +411,37 @@ function AllocationPage({ language }) {
         return;
       }
 
-      let response;
-      try {
-        response = await allocationAPI.run(regionId, { constraints: effectiveConfig });
-      } catch {
-        response = await allocationAPI.run(regionId);
-      }
+      const responseRaw = await allocationAPI.run(regionId, { constraints: effectiveConfig });
+      const response = unwrapResponse(responseRaw);
 
       clearInterval(progressInterval);
       setProgress(100);
+      setResult(response?.result || response || null);
 
-      setResult(response?.result || null);
-
-      if (inboxItem) {
-        await inboxAPI.markProcessed(inboxItem.id);
+      if (inboxItem?.id) {
+        try {
+          await inboxAPI.markProcessed(inboxItem.id);
+        } catch (err) {
+          console.warn('markProcessed failed:', err);
+        }
       }
 
       try {
-        const summaryData = await allocationAPI.getSummary();
-        setSummary(summaryData);
-      } catch (e) {
-        // ignore
+        await loadPage();
+      } catch (err) {
+        console.warn('page refresh failed:', err);
       }
     } catch (err) {
       clearInterval(progressInterval);
-      setError(err?.message || 'Unknown error');
+      setError(getErrorMessage(err));
     } finally {
       setIsRunning(false);
       clearInterval(progressInterval);
     }
   };
+
+  const canRun = typeof canRunAllocation === 'function' ? canRunAllocation() : false;
+  const hasStudents = (summary?.unassigned_students || 0) > 0;
 
   if (loading) {
     return (
@@ -282,16 +462,12 @@ function AllocationPage({ language }) {
           <XCircle size={40} />
           <p>{t.error}</p>
           <p className="error-message">{error}</p>
-          <button onClick={() => window.location.reload()}>{t.retry}</button>
+          <button onClick={loadPage}>{t.retry}</button>
         </div>
         <style>{styles}</style>
       </div>
     );
   }
-
-  // ✅ Now canRunAllocation exists in AuthContext (alias), so this won't crash
-  const canRun = typeof canRunAllocation === 'function' ? canRunAllocation() : false;
-  const hasStudents = (summary?.unassigned_students || 0) > 0;
 
   return (
     <div className="allocation-page">
@@ -305,25 +481,32 @@ function AllocationPage({ language }) {
           <div className="topbarRight">
             {summary?.region && (
               <span className="region-badge">
-                {language === 'he' ? summary.region.name : summary.region.name_en}
+                {language === 'he'
+                  ? summary.region.name || summary.region.name_en || ''
+                  : summary.region.name_en || summary.region.name || ''}
               </span>
             )}
 
-            {hasStudents ? (
-              <button className="run-btn" onClick={runAllocation} disabled={isRunning || !canRun}>
-                {isRunning ? (
-                  <>
-                    <RefreshCw size={18} className="spin" />
-                    {t.running}
-                  </>
-                ) : (
-                  <>
-                    <Play size={18} />
-                    {t.runAllocation}
-                  </>
-                )}
-              </button>
-            ) : (
+            <button
+              className="run-btn"
+              onClick={runAllocation}
+              disabled={isRunning || !canRun || !hasStudents}
+              title={!hasStudents ? t.noStudents : ''}
+            >
+              {isRunning ? (
+                <>
+                  <RefreshCw size={18} className="spin" />
+                  {t.running}
+                </>
+              ) : (
+                <>
+                  <Play size={18} />
+                  {t.runAllocation}
+                </>
+              )}
+            </button>
+
+            {!hasStudents && (
               <span className="status-chip ok">
                 <Check size={16} />
                 {t.noStudents}
@@ -351,19 +534,22 @@ function AllocationPage({ language }) {
                 <div className="bannerTitle">
                   <span className="bannerHeading">{t.notification}</span>
                   <span className="chip">
-                    {t.batchId}: #{inboxItem.batch}
+                    {t.batchId}: #{inboxItem.batch || inboxItem.batch_id || '-'}
                   </span>
                 </div>
                 <div className="bannerMain">
                   <Mail size={16} />
                   <span>
-                    <strong>{inboxItem.students_count}</strong> {t.receivedStudents}
+                    <strong>{Number(inboxItem.students_count) || 0}</strong> {t.receivedStudents}
                   </span>
                 </div>
                 <div className="bannerMeta">
                   <Calendar size={14} />
                   <span>
-                    {t.receivedAt}: {new Date(inboxItem.created_at).toLocaleDateString('he-IL')}
+                    {t.receivedAt}:{' '}
+                    {inboxItem.created_at
+                      ? new Date(inboxItem.created_at).toLocaleDateString(language === 'he' ? 'he-IL' : 'en-US')
+                      : '-'}
                   </span>
                 </div>
               </div>
@@ -373,11 +559,11 @@ function AllocationPage({ language }) {
               <span className={`status-chip ${inboxItem.status === 'pending' ? 'warn' : 'neutral'}`}>
                 {inboxItem.status === 'pending' ? (
                   <>
-                    <AlertTriangle size={16} /> {language === 'he' ? 'ממתין לטיפול' : 'Pending'}
+                    <AlertTriangle size={16} /> {t.pending}
                   </>
                 ) : (
                   <>
-                    <Check size={16} /> {language === 'he' ? 'נצפה' : 'Viewed'}
+                    <Check size={16} /> {t.viewed}
                   </>
                 )}
               </span>
@@ -445,11 +631,7 @@ function AllocationPage({ language }) {
               {!canRun && (
                 <div className="lockNote">
                   <Lock size={16} />
-                  <span>
-                    {language === 'he'
-                      ? 'אין הרשאה להריץ שיבוץ בחשבון זה.'
-                      : 'You do not have permission to run allocation on this account.'}
-                  </span>
+                  <span>{t.noPermission}</span>
                 </div>
               )}
             </div>
@@ -466,6 +648,7 @@ function AllocationPage({ language }) {
                   <div className="statLbl">{t.studentsToAssign}</div>
                 </div>
               </div>
+
               <div className="stat">
                 <div className="statIcon">
                   <Home size={18} />
@@ -507,22 +690,23 @@ function AllocationPage({ language }) {
               </div>
             )}
 
-            {result && (
-              <div className="card">
-                <div className="cardHeader compact">
-                  <div className="cardTitle">
-                    <Check size={16} />
-                    <span>{t.results}</span>
-                  </div>
+            <div className="card">
+              <div className="cardHeader compact">
+                <div className="cardTitle">
+                  <BarChart3 size={16} />
+                  <span>{t.results}</span>
                 </div>
+                <span className="hint">{t.currentStatus}</span>
+              </div>
 
+              {result ? (
                 <div className="results">
                   <div className="kpi ok">
                     <div className="kpiIcon">
                       <Check size={18} />
                     </div>
                     <div>
-                      <div className="kpiNum">{result.successful_assignments}</div>
+                      <div className="kpiNum">{result.successful_assignments || 0}</div>
                       <div className="kpiLbl">{t.assigned}</div>
                     </div>
                   </div>
@@ -532,7 +716,7 @@ function AllocationPage({ language }) {
                       <Users size={18} />
                     </div>
                     <div>
-                      <div className="kpiNum">{result.roommate_matches}</div>
+                      <div className="kpiNum">{result.roommate_matches || 0}</div>
                       <div className="kpiLbl">{t.roommateMatches}</div>
                     </div>
                   </div>
@@ -542,15 +726,22 @@ function AllocationPage({ language }) {
                       <AlertTriangle size={18} />
                     </div>
                     <div>
-                      <div className="kpiNum">{result.conflicts}</div>
+                      <div className="kpiNum">{result.conflicts || 0}</div>
                       <div className="kpiLbl">{t.conflicts}</div>
                     </div>
                   </div>
                 </div>
+              ) : (
+                <div className="empty-results-state">
+                  <div className="empty-results-title">{t.noResultsYet}</div>
+                  <div className="empty-results-subtitle">{t.resultsHint}</div>
+                </div>
+              )}
 
-                <button className="ghostBtn">{t.viewResults}</button>
-              </div>
-            )}
+              <button className="ghostBtn" onClick={handleViewResults} disabled={!result}>
+                {t.viewResults}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -588,7 +779,7 @@ const styles = `
   }
 
   .shell{
-    max-width: 1080px;
+    max-width: 1180px;
     margin: 0 auto;
     display: flex;
     flex-direction: column;
@@ -602,7 +793,7 @@ const styles = `
     background: linear-gradient(to bottom, rgba(246,248,252,1), rgba(246,248,252,0.88));
     backdrop-filter: blur(8px);
     border-radius: var(--radius);
-    padding: 14px 14px;
+    padding: 14px;
     display: flex;
     align-items: flex-end;
     justify-content: space-between;
@@ -611,7 +802,7 @@ const styles = `
 
   .titleBlock h1{
     margin: 0;
-    font-size: 22px;
+    font-size: 24px;
     font-weight: 900;
     letter-spacing: -0.02em;
     color: var(--text);
@@ -662,7 +853,11 @@ const styles = `
     white-space: nowrap;
   }
 
-  .run-btn:hover{ transform: translateY(-1px); filter: brightness(0.98); }
+  .run-btn:hover{
+    transform: translateY(-1px);
+    filter: brightness(0.98);
+  }
+
   .run-btn:disabled{
     opacity: 0.65;
     cursor: not-allowed;
@@ -683,16 +878,19 @@ const styles = `
     color: var(--text);
     white-space: nowrap;
   }
+
   .status-chip.ok{
     background: var(--okSoft);
     border-color: rgba(4,120,87,0.25);
     color: var(--ok);
   }
+
   .status-chip.warn{
     background: var(--warnSoft);
     border-color: rgba(180,83,9,0.25);
     color: var(--warn);
   }
+
   .status-chip.neutral{
     background: rgba(15,23,42,0.03);
     border-color: var(--border);
@@ -709,6 +907,7 @@ const styles = `
     padding: 10px 12px;
     box-shadow: var(--shadow2);
   }
+
   .progressBar{
     height: 10px;
     border-radius: 999px;
@@ -716,12 +915,14 @@ const styles = `
     overflow:hidden;
     flex: 1;
   }
+
   .progressFill{
     height: 100%;
     background: linear-gradient(90deg, rgba(37,99,235,0.75), rgba(5,150,105,0.75));
     transition: width 0.25s ease;
     border-radius: 999px;
   }
+
   .progressPct{
     width: 52px;
     text-align:right;
@@ -740,12 +941,14 @@ const styles = `
     border-radius: var(--radius);
     padding: 14px;
   }
+
   .bannerLeft{
     display:flex;
     align-items: flex-start;
     gap: 12px;
     min-width: 0;
   }
+
   .bannerIcon{
     width: 40px;
     height: 40px;
@@ -758,18 +961,24 @@ const styles = `
     color: #1d4ed8;
     flex-shrink: 0;
   }
-  .bannerText{ min-width: 0; }
+
+  .bannerText{
+    min-width: 0;
+  }
+
   .bannerTitle{
     display:flex;
     align-items:center;
     gap: 10px;
     flex-wrap: wrap;
   }
+
   .bannerHeading{
     font-weight: 950;
     color: #1e3a8a;
     font-size: 13px;
   }
+
   .chip{
     font-size: 12px;
     font-weight: 950;
@@ -779,6 +988,7 @@ const styles = `
     border: 1px solid rgba(15,23,42,0.10);
     color: var(--text);
   }
+
   .bannerMain{
     display:flex;
     align-items:center;
@@ -787,6 +997,7 @@ const styles = `
     font-weight: 800;
     color: var(--text);
   }
+
   .bannerMeta{
     display:flex;
     align-items:center;
@@ -799,7 +1010,7 @@ const styles = `
 
   .grid{
     display:grid;
-    grid-template-columns: 1.25fr 0.9fr;
+    grid-template-columns: 1.2fr 0.95fr;
     gap: 14px;
     align-items:start;
   }
@@ -821,10 +1032,12 @@ const styles = `
     margin-bottom: 10px;
     border-bottom: 1px solid var(--border);
   }
+
   .cardHeader.compact{
     padding-bottom: 10px;
     margin-bottom: 12px;
   }
+
   .cardTitle{
     display:flex;
     align-items:center;
@@ -832,6 +1045,7 @@ const styles = `
     font-weight: 950;
     color: var(--text);
   }
+
   .hint{
     font-size: 12px;
     color: var(--muted);
@@ -855,10 +1069,12 @@ const styles = `
     background: rgba(15,23,42,0.02);
     border: 1px solid rgba(15,23,42,0.06);
   }
+
   .row.critical{
     background: rgba(185,28,28,0.06);
     border-color: rgba(185,28,28,0.14);
   }
+
   .row.disabled{
     opacity: 0.75;
   }
@@ -878,13 +1094,16 @@ const styles = `
     cursor: pointer;
     min-width: 0;
   }
+
   .toggle.locked{
     cursor: not-allowed;
   }
+
   .toggle input{
     width: 18px;
     height: 18px;
   }
+
   .labelText{
     display:inline-flex;
     align-items:center;
@@ -894,6 +1113,7 @@ const styles = `
     min-width: 0;
     flex-wrap: wrap;
   }
+
   .miniChip{
     display:inline-flex;
     align-items:center;
@@ -914,15 +1134,18 @@ const styles = `
     align-items:center;
     gap: 10px;
   }
+
   .wLabel{
     font-size: 12px;
     font-weight: 900;
     color: var(--muted);
   }
+
   .weight input[type="range"]{
     width: 100%;
     accent-color: var(--primary);
   }
+
   .wValue{
     font-size: 12px;
     font-weight: 950;
@@ -945,11 +1168,13 @@ const styles = `
     background: rgba(15,23,42,0.03);
     white-space: nowrap;
   }
+
   .pill.strict{
     background: var(--dangerSoft);
     border-color: rgba(185,28,28,0.18);
     color: var(--danger);
   }
+
   .pill.flex{
     background: var(--primarySoft);
     border-color: rgba(37,99,235,0.18);
@@ -1005,6 +1230,7 @@ const styles = `
     color: var(--text);
     letter-spacing: -0.02em;
   }
+
   .statLbl{
     font-size: 12px;
     font-weight: 900;
@@ -1017,6 +1243,7 @@ const styles = `
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 10px;
   }
+
   .bItem{
     border-radius: var(--radius2);
     border: 1px solid var(--border);
@@ -1024,19 +1251,23 @@ const styles = `
     padding: 12px;
     text-align:center;
   }
+
   .bItem.priority{
     background: var(--warnSoft);
     border-color: rgba(180,83,9,0.20);
   }
+
   .bNum{
     font-size: 20px;
     font-weight: 950;
     color: var(--text);
     letter-spacing: -0.02em;
   }
+
   .bItem.priority .bNum{
     color: var(--warn);
   }
+
   .bLbl{
     margin-top: 4px;
     font-size: 12px;
@@ -1049,6 +1280,7 @@ const styles = `
     grid-template-columns: 1fr;
     gap: 10px;
   }
+
   .kpi{
     display:flex;
     align-items:center;
@@ -1058,18 +1290,22 @@ const styles = `
     background: rgba(15,23,42,0.02);
     padding: 12px;
   }
+
   .kpi.ok{
     background: var(--okSoft);
     border-color: rgba(4,120,87,0.20);
   }
+
   .kpi.info{
     background: var(--primarySoft);
     border-color: rgba(37,99,235,0.18);
   }
+
   .kpi.warn{
     background: var(--warnSoft);
     border-color: rgba(180,83,9,0.20);
   }
+
   .kpiIcon{
     width: 36px;
     height: 36px;
@@ -1080,20 +1316,43 @@ const styles = `
     background: rgba(255,255,255,0.75);
     border: 1px solid rgba(255,255,255,0.6);
   }
+
   .kpi.ok .kpiIcon{ color: var(--ok); }
   .kpi.info .kpiIcon{ color: #1d4ed8; }
   .kpi.warn .kpiIcon{ color: var(--warn); }
+
   .kpiNum{
     font-size: 18px;
     font-weight: 950;
     color: var(--text);
     letter-spacing: -0.02em;
   }
+
   .kpiLbl{
     font-size: 12px;
     font-weight: 900;
     color: rgba(15,23,42,0.70);
     margin-top: 2px;
+  }
+
+  .empty-results-state{
+    padding: 14px;
+    border-radius: 14px;
+    border: 1px dashed rgba(15,23,42,0.12);
+    background: rgba(15,23,42,0.03);
+  }
+
+  .empty-results-title{
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 900;
+  }
+
+  .empty-results-subtitle{
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 800;
   }
 
   .ghostBtn{
@@ -1107,11 +1366,18 @@ const styles = `
     font-weight: 950;
     cursor: pointer;
     font-family: inherit;
+    transition: 0.18s ease;
   }
-  .ghostBtn:hover{
+
+  .ghostBtn:hover:not(:disabled){
     background: rgba(37,99,235,0.06);
     border-color: rgba(37,99,235,0.18);
     color: #1d4ed8;
+  }
+
+  .ghostBtn:disabled{
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 
   .loading-state, .error-state{
@@ -1138,6 +1404,7 @@ const styles = `
   .error-state{
     color: var(--danger);
   }
+
   .error-message{
     font-size: 13px;
     color: var(--muted);
@@ -1146,6 +1413,7 @@ const styles = `
     margin: -6px 0 0;
     font-weight: 800;
   }
+
   .error-state button{
     padding: 10px 14px;
     border-radius: 14px;
@@ -1156,26 +1424,46 @@ const styles = `
     cursor:pointer;
     font-family: inherit;
   }
+
   .error-state button:hover{
     background: rgba(37,99,235,0.14);
   }
 
-  .spin{ animation: spin 1s linear infinite; }
-  @keyframes spin{ from{ transform: rotate(0deg);} to{ transform: rotate(360deg);} }
+  .spin{
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin{
+    from{ transform: rotate(0deg);}
+    to{ transform: rotate(360deg);}
+  }
 
   @media (max-width: 980px){
     .topbar{
       flex-direction: column;
       align-items: flex-start;
     }
+
     .topbarRight{
       justify-content:flex-start;
     }
+
     .grid{
       grid-template-columns: 1fr;
     }
+
     .breakdown{
       grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 640px){
+    .statsRow{
+      grid-template-columns: 1fr;
+    }
+
+    .breakdown{
+      grid-template-columns: 1fr 1fr;
     }
   }
 `;
