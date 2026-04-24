@@ -14,6 +14,7 @@ import StudentsPage from './pages/StudentsPage';
 import UploadPage from './pages/UploadPage';
 import PriorityPage from './pages/PriorityPage';
 import AllocationPage from './pages/AllocationPage';
+import AllocationResultsPage from './pages/AllocationResultsPage';
 import TransfersPage from './pages/TransfersPage';
 import ReportsPage from './pages/ReportsPage';
 import UsersPage from './pages/UsersPage';
@@ -96,10 +97,14 @@ function AppContent() {
         <Route path="/upload" element={<UploadPage language={language} />} />
         <Route path="/priority" element={<PriorityPage language={language} />} />
         <Route path="/allocation" element={<AllocationPage language={language} />} />
+        <Route path="/allocation/results" element={<AllocationResultsPage language={language} />} />
         <Route path="/transfers" element={<TransfersPage language={language} />} />
         <Route path="/reports" element={<ReportsPage language={language} />} />
         <Route path="/users" element={<UsersPage language={language} />} />
-        <Route path="/settings" element={<SettingsPage language={language} onLanguageToggle={toggleLanguage} />} />
+        <Route
+          path="/settings"
+          element={<SettingsPage language={language} onLanguageToggle={toggleLanguage} />}
+        />
       </Route>
 
       {/* Fallback */}
