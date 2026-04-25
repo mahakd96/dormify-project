@@ -209,6 +209,25 @@ export const uploadAPI = {
     }
   },
 };
+export const studentsAPI = {
+  getAll: async () => {
+    try {
+      const { data } = await api.get("/api/students/");
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load students"));
+    }
+  },
+
+  getById: async (id) => {
+    try {
+      const { data } = await api.get(`/api/students/${id}/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load student"));
+    }
+  },
+};
 
 export const debugAuthAPI = {
   getAccessToken,
