@@ -9,6 +9,7 @@ function StudentsPage({ language }) {
   const [filterReligion, setFilterReligion] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
   const [selectedStudent, setSelectedStudent] = useState(null);
+  const [selectedStudentLoading, setSelectedStudentLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -34,6 +35,7 @@ function StudentsPage({ language }) {
       noResults: 'לא נמצאו סטודנטים',
       studentDetails: 'פרטי סטודנט',
       loading: 'טוען סטודנטים...',
+      loadingDetails: 'טוען פרטים מלאים...',
       error: 'שגיאה בטעינת סטודנטים',
       email: 'אימייל',
       phone: 'טלפון',
@@ -66,6 +68,7 @@ function StudentsPage({ language }) {
       noResults: 'No students found',
       studentDetails: 'Student Details',
       loading: 'Loading students...',
+      loadingDetails: 'Loading full details...',
       error: 'Failed to load students',
       email: 'Email',
       phone: 'Phone',
@@ -183,6 +186,21 @@ function StudentsPage({ language }) {
     ].filter(Boolean);
   };
 
+  const handleStudentClick = async (student) => {
+    try {
+      setSelectedStudent(student);
+      setSelectedStudentLoading(true);
+
+      const fullStudent = await studentsAPI.getById(student.id);
+      setSelectedStudent(fullStudent);
+    } catch (err) {
+      console.error('Failed to load full student details:', err);
+      setSelectedStudent(student);
+    } finally {
+      setSelectedStudentLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="students-page">
@@ -264,17 +282,14 @@ function StudentsPage({ language }) {
               <th>{t.religion}</th>
               <th>{t.dormType}</th>
               <th>{t.status}</th>
-              <th>{t.roommate}</th>
             </tr>
           </thead>
 
           <tbody>
             {filteredStudents.length > 0 ? (
               filteredStudents.map((student) => {
-                const roommateRequests = getRoommateRequests(student);
-
                 return (
-                  <tr key={student.id} onClick={() => setSelectedStudent(student)}>
+                  <tr key={student.id} onClick={() => handleStudentClick(student)}>
                     <td>
                       <div className="student-name-cell">
                         <div className="avatar">{getFirstLetter(student)}</div>
@@ -293,20 +308,12 @@ function StudentsPage({ language }) {
                         {student.is_assigned ? t.assigned : t.unassigned}
                       </span>
                     </td>
-
-                    <td>
-                      {roommateRequests.length > 0 ? (
-                        <span className="roommate-id">{roommateRequests.join(', ')}</span>
-                      ) : (
-                        <span className="no-roommate">-</span>
-                      )}
-                    </td>
                   </tr>
                 );
               })
             ) : (
               <tr>
-                <td colSpan="7" className="no-results">
+                <td colSpan="6" className="no-results">
                   {t.noResults}
                 </td>
               </tr>
@@ -326,6 +333,12 @@ function StudentsPage({ language }) {
             </div>
 
             <div className="modal-body">
+              {selectedStudentLoading && (
+                <div className="details-loading">
+                  {t.loadingDetails}
+                </div>
+              )}
+
               <div className="detail-row">
                 <span className="label">{t.name}</span>
                 <span className="value">{getStudentName(selectedStudent)}</span>
@@ -457,6 +470,7 @@ function StudentsPage({ language }) {
         .modal-header h3 { font-size: 18px; }
         .modal-header button { background: none; border: none; color: #64748b; cursor: pointer; }
         .modal-body { padding: 20px; }
+        .details-loading { margin-bottom: 12px; padding: 10px 12px; background: #eff6ff; color: #1d4ed8; border-radius: 10px; font-size: 13px; }
         .detail-row { display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid #f1f5f9; }
         .detail-row .label { color: #64748b; }
         .detail-row .value { font-weight: 500; text-align: left; }

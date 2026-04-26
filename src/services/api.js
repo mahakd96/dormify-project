@@ -229,6 +229,36 @@ export const studentsAPI = {
   },
 };
 
+export const transfersAPI = {
+  getAll: async () => {
+    try {
+      const { data } = await api.get("/api/transfers/");
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load transfers"));
+    }
+  },
+
+  approve: async (id) => {
+    try {
+      const { data } = await api.put(`/api/transfers/${id}/approve/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to approve transfer"));
+    }
+  },
+
+  reject: async (id) => {
+    try {
+      const { data } = await api.put(`/api/transfers/${id}/reject/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to reject transfer"));
+    }
+  },
+};
+
+
 export const debugAuthAPI = {
   getAccessToken,
   getRefreshToken,
