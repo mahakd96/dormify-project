@@ -24,7 +24,7 @@ from .models import (
 from .serializers import (
     UserSerializer, LoginSerializer, RegisterSerializer,
     RegionSerializer, BuildingSerializer, ApartmentSerializer,
-    RoomSerializer, StudentSerializer, TransferSerializer,
+    RoomSerializer, StudentSerializer,StudentListSerializer, TransferSerializer,
     AllocationRunSerializer, ImportBatchSerializer, RegionInboxSerializer
 )
 
@@ -360,8 +360,17 @@ class StudentViewSet(viewsets.ModelViewSet):
     serializer_class = StudentSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return StudentListSerializer
+        return StudentSerializer
+
     def get_queryset(self):
-        queryset = Student.objects.all()
+        queryset = Student.objects.select_related(
+            'accepted_dorm_type',
+            'accepted_dorm_type__region',
+            'assigned_room',
+        ).all()
 
         if not self.request.user.is_central_admin:
             if not self.request.user.region:

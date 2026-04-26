@@ -1,64 +1,32 @@
-import React, { useMemo, useState, useEffect } from 'react';
-import { useAuth } from '../context/AuthContext';
-import {
-  transferRequests as transferRequestsSeed,
-  students,
-  rooms,
-  buildings,
-  regions,
-} from '../data/mockData';
+import React, { useEffect, useMemo, useState } from 'react';
+import { transfersAPI } from '../services/api';
 import {
   ArrowLeftRight,
   Check,
   X,
   Clock,
   Plus,
-  MapPin,
+  User,
   Home,
-  History,
+  Calendar,
 } from 'lucide-react';
 
-function normalizeValue(value) {
-  if (value == null) return '';
-  return String(value).trim().toLowerCase();
-}
-
-function sameValue(a, b) {
-  return normalizeValue(a) === normalizeValue(b);
-}
-
 function TransfersPage({ language }) {
-  const {
-    isCentralAdmin,
-    isRegionBoss,
-    isEmployee,
-    getUserRegion,
-  } = useAuth();
-
-  const userRegion = getUserRegion();
-
-  const [transferRequests, setTransferRequests] = useState(transferRequestsSeed);
-  const [tab, setTab] = useState('room');
+  const [transferRequests, setTransferRequests] = useState([]);
   const [filter, setFilter] = useState('pending');
   const [showHistory, setShowHistory] = useState(false);
-  const [selectedToRoomByTransfer, setSelectedToRoomByTransfer] = useState({});
-
-  const isLocalStaff = isRegionBoss() || isEmployee();
-
-  // non-central users never stay on region tab
-  useEffect(() => {
-    if (!isCentralAdmin() && tab !== 'room') {
-      setTab('room');
-    }
-  }, [tab, isCentralAdmin]);
+  const [showNewRequestModal, setShowNewRequestModal] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   const t = {
     he: {
       title: 'בקשות העברה',
       subtitle: 'ניהול בקשות העברת סטודנטים',
-      roomTab: 'העברה בתוך אזור / שלב 2',
-      regionTab: 'העברה בין אזורים / שינוי סוג מעונות',
       newRequest: 'בקשה חדשה',
+      newRequestTitle: 'בקשה חדשה',
+      newRequestComingSoon: 'טופס יצירת בקשת מעבר יחובר בשלב הבא.',
+      close: 'סגור',
       all: 'הכל',
       pending: 'ממתין',
       approved: 'אושר',
@@ -66,33 +34,31 @@ function TransfersPage({ language }) {
       from: 'מ',
       to: 'ל',
       reason: 'סיבה',
+      requestedBy: 'נוצר על ידי',
+      reviewedBy: 'נבדק על ידי',
+      reviewedAt: 'תאריך בדיקה',
+      createdAt: 'תאריך יצירה',
+      noTransfers: 'אין בקשות מתאימות',
+      loading: 'טוען בקשות מעבר...',
+      error: 'שגיאה בטעינת בקשות מעבר',
+      studentId: 'ת.ז',
+      status: 'סטטוס',
+      activeOnly: 'רק פתוחות',
+      showHistory: 'הצג היסטוריה',
+      transferRequest: 'בקשת מעבר',
+      notReviewed: 'טרם נבדק',
+      noRoom: 'לא צוין חדר',
       approve: 'אשר',
       reject: 'דחה',
-      noTransfers: 'אין בקשות מתאימות',
-      chooseRoom: 'בחר/י חדר יעד',
-      noOptions: 'אין חדרים פנויים מתאימים לפי התנאים',
-      mustChooseRoom: 'כדי לאשר — חייבים לבחור חדר יעד מתאים',
-      fromRegion: 'מאזור',
-      toRegion: 'לאזור',
-      showHistory: 'הצג היסטוריה',
-      activeOnly: 'רק פתוחות',
-      phaseHint:
-        'בקשות בין אזורים/שינוי סוג מעונות מאושרות ע"י מנהל מרכזי. לאחר אישור נוצרת בקשת שיבוץ חדר (שלב 2) בתוך אזור היעד.',
-      centralOnly: 'מאושר רק ע"י המנהל המרכזי',
-      regionStaffOnly: 'מאושר רק בתוך האזור שלך',
-      phase2Badge: 'שלב 2: שיבוץ באיזור יעד',
-      internalBadge: 'העברה פנימית בתוך אזור',
-      notAllowed: 'אין לך הרשאה לאשר בקשה זו',
-      localScopeOnly: 'צפייה ואישור רק בתחום האזור שלך',
-      requestTypeRegion: 'בקשת מעבר בין אזורים',
-      requestTypeRoom: 'בקשת שיבוץ / העברה מקומית',
+      actionsComingSoon: 'אישור ודחייה יחוברו בשלב הבא',
     },
     en: {
       title: 'Transfer Requests',
       subtitle: 'Manage student transfers',
-      roomTab: 'Local / Phase 2 transfers',
-      regionTab: 'Region / dorm-type change',
       newRequest: 'New Request',
+      newRequestTitle: 'New Request',
+      newRequestComingSoon: 'The new transfer request form will be connected in the next step.',
+      close: 'Close',
       all: 'All',
       pending: 'Pending',
       approved: 'Approved',
@@ -100,369 +66,148 @@ function TransfersPage({ language }) {
       from: 'From',
       to: 'To',
       reason: 'Reason',
+      requestedBy: 'Requested by',
+      reviewedBy: 'Reviewed by',
+      reviewedAt: 'Reviewed at',
+      createdAt: 'Created at',
+      noTransfers: 'No matching requests',
+      loading: 'Loading transfer requests...',
+      error: 'Failed to load transfer requests',
+      studentId: 'ID',
+      status: 'Status',
+      activeOnly: 'Active only',
+      showHistory: 'Show history',
+      transferRequest: 'Transfer request',
+      notReviewed: 'Not reviewed yet',
+      noRoom: 'No room specified',
       approve: 'Approve',
       reject: 'Reject',
-      noTransfers: 'No matching requests',
-      chooseRoom: 'Select target room',
-      noOptions: 'No matching available rooms based on constraints',
-      mustChooseRoom: 'To approve — you must select a valid target room',
-      fromRegion: 'From region',
-      toRegion: 'To region',
-      showHistory: 'Show history',
-      activeOnly: 'Active only',
-      phaseHint:
-        'Region/dorm-type change is approved by central office. After approval, Phase 2 room assignment is created inside the target region.',
-      centralOnly: 'Central office approval only',
-      regionStaffOnly: 'Approval only inside your region',
-      phase2Badge: 'Phase 2: assignment in target region',
-      internalBadge: 'Internal move within region',
-      notAllowed: 'You are not allowed to approve this request',
-      localScopeOnly: 'Viewing and approving only inside your region',
-      requestTypeRegion: 'Cross-region request',
-      requestTypeRoom: 'Local room / assignment request',
+      actionsComingSoon: 'Approve/reject will be connected in the next step',
     },
-  }[language];
+  }[language] || {};
 
-  const inferRegionIdFromRoomId = (roomId) => {
-    if (!roomId) return null;
+  useEffect(() => {
+    const fetchTransfers = async () => {
+      try {
+        setLoading(true);
+        setError('');
 
-    const sorted = [...regions].sort(
-      (a, b) => String(b.id).length - String(a.id).length
-    );
+        const data = await transfersAPI.getAll();
 
-    const match = sorted.find(
-      (r) =>
-        sameValue(roomId, r.id) ||
-        normalizeValue(roomId).startsWith(`${normalizeValue(r.id)}-`)
-    );
+        if (Array.isArray(data)) {
+          setTransferRequests(data);
+        } else if (Array.isArray(data.results)) {
+          setTransferRequests(data.results);
+        } else {
+          setTransferRequests([]);
+        }
+      } catch (err) {
+        setError(err.message || 'Failed to load transfer requests');
+      } finally {
+        setLoading(false);
+      }
+    };
 
-    return match?.id ?? null;
-  };
-
-  const getStudent = (studentId) => students.find((s) => sameValue(s.id, studentId));
-  const getBuilding = (buildingId) => buildings.find((b) => sameValue(b.id, buildingId));
-  const getRegion = (regionId) => regions.find((r) => sameValue(r.id, regionId));
-
-  const getRoomRegionId = (room) => {
-    if (!room) return null;
-    if (room.regionId) return room.regionId;
-
-    const b = getBuilding(room.buildingId);
-    if (b?.regionId) return b.regionId;
-
-    return inferRegionIdFromRoomId(room.id);
-  };
-
-  const isRoomAvailable = (room) => {
-    const occ = room.currentOccupancy ?? room.occupancy ?? 0;
-    const cap = room.capacity ?? 1;
-    return occ < cap;
-  };
-
-  const matchesStudentConstraints = (room, student, transfer) => {
-    if (!room || !student) return false;
-
-    const studentGender = student.gender;
-    const allowedGender = room.allowedGender ?? room.gender ?? 'any';
-
-    if (allowedGender !== 'any' && studentGender && allowedGender !== studentGender) {
-      return false;
-    }
-
-    if (student.roomType && room.type && room.type !== student.roomType) return false;
-    if (student.needsAccessibleRoom && room.isAccessible === false) return false;
-
-    if (transfer?.requestedDormType && room.type && room.type !== transfer.requestedDormType) {
-      return false;
-    }
-
-    if (
-      transfer?.requestedDormGroup &&
-      room.dormGroup &&
-      room.dormGroup !== transfer.requestedDormGroup
-    ) {
-      return false;
-    }
-
-    return true;
-  };
-
-  const getTransferType = (tr, student) => {
-    if (tr.scope === 'REGION') return 'region';
-    if (tr.scope === 'ROOM') return 'room';
-
-    if (tr.type === 'region') return 'region';
-    if (tr.type === 'room') return 'room';
-
-    if (tr.requestedDormType || tr.requestedDormGroup || tr.requestedHousingType) {
-      return 'region';
-    }
-
-    if (tr.toRegionId && !sameValue(tr.toRegionId, student?.regionId)) {
-      return 'region';
-    }
-
-    return 'room';
-  };
-
-  const getRoomAssignmentMode = (transfer) => {
-    if (transfer.parentTransferId || transfer.targetRegionId || transfer.toRegionId) {
-      return 'phase2';
-    }
-    return 'internal';
-  };
-
-  const getTransferRegions = (transfer, student) => {
-    const fromRegionId =
-      inferRegionIdFromRoomId(transfer.fromRoomId) ??
-      transfer.fromRegionId ??
-      student?.regionId ??
-      null;
-
-    const toRegionId =
-      transfer.targetRegionId ??
-      transfer.toRegionId ??
-      transfer.requestedRegionId ??
-      null;
-
-    return { fromRegionId, toRegionId };
-  };
-
-  const isTransferRelatedToUserRegion = (transfer) => {
-    if (isCentralAdmin()) return true;
-
-    const student = getStudent(transfer.studentId);
-    const type = getTransferType(transfer, student);
-    const mode = getRoomAssignmentMode(transfer);
-    const { fromRegionId, toRegionId } = getTransferRegions(transfer, student);
-
-    if (type === 'region') {
-      // local staff can only see region transfers if their area is involved
-      return sameValue(fromRegionId, userRegion) || sameValue(toRegionId, userRegion);
-    }
-
-    if (mode === 'internal') {
-      return sameValue(fromRegionId, userRegion);
-    }
-
-    // phase2 room assignment belongs to target region
-    return sameValue(toRegionId, userRegion);
-  };
-
-  const getEligibleTargetRooms = (transfer, student) => {
-    const mode = getRoomAssignmentMode(transfer);
-    const { fromRegionId, toRegionId } = getTransferRegions(transfer, student);
-    const baseRegionId = mode === 'phase2' ? toRegionId : fromRegionId;
-
-    return rooms
-      .filter(isRoomAvailable)
-      .filter((r) => sameValue(getRoomRegionId(r), baseRegionId))
-      .filter((r) => !sameValue(r.id, transfer.fromRoomId))
-      .filter((r) => matchesStudentConstraints(r, student, transfer))
-      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
-  };
-
-  const canSeeTransfer = (tr) => {
-    if (isCentralAdmin()) return true;
-    return isTransferRelatedToUserRegion(tr);
-  };
-
-  const canApproveLocal = (tr) => {
-    if (tr.status !== 'pending') return false;
-
-    const student = getStudent(tr.studentId);
-    const type = getTransferType(tr, student);
-
-    if (isCentralAdmin()) return true;
-
-    if (!isLocalStaff) return false;
-    if (!isTransferRelatedToUserRegion(tr)) return false;
-
-    // non-central users may approve only room / assignment requests in their own area
-    if (type !== 'room') return false;
-
-    const mode = getRoomAssignmentMode(tr);
-    const { fromRegionId, toRegionId } = getTransferRegions(tr, student);
-
-    if (mode === 'internal') {
-      return sameValue(fromRegionId, userRegion);
-    }
-
-    // phase2 belongs to target region
-    return sameValue(toRegionId, userRegion);
-  };
+    fetchTransfers();
+  }, []);
 
   const filteredTransfers = useMemo(() => {
-    return transferRequests.filter((tr) => {
-      const student = getStudent(tr.studentId);
-      const type = getTransferType(tr, student);
+    return transferRequests.filter((transfer) => {
+      const isHistory =
+        transfer.status === 'approved' || transfer.status === 'rejected';
 
-      if (tab === 'region' && type !== 'region') return false;
-      if (tab === 'room' && type !== 'room') return false;
+      if (!showHistory && isHistory) {
+        return false;
+      }
 
-      if (!canSeeTransfer(tr)) return false;
-
-      const isHistory = tr.status === 'approved' || tr.status === 'rejected';
-      if (!showHistory && isHistory) return false;
-
-      if (filter !== 'all' && tr.status !== filter) return false;
+      if (filter !== 'all' && transfer.status !== filter) {
+        return false;
+      }
 
       return true;
     });
-  }, [transferRequests, tab, filter, showHistory, userRegion, isCentralAdmin, isRegionBoss, isEmployee]);
+  }, [transferRequests, filter, showHistory]);
 
   const countByStatus = (status) => {
-    return transferRequests.filter((tr) => {
-      const student = getStudent(tr.studentId);
-      const type = getTransferType(tr, student);
+    return transferRequests.filter((transfer) => {
+      const isHistory =
+        transfer.status === 'approved' || transfer.status === 'rejected';
 
-      if (tab === 'region' && type !== 'region') return false;
-      if (tab === 'room' && type !== 'room') return false;
+      if (!showHistory && isHistory) {
+        return false;
+      }
 
-      if (!canSeeTransfer(tr)) return false;
+      if (status === 'all') {
+        return true;
+      }
 
-      const isHistory = tr.status === 'approved' || tr.status === 'rejected';
-      if (!showHistory && isHistory) return false;
-
-      if (status === 'all') return true;
-      return tr.status === status;
+      return transfer.status === status;
     }).length;
   };
 
-  const approveTransfer = (transfer) => {
-    const student = getStudent(transfer.studentId);
-    const type = getTransferType(transfer, student);
+  const formatDate = (dateValue) => {
+    if (!dateValue) return '-';
 
-    if (!canApproveLocal(transfer)) {
-      alert(t.notAllowed);
-      return;
+    try {
+      return new Date(dateValue).toLocaleString(language === 'he' ? 'he-IL' : 'en-US');
+    } catch {
+      return dateValue;
     }
-
-    if (type === 'region') {
-      const targetRegionId = transfer.toRegionId || transfer.targetRegionId || null;
-
-      const phase2 = targetRegionId
-        ? {
-            id: `transfer-room-${Date.now()}`,
-            studentId: transfer.studentId,
-            fromRoomId: transfer.fromRoomId,
-            toRoomId: null,
-            reason: `${transfer.reason} (${language === 'he' ? 'שלב 2: שיבוץ חדר' : 'Phase 2: room assignment'})`,
-            status: 'pending',
-            requestedBy: transfer.requestedBy,
-            requestedAt: new Date().toISOString(),
-            reviewedBy: 'central-office',
-            reviewedAt: new Date().toISOString(),
-            scope: 'ROOM',
-            targetRegionId,
-            parentTransferId: transfer.id,
-            requestedDormType: transfer.requestedDormType ?? null,
-            requestedDormGroup: transfer.requestedDormGroup ?? null,
-          }
-        : null;
-
-      setTransferRequests((prev) => {
-        const updated = prev.map((p) =>
-          p.id === transfer.id
-            ? {
-                ...p,
-                status: 'approved',
-                reviewedBy: 'central-office',
-                reviewedAt: new Date().toISOString(),
-                scope: 'REGION',
-              }
-            : p
-        );
-        return phase2 ? [...updated, phase2] : updated;
-      });
-
-      return;
-    }
-
-    const selectedTo = selectedToRoomByTransfer[transfer.id];
-    if (!selectedTo) {
-      alert(t.mustChooseRoom);
-      return;
-    }
-
-    setTransferRequests((prev) =>
-      prev.map((p) =>
-        p.id === transfer.id
-          ? {
-              ...p,
-              toRoomId: selectedTo,
-              status: 'approved',
-              reviewedBy: isCentralAdmin() ? 'central-office' : 'region-staff',
-              reviewedAt: new Date().toISOString(),
-              scope: 'ROOM',
-            }
-          : p
-      )
-    );
   };
 
-  const rejectTransfer = (transfer) => {
-    const student = getStudent(transfer.studentId);
-    const type = getTransferType(transfer, student);
-
-    if (!canApproveLocal(transfer)) {
-      alert(t.notAllowed);
-      return;
-    }
-
-    setTransferRequests((prev) =>
-      prev.map((p) =>
-        p.id === transfer.id
-          ? {
-              ...p,
-              status: 'rejected',
-              reviewedBy:
-                type === 'region'
-                  ? 'central-office'
-                  : isCentralAdmin()
-                  ? 'central-office'
-                  : 'region-staff',
-              reviewedAt: new Date().toISOString(),
-              scope: type === 'region' ? 'REGION' : 'ROOM',
-            }
-          : p
-      )
-    );
+  const getStudentInitial = (transfer) => {
+    const name = transfer.student_name || '';
+    return name ? name[0] : '?';
   };
 
-  const getStatusBadge = (status) => {
+  const getStatusBadge = (status, statusDisplay) => {
     const config = {
-      pending: { bg: '#fef3c7', color: '#d97706', icon: Clock, label: t.pending },
-      approved: { bg: '#d1fae5', color: '#059669', icon: Check, label: t.approved },
-      rejected: { bg: '#fee2e2', color: '#dc2626', icon: X, label: t.rejected },
+      pending: {
+        bg: '#fef3c7',
+        color: '#d97706',
+        icon: Clock,
+        label: statusDisplay || t.pending,
+      },
+      approved: {
+        bg: '#d1fae5',
+        color: '#059669',
+        icon: Check,
+        label: statusDisplay || t.approved,
+      },
+      rejected: {
+        bg: '#fee2e2',
+        color: '#dc2626',
+        icon: X,
+        label: statusDisplay || t.rejected,
+      },
     };
-    const c = config[status];
+
+    const current = config[status] || config.pending;
+    const Icon = current.icon;
+
     return (
-      <span className="status-badge" style={{ background: c.bg, color: c.color }}>
-        <c.icon size={14} /> {c.label}
+      <span
+        className="status-badge"
+        style={{ background: current.bg, color: current.color }}
+      >
+        <Icon size={14} />
+        {current.label}
       </span>
     );
   };
 
-  const getRoomModeBadge = (transfer) => {
-    const mode = getRoomAssignmentMode(transfer);
+  if (loading) {
     return (
-      <span className="mode-badge">
-        {mode === 'phase2' ? t.phase2Badge : t.internalBadge}
-      </span>
+      <div className="transfers-page">
+        <div className="page-header">
+          <div>
+            <h1>{t.title}</h1>
+            <p>{t.loading}</p>
+          </div>
+        </div>
+      </div>
     );
-  };
-
-  const getApproveTooltip = (transfer) => {
-    const student = getStudent(transfer.studentId);
-    const type = getTransferType(transfer, student);
-
-    if (isCentralAdmin()) {
-      return type === 'region' ? t.centralOnly : '';
-    }
-
-    return t.regionStaffOnly;
-  };
+  }
 
   return (
     <div className="transfers-page">
@@ -470,39 +215,21 @@ function TransfersPage({ language }) {
         <div>
           <h1>{t.title}</h1>
           <p>{t.subtitle}</p>
-          {isLocalStaff && <small className="scope-note">{t.localScopeOnly}</small>}
         </div>
-        <button className="new-btn" onClick={() => {}}>
-          <Plus size={18} /> {t.newRequest}
+
+        <button className="new-btn" onClick={() => setShowNewRequestModal(true)}>
+          <Plus size={18} />
+          {t.newRequest}
         </button>
       </div>
 
-      <div className="tabs-bar">
-        <div className="tabs">
-          <button
-            className={`tab ${tab === 'room' ? 'active' : ''}`}
-            onClick={() => setTab('room')}
-          >
-            <Home size={16} /> {t.roomTab}
-          </button>
-
-          {isCentralAdmin() && (
-            <button
-              className={`tab ${tab === 'region' ? 'active' : ''}`}
-              onClick={() => setTab('region')}
-            >
-              <MapPin size={16} /> {t.regionTab}
-            </button>
-          )}
+      {error && (
+        <div className="error-box">
+          {error}
         </div>
+      )}
 
-        <button className="history-toggle" onClick={() => setShowHistory((v) => !v)}>
-          <History size={16} />
-          {showHistory ? t.showHistory : t.activeOnly}
-        </button>
-      </div>
-
-      <div className="filters-bar">
+      <div className="top-controls">
         <div className="filter-tabs">
           {['all', 'pending', 'approved', 'rejected'].map((status) => (
             <button
@@ -515,152 +242,136 @@ function TransfersPage({ language }) {
             </button>
           ))}
         </div>
+
+        <button
+          className="history-toggle"
+          onClick={() => setShowHistory((value) => !value)}
+        >
+          {showHistory ? t.activeOnly : t.showHistory}
+        </button>
       </div>
 
-      {isCentralAdmin() && tab === 'region' && <div className="phase-hint">{t.phaseHint}</div>}
+      <div className="summary-row">
+        <span>
+          {filteredTransfers.length} {t.transferRequest}
+          {filteredTransfers.length === 1 ? '' : language === 'he' ? 'ות' : 's'}
+        </span>
+      </div>
 
       <div className="transfers-list">
         {filteredTransfers.length > 0 ? (
-          filteredTransfers.map((transfer) => {
-            const student = getStudent(transfer.studentId);
-            const type = getTransferType(transfer, student);
-            const mode = getRoomAssignmentMode(transfer);
+          filteredTransfers.map((transfer) => (
+            <div key={transfer.id} className={`transfer-card ${transfer.status}`}>
+              <div className="transfer-header">
+                <div className="student-info">
+                  <div className="avatar">{getStudentInitial(transfer)}</div>
 
-            const fromRegionId =
-              inferRegionIdFromRoomId(transfer.fromRoomId) ??
-              transfer.fromRegionId ??
-              student?.regionId ??
-              null;
+                  <div>
+                    <span className="name">
+                      {transfer.student_name || '-'}
+                    </span>
 
-            const toRegionId =
-              transfer.toRegionId ??
-              transfer.targetRegionId ??
-              transfer.requestedRegionId ??
-              null;
-
-            const fromRegion = getRegion(fromRegionId);
-            const toRegion = toRegionId ? getRegion(toRegionId) : null;
-
-            const eligibleRooms = type === 'room' ? getEligibleTargetRooms(transfer, student) : [];
-            const selectedToRoom = selectedToRoomByTransfer[transfer.id] ?? '';
-
-            const canApprove = canApproveLocal(transfer);
-            const approveTooltip = canApprove ? '' : getApproveTooltip(transfer);
-
-            return (
-              <div key={transfer.id} className={`transfer-card ${transfer.status}`}>
-                <div className="transfer-header">
-                  <div className="student-info">
-                    <div className="avatar">{student?.firstName?.[0] ?? '?'}</div>
-                    <div>
-                      <span className="name">
-                        {student?.firstName} {student?.lastName}
-                      </span>
-                      <span className="id">{student?.studentId}</span>
-                    </div>
+                    <span className="id">
+                      {t.studentId}: {transfer.student_id_number || '-'}
+                    </span>
                   </div>
-                  {getStatusBadge(transfer.status)}
                 </div>
 
-                <div className="meta-row">
-                  {type === 'room' ? (
-                    getRoomModeBadge(transfer)
-                  ) : (
-                    <span className="mode-badge">{t.requestTypeRegion}</span>
-                  )}
-                </div>
-
-                <div className="transfer-details">
-                  {type === 'region' ? (
-                    <div className="region-row">
-                      <div className="location">
-                        <span className="label">{t.fromRegion}</span>
-                        <span className="value">{fromRegion?.name ?? fromRegionId ?? '-'}</span>
-                      </div>
-                      <ArrowLeftRight size={20} />
-                      <div className="location">
-                        <span className="label">{t.toRegion}</span>
-                        <span className="value">
-                          {toRegion?.name ?? transfer.toRegionId ?? transfer.targetRegionId ?? '-'}
-                        </span>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="transfer-route">
-                      <div className="location">
-                        <span className="label">{t.from}</span>
-                        <span className="value">{transfer.fromRoomId}</span>
-                      </div>
-                      <ArrowLeftRight size={20} />
-                      <div className="location">
-                        <span className="label">{t.to}</span>
-
-                        {transfer.status === 'pending' && canApprove ? (
-                          eligibleRooms.length > 0 ? (
-                            <select
-                              className="room-select"
-                              value={selectedToRoom}
-                              onChange={(e) =>
-                                setSelectedToRoomByTransfer((prev) => ({
-                                  ...prev,
-                                  [transfer.id]: e.target.value,
-                                }))
-                              }
-                            >
-                              <option value="">{t.chooseRoom}</option>
-                              {eligibleRooms.map((r) => (
-                                <option key={r.id} value={r.id}>
-                                  {r.id}
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
-                            <div className="no-options">{t.noOptions}</div>
-                          )
-                        ) : (
-                          <span className="value">{transfer.toRoomId ?? '-'}</span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="reason">
-                    <span className="label">{t.reason}:</span>
-                    <span className="value">{transfer.reason}</span>
-                  </div>
-
-                  {type === 'room' && mode === 'phase2' && (
-                    <div className="reason" style={{ marginTop: 8 }}>
-                      <span className="label">{t.toRegion}:</span>
-                      <span className="value">{toRegion?.name ?? toRegionId ?? '-'}</span>
-                    </div>
-                  )}
-                </div>
-
-                {transfer.status === 'pending' && (
-                  <div className="transfer-actions">
-                    <button
-                      className="action-btn approve"
-                      onClick={() => approveTransfer(transfer)}
-                      disabled={!canApprove}
-                      title={approveTooltip}
-                    >
-                      <Check size={16} /> {t.approve}
-                    </button>
-
-                    <button
-                      className="action-btn reject"
-                      onClick={() => rejectTransfer(transfer)}
-                      disabled={!canApprove}
-                      title={approveTooltip}
-                    >
-                      <X size={16} /> {t.reject}
-                    </button>
-                  </div>
-                )}
+                {getStatusBadge(transfer.status, transfer.status_display)}
               </div>
-            );
-          })
+
+              <div className="transfer-details">
+                <div className="transfer-route">
+                  <div className="location">
+                    <span className="label">{t.from}</span>
+                    <span className="value">
+                      <Home size={15} />
+                      {transfer.from_room_name || transfer.from_room || t.noRoom}
+                    </span>
+                  </div>
+
+                  <ArrowLeftRight size={22} />
+
+                  <div className="location">
+                    <span className="label">{t.to}</span>
+                    <span className="value">
+                      <Home size={15} />
+                      {transfer.to_room_name || transfer.to_room || t.noRoom}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="reason">
+                  <span className="label">{t.reason}:</span>
+                  <span className="value">{transfer.reason || '-'}</span>
+                </div>
+              </div>
+
+              <div className="meta-grid">
+                <div className="meta-item">
+                  <User size={15} />
+                  <div>
+                    <span className="meta-label">{t.requestedBy}</span>
+                    <span className="meta-value">
+                      {transfer.requested_by_name || '-'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="meta-item">
+                  <User size={15} />
+                  <div>
+                    <span className="meta-label">{t.reviewedBy}</span>
+                    <span className="meta-value">
+                      {transfer.reviewed_by_name || t.notReviewed}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="meta-item">
+                  <Calendar size={15} />
+                  <div>
+                    <span className="meta-label">{t.createdAt}</span>
+                    <span className="meta-value">
+                      {formatDate(transfer.created_at)}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="meta-item">
+                  <Calendar size={15} />
+                  <div>
+                    <span className="meta-label">{t.reviewedAt}</span>
+                    <span className="meta-value">
+                      {formatDate(transfer.reviewed_at)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {transfer.status === 'pending' && (
+                <div className="transfer-actions">
+                  <button
+                    className="action-btn approve"
+                    disabled
+                    title={t.actionsComingSoon}
+                  >
+                    <Check size={16} />
+                    {t.approve}
+                  </button>
+
+                  <button
+                    className="action-btn reject"
+                    disabled
+                    title={t.actionsComingSoon}
+                  >
+                    <X size={16} />
+                    {t.reject}
+                  </button>
+                </div>
+              )}
+            </div>
+          ))
         ) : (
           <div className="no-transfers">
             <ArrowLeftRight size={48} />
@@ -669,70 +380,121 @@ function TransfersPage({ language }) {
         )}
       </div>
 
+      {showNewRequestModal && (
+        <div className="modal-overlay" onClick={() => setShowNewRequestModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t.newRequestTitle}</h3>
+              <button onClick={() => setShowNewRequestModal(false)}>
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <p>{t.newRequestComingSoon}</p>
+
+              <button
+                className="modal-close-btn"
+                onClick={() => setShowNewRequestModal(false)}
+              >
+                {t.close}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <style>{`
-        .transfers-page { padding: 24px; }
-        .page-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 18px; }
-        .page-header h1 { font-size: 24px; font-weight: 800; margin-bottom: 4px; letter-spacing: -0.2px; }
-        .page-header p { color: #64748b; }
-        .scope-note { color: #64748b; font-weight: 800; }
+        .transfers-page {
+          padding: 24px;
+        }
+
+        .page-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          margin-bottom: 18px;
+        }
+
+        .page-header h1 {
+          font-size: 24px;
+          font-weight: 800;
+          margin-bottom: 4px;
+          letter-spacing: -0.2px;
+        }
+
+        .page-header p {
+          color: #64748b;
+        }
 
         .new-btn {
-          display: flex; align-items: center; gap: 8px;
+          display: flex;
+          align-items: center;
+          gap: 8px;
           padding: 10px 20px;
           background: linear-gradient(135deg, #3d9fe0, #2563eb);
-          color: white; border: none; border-radius: 10px;
-          font-size: 14px; font-weight: 700; font-family: inherit;
+          color: white;
+          border: none;
+          border-radius: 10px;
+          font-size: 14px;
+          font-weight: 700;
+          font-family: inherit;
           cursor: pointer;
           box-shadow: 0 6px 18px rgba(37,99,235,0.18);
         }
 
-        .tabs-bar{
-          display:flex; justify-content:space-between; align-items:center;
+        .error-box {
+          background: #fee2e2;
+          color: #b91c1c;
+          border: 1px solid #fecaca;
+          border-radius: 12px;
+          padding: 12px 16px;
+          margin-bottom: 16px;
+          font-weight: 700;
+        }
+
+        .top-controls {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 14px;
           margin-bottom: 14px;
+          flex-wrap: wrap;
         }
-        .tabs{
-          display:flex; gap:10px;
-          background:white; padding:6px; border-radius:14px;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-        }
-        .tab{
-          display:flex; align-items:center; gap:8px;
-          padding:10px 14px;
-          border:none; background:none;
-          border-radius:12px;
-          font-weight:800; font-size:13px;
-          cursor:pointer; color:#0f172a;
-        }
-        .tab:hover{ background:#f1f5f9; }
-        .tab.active{ background:#2563eb; color:white; }
 
-        .history-toggle{
-          display:flex; align-items:center; gap:8px;
-          padding:10px 12px;
-          border-radius:12px;
-          border:1px solid rgba(15,23,42,0.10);
-          background:white;
-          font-weight:800; font-size:13px;
-          cursor:pointer;
-          color:#0f172a;
-        }
-        .history-toggle:hover{ background:#f8fafc; }
-
-        .filters-bar { margin-bottom: 14px; }
         .filter-tabs {
-          display: flex; gap: 8px; background: white; padding: 6px; border-radius: 12px;
+          display: flex;
+          gap: 8px;
+          background: white;
+          padding: 6px;
+          border-radius: 12px;
           box-shadow: 0 1px 3px rgba(0,0,0,0.08);
         }
+
         .filter-tab {
-          display: flex; align-items: center; gap: 8px;
+          display: flex;
+          align-items: center;
+          gap: 8px;
           padding: 10px 16px;
-          background: none; border: none; border-radius: 10px;
-          font-size: 14px; font-family: inherit;
-          cursor: pointer; transition: all 0.2s;
-          color: #0f172a; font-weight: 700;
+          background: none;
+          border: none;
+          border-radius: 10px;
+          font-size: 14px;
+          font-family: inherit;
+          cursor: pointer;
+          transition: all 0.2s;
+          color: #0f172a;
+          font-weight: 700;
         }
-        .filter-tab:hover { background: #f1f5f9; }
-        .filter-tab.active { background: #2563eb; color: white; }
+
+        .filter-tab:hover {
+          background: #f1f5f9;
+        }
+
+        .filter-tab.active {
+          background: #2563eb;
+          color: white;
+        }
 
         .filter-tab .count {
           background: rgba(15, 23, 42, 0.10);
@@ -741,66 +503,110 @@ function TransfersPage({ language }) {
           font-size: 12px;
           font-weight: 800;
         }
-        .filter-tab.active .count { background: rgba(255,255,255,0.22); }
 
-        .phase-hint{
-          margin: 10px 0 16px 0;
-          padding: 12px 14px;
-          background: #f8fafc;
-          border: 1px solid rgba(15,23,42,0.06);
+        .filter-tab.active .count {
+          background: rgba(255,255,255,0.22);
+        }
+
+        .history-toggle {
+          padding: 10px 12px;
           border-radius: 12px;
-          color:#475569;
+          border: 1px solid rgba(15,23,42,0.10);
+          background: white;
+          font-weight: 800;
+          font-size: 13px;
+          cursor: pointer;
+          color: #0f172a;
+          font-family: inherit;
+        }
+
+        .history-toggle:hover {
+          background: #f8fafc;
+        }
+
+        .summary-row {
+          margin-bottom: 14px;
+          color: #64748b;
           font-weight: 700;
           font-size: 13px;
         }
 
-        .transfers-list { display: flex; flex-direction: column; gap: 16px; }
+        .transfers-list {
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+        }
 
         .transfer-card {
-          background: white; border-radius: 16px; padding: 20px;
+          background: white;
+          border-radius: 16px;
+          padding: 20px;
           box-shadow: 0 1px 3px rgba(0,0,0,0.08);
           border-right: 4px solid transparent;
         }
-        [dir="ltr"] .transfer-card { border-right: none; border-left: 4px solid transparent; }
-        .transfer-card.pending { border-color: #f59e0b; }
-        .transfer-card.approved { border-color: #10b981; }
-        .transfer-card.rejected { border-color: #ef4444; }
+
+        [dir="ltr"] .transfer-card {
+          border-right: none;
+          border-left: 4px solid transparent;
+        }
+
+        .transfer-card.pending {
+          border-color: #f59e0b;
+        }
+
+        .transfer-card.approved {
+          border-color: #10b981;
+        }
+
+        .transfer-card.rejected {
+          border-color: #ef4444;
+        }
 
         .transfer-header {
-          display: flex; justify-content: space-between; align-items: center;
-          margin-bottom: 12px;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 14px;
         }
-        .student-info { display: flex; align-items: center; gap: 12px; }
+
+        .student-info {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+        }
 
         .avatar {
-          width: 40px; height: 40px;
+          width: 40px;
+          height: 40px;
           background: linear-gradient(135deg, #3d9fe0, #2563eb);
           border-radius: 12px;
-          display: flex; align-items: center; justify-content: center;
-          color: white; font-weight: 900;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: white;
+          font-weight: 900;
         }
-        .student-info .name { display:block; font-weight: 900; }
-        .student-info .id { font-size: 12px; color: #64748b; font-family: monospace; }
+
+        .student-info .name {
+          display: block;
+          font-weight: 900;
+        }
+
+        .student-info .id {
+          font-size: 12px;
+          color: #64748b;
+          font-family: monospace;
+        }
 
         .status-badge {
-          display: flex; align-items: center; gap: 6px;
+          display: flex;
+          align-items: center;
+          gap: 6px;
           padding: 6px 12px;
           border-radius: 999px;
           font-size: 13px;
           font-weight: 900;
           white-space: nowrap;
-        }
-
-        .meta-row { margin: -2px 0 10px 0; }
-        .mode-badge{
-          display:inline-block;
-          padding: 6px 10px;
-          border-radius: 999px;
-          background: #f1f5f9;
-          color:#0f172a;
-          font-size: 12px;
-          font-weight: 900;
-          border: 1px solid rgba(15,23,42,0.06);
         }
 
         .transfer-details {
@@ -811,76 +617,231 @@ function TransfersPage({ language }) {
           margin-bottom: 16px;
         }
 
-        .transfer-route, .region-row {
-          display:flex; align-items:center; justify-content:center;
+        .transfer-route {
+          display: flex;
+          align-items: center;
+          justify-content: center;
           gap: 18px;
           margin-bottom: 12px;
         }
 
-        .location { text-align:center; min-width: 160px; }
-        .location .label { display:block; font-size: 12px; color:#64748b; margin-bottom: 4px; font-weight: 900; }
-        .location .value { font-weight: 900; font-size: 13px; color:#0f172a; }
+        .location {
+          text-align: center;
+          min-width: 160px;
+        }
 
-        .room-select{
-          width: 240px;
-          padding: 10px 12px;
-          border-radius: 10px;
-          border: 1px solid rgba(15,23,42,0.12);
-          background: white;
+        .location .label {
+          display: block;
+          font-size: 12px;
+          color: #64748b;
+          margin-bottom: 4px;
+          font-weight: 900;
+        }
+
+        .location .value {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          font-weight: 900;
+          font-size: 13px;
+          color: #0f172a;
+        }
+
+        .reason {
+          text-align: center;
+        }
+
+        .reason .label {
+          color: #64748b;
           font-size: 13px;
           font-weight: 900;
-          outline: none;
-        }
-        .room-select:focus{
-          border-color: rgba(37,99,235,0.55);
-          box-shadow: 0 0 0 4px rgba(37,99,235,0.12);
+          margin-inline-end: 4px;
         }
 
-        .no-options{
-          padding: 10px 12px;
-          border-radius: 10px;
-          border: 1px dashed rgba(239,68,68,0.45);
-          background: rgba(239,68,68,0.06);
-          color: #b91c1c;
-          font-size: 12.5px;
-          font-weight: 900;
+        .reason .value {
+          font-size: 13px;
+          font-weight: 800;
+          color: #0f172a;
         }
 
-        .reason { text-align:center; }
-        .reason .label { color:#64748b; font-size:13px; font-weight: 900; }
-        .reason .value { font-size:13px; font-weight: 800; color:#0f172a; }
+        .meta-grid {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 10px;
+          margin-bottom: 16px;
+        }
 
-        .transfer-actions { display:flex; gap: 12px; }
+        .meta-item {
+          display: flex;
+          gap: 8px;
+          align-items: flex-start;
+          background: #f8fafc;
+          border: 1px solid rgba(15,23,42,0.06);
+          padding: 10px;
+          border-radius: 12px;
+          color: #334155;
+        }
+
+        .meta-item svg {
+          margin-top: 2px;
+          color: #64748b;
+          flex-shrink: 0;
+        }
+
+        .meta-label {
+          display: block;
+          font-size: 11px;
+          color: #64748b;
+          font-weight: 800;
+          margin-bottom: 2px;
+        }
+
+        .meta-value {
+          display: block;
+          font-size: 12px;
+          font-weight: 800;
+          color: #0f172a;
+          word-break: break-word;
+        }
+
+        .transfer-actions {
+          display: flex;
+          gap: 12px;
+        }
 
         .action-btn {
-          flex:1;
-          display:flex; align-items:center; justify-content:center; gap: 8px;
+          flex: 1;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
           padding: 10px;
-          border:none; border-radius: 12px;
-          font-size: 14px; font-weight: 900;
+          border: none;
+          border-radius: 12px;
+          font-size: 14px;
+          font-weight: 900;
           font-family: inherit;
           cursor: pointer;
           transition: all 0.2s;
         }
-        .action-btn:disabled{
-          opacity:0.45;
-          cursor:not-allowed;
+
+        .action-btn:disabled {
+          opacity: 0.45;
+          cursor: not-allowed;
         }
 
-        .action-btn.approve { background:#d1fae5; color:#059669; }
-        .action-btn.approve:hover:not(:disabled) { background:#059669; color:white; }
+        .action-btn.approve {
+          background: #d1fae5;
+          color: #059669;
+        }
 
-        .action-btn.reject { background:#fee2e2; color:#dc2626; }
-        .action-btn.reject:hover:not(:disabled) { background:#dc2626; color:white; }
+        .action-btn.reject {
+          background: #fee2e2;
+          color: #dc2626;
+        }
 
         .no-transfers {
-          display:flex; flex-direction:column; align-items:center; justify-content:center;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
           padding: 60px;
-          color:#94a3b8;
+          color: #94a3b8;
           gap: 16px;
-          background:white;
-          border-radius:16px;
+          background: white;
+          border-radius: 16px;
           box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        }
+
+        .modal-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(0,0,0,0.45);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 1000;
+        }
+
+        .modal-content {
+          background: white;
+          border-radius: 16px;
+          width: 90%;
+          max-width: 480px;
+          box-shadow: 0 20px 40px rgba(0,0,0,0.18);
+          overflow: hidden;
+        }
+
+        .modal-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          padding: 16px 20px;
+          border-bottom: 1px solid #e5e7eb;
+        }
+
+        .modal-header h3 {
+          font-size: 18px;
+          font-weight: 900;
+        }
+
+        .modal-header button {
+          background: none;
+          border: none;
+          color: #64748b;
+          cursor: pointer;
+        }
+
+        .modal-body {
+          padding: 20px;
+          color: #334155;
+          font-weight: 700;
+        }
+
+        .modal-close-btn {
+          margin-top: 18px;
+          width: 100%;
+          padding: 10px 14px;
+          border: none;
+          border-radius: 12px;
+          background: #2563eb;
+          color: white;
+          font-weight: 900;
+          font-family: inherit;
+          cursor: pointer;
+        }
+
+        @media (max-width: 900px) {
+          .meta-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+
+          .transfer-route {
+            flex-direction: column;
+          }
+        }
+
+        @media (max-width: 600px) {
+          .page-header {
+            flex-direction: column;
+            gap: 12px;
+          }
+
+          .filter-tabs {
+            width: 100%;
+            overflow-x: auto;
+          }
+
+          .meta-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .transfer-header {
+            align-items: flex-start;
+            gap: 12px;
+            flex-direction: column;
+          }
         }
       `}</style>
     </div>

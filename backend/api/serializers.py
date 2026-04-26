@@ -316,6 +316,50 @@ class BedSerializer(serializers.ModelSerializer):
 
 
 # ===========================================
+# STUDENT LIST SERIALIZER
+# ===========================================
+
+class StudentListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for students list page"""
+
+    full_name = serializers.CharField(read_only=True)
+    gender_display = serializers.CharField(source='get_gender_display', read_only=True)
+    requested_religion_display = serializers.CharField(source='get_requested_religion_display', read_only=True)
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+
+    accepted_dorm_type_name = serializers.CharField(source='accepted_dorm_type.name', read_only=True)
+    accepted_dorm_type_code = serializers.IntegerField(source='accepted_dorm_type.code', read_only=True)
+
+    is_assigned = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = Student
+        fields = [
+            'id',
+            'student_id',
+            'business_partner_id',
+            'first_name',
+            'last_name',
+            'full_name',
+            'email',
+            'phone',
+            'gender',
+            'gender_display',
+            'requested_religion',
+            'requested_religion_display',
+            'category',
+            'category_display',
+            'housing_type',
+            'accepted_dorm_type',
+            'accepted_dorm_type_name',
+            'accepted_dorm_type_code',
+            'is_priority',
+            'priority_reason',
+            'assigned_room',
+            'is_assigned',
+        ]
+
+# ===========================================
 # STUDENT SERIALIZER
 # ===========================================
 class StudentSerializer(serializers.ModelSerializer):
