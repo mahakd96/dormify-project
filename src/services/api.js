@@ -281,6 +281,7 @@ export const studentsAPI = {
   },
 };
 
+<<<<<<< HEAD
 
 export const analysisAPI = {
   getData: async () => {
@@ -292,6 +293,7 @@ export const analysisAPI = {
     }
   },
 };
+
 
 export const transfersAPI = {
   getAll: async () => {
@@ -312,12 +314,17 @@ export const transfersAPI = {
     }
   },
 
+
   reject: async (id, reason = "") => {
     try {
       const { data } = await api.put(`/api/transfers/${id}/reject/`, {
         reason,
       });
 
+
+  reject: async (id) => {
+    try {
+      const { data } = await api.put(`/api/transfers/${id}/reject/`);
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to reject transfer"));
@@ -427,6 +434,8 @@ export const whatIfAPI = {
   },
 
 };
+
+
 export const debugAuthAPI = {
   getAccessToken,
   getRefreshToken,
