@@ -15,6 +15,7 @@ from django.utils import timezone
 from django.db import transaction
 from django.db.models import Q
 from django.core.exceptions import ValidationError
+from django.db import close_old_connections, connection
 
 from .models import (
     User, Region, Office, StaffProfile, DormType, Building, Apartment, Room, Bed,
@@ -593,6 +594,10 @@ class TransferViewSet(viewsets.ModelViewSet):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def run_allocation(request):
+    connection.close()
+    close_old_connections()
+    connection.ensure_connection()
+
     print(">>> ENTERED run_allocation", request.data, flush=True)
 
     if not (request.user.is_boss or request.user.is_central_admin):
@@ -662,13 +667,17 @@ def run_allocation(request):
             'apartment__building__dorm_type'
         ).prefetch_related('beds')
 
+        # Count before running the solver, so we do not need another DB query after a long solver run.
+        students_count = students.count()
+        rooms_count = rooms.count()
+
         allocation_run = AllocationRun.objects.create(
             region=region,
             run_by=request.user,
             status=AllocationRun.Status.RUNNING
         )
 
-        if not students.exists():
+        if students_count == 0:
             allocation_run.status = AllocationRun.Status.COMPLETED
             allocation_run.students_processed = 0
             allocation_run.successful_assignments = 0
@@ -676,6 +685,10 @@ def run_allocation(request):
             allocation_run.conflicts = 0
             allocation_run.completed_at = timezone.now()
             allocation_run.error_message = ''
+
+            connection.close()
+            close_old_connections()
+            connection.ensure_connection()
             allocation_run.save()
 
             return Response({
@@ -698,10 +711,14 @@ def run_allocation(request):
                 }
             }, status=status.HTTP_200_OK)
 
-        if not rooms.exists():
+        if rooms_count == 0:
             allocation_run.status = AllocationRun.Status.FAILED
             allocation_run.error_message = 'לא נמצאו חדרים פעילים באזור זה'
             allocation_run.completed_at = timezone.now()
+
+            connection.close()
+            close_old_connections()
+            connection.ensure_connection()
             allocation_run.save()
 
             return Response({
@@ -762,17 +779,27 @@ def run_allocation(request):
             )
 
         allocation_run.status = AllocationRun.Status.COMPLETED
-        allocation_run.students_processed = result.get('students_processed', students.count())
+        allocation_run.students_processed = result.get('students_processed', students_count)
         allocation_run.successful_assignments = result.get('successful_assignments', 0)
         allocation_run.roommate_matches = roommate_matches
         allocation_run.conflicts = result.get('conflicts', 0)
         allocation_run.completed_at = timezone.now()
+
+        # Important after a long solver run with Neon:
+        # force Django to drop the stale SSL connection and open a fresh one.
+        connection.close()
+        close_old_connections()
+        connection.ensure_connection()
         allocation_run.save()
 
         # ============================================================
         # Build assignment table rows from DB for the frontend results
         # ============================================================
         assignment_rows = []
+
+        connection.close()
+        close_old_connections()
+        connection.ensure_connection()
 
         active_assignments = BedAssignment.objects.filter(
             status=BedAssignment.Status.ACTIVE,
@@ -840,7 +867,7 @@ def run_allocation(request):
             'success': True,
             'message': 'השיבוץ הושלם בהצלחה',
             'result': {
-                'students_processed': result.get('students_processed', students.count()),
+                'students_processed': result.get('students_processed', students_count),
                 'successful_assignments': result.get('successful_assignments', 0),
                 'roommate_matches': roommate_matches,
                 'mutual_roommate_matches': result.get('mutual_roommate_matches', 0),
@@ -864,6 +891,10 @@ def run_allocation(request):
                 allocation_run.status = AllocationRun.Status.FAILED
                 allocation_run.error_message = str(e)
                 allocation_run.completed_at = timezone.now()
+
+                connection.close()
+                close_old_connections()
+                connection.ensure_connection()
                 allocation_run.save()
             except Exception:
                 traceback.print_exc()
@@ -874,8 +905,6 @@ def run_allocation(request):
             'error_type': e.__class__.__name__,
             'traceback': traceback.format_exc(),
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def allocation_history(request):
@@ -1140,7 +1169,6 @@ EXCEL_DORM_TYPE_TO_REGION = {
     'ברושים': 'broshim',
     'מזרח': 'mizrah',
     'מגדל המזרח': 'mizrah',
-    'הטכניון': 'technion',
 }
 
 ALLOWED_DECISION_STATUSES = {
@@ -1361,7 +1389,6 @@ def get_decision_dorm_name(row):
             'גריעה/תוספת-תוכן ההחלטה-תיאור',
             'גריעה/תוספת-תוכן החלטה-תיאור',
             'גריעה/תוספת-תוכן החלטה-סוג',
-            'החלטה-תאור קוד חברה',
             default=''
         )
     )
@@ -1400,71 +1427,30 @@ def resolve_region_from_dorm_name(dorm_name):
 
 
 def get_or_create_dorm_type_from_excel(dorm_code=None, dorm_name=None):
-    dorm_code = safe_str(dorm_code)
+    """
+    Resolve DormType for imported students.
+
+    Important:
+    We intentionally ignore dorm_code from Excel because it may represent
+    a company/organization code such as 16 = הטכניון, not a real dorm type.
+
+    Student import must not create new DormType rows.
+    DormTypes should already exist from import_buildings.
+    """
     dorm_name = safe_str(dorm_name)
 
-    code_int = None
-    if dorm_code:
-        try:
-            code_int = int(float(dorm_code))
-        except Exception:
-            code_int = None
-
-    # Prefer the human-readable dorm name over numeric codes.
-    # Numeric codes such as 2/6/12/15 can be ambiguous across existing DormType rows,
-    # while the Excel name column may explicitly say קנדה.
-    if dorm_name:
-        dorm_type = DormType.objects.filter(name=dorm_name).select_related('region').first()
-        if dorm_type:
-            return dorm_type
-
-        dorm_type = DormType.objects.filter(name__iexact=dorm_name).select_related('region').first()
-        if dorm_type:
-            return dorm_type
-
-    # Only fall back to code lookup when no name match exists.
-    if code_int is not None:
-        dorm_type = DormType.objects.filter(code=code_int).select_related('region').first()
-        if dorm_type:
-            if not dorm_type.region:
-                region = resolve_region_from_dorm_name(dorm_name)
-                if region:
-                    dorm_type.region = region
-                    dorm_type.save(update_fields=['region'])
-            return dorm_type
+    if not dorm_name:
+        return None
 
     region = resolve_region_from_dorm_name(dorm_name)
 
     if not region:
         return None
 
-    create_kwargs = {
-        'name': dorm_name or f'Dorm {code_int}',
-        'region': region,
-    }
-
-    if code_int is not None and not DormType.objects.filter(code=code_int).exists():
-        create_kwargs['code'] = code_int
-
-    dorm_type, _ = DormType.objects.get_or_create(
-        name=create_kwargs['name'],
-        defaults=create_kwargs
-    )
-
-    changed = False
-
-    if dorm_type.region_id != region.id:
-        dorm_type.region = region
-        changed = True
-
-    if code_int is not None and dorm_type.code is None:
-        dorm_type.code = code_int
-        changed = True
-
-    if changed:
-        dorm_type.save()
-
-    return dorm_type
+    return DormType.objects.filter(
+        region=region,
+        code__in=[1, 2, 3, 4, 5, 6]
+    ).select_related('region').first()
 
 
 def build_student_payload_from_row(row, existing_student=None):
