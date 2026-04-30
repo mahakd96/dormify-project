@@ -37,6 +37,7 @@ urlpatterns = [
     path('allocation/run/', views.run_allocation, name='run-allocation'),
     path('allocation/history/', views.allocation_history, name='allocation-history'),
     path('allocation/summary/', views.allocation_summary, name='allocation-summary'),
+    path('analysis/', views.analysis_data, name='analysis'),
 
     # Include router URLs
     path('', include(router.urls)),

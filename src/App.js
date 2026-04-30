@@ -19,6 +19,10 @@ import ReportsPage from './pages/ReportsPage';
 import UsersPage from './pages/UsersPage';
 import SettingsPage from './pages/SettingsPage';
 import MapPage from './pages/MapPage';
+// At the top imports:
+import AnalysisPage from './pages/AnalysisPage';
+
+// Inside Routes:
 
 // Main Layout with Sidebar + Header
 function MainLayout({ language, onLanguageToggle, sidebarCollapsed, onSidebarToggle }) {
@@ -100,6 +104,7 @@ function AppContent() {
         <Route path="/reports" element={<ReportsPage language={language} />} />
         <Route path="/users" element={<UsersPage language={language} />} />
         <Route path="/settings" element={<SettingsPage language={language} onLanguageToggle={toggleLanguage} />} />
+        <Route path="/analysis" element={<AnalysisPage language={language} />} />
       </Route>
 
       {/* Fallback */}

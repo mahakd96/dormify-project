@@ -1190,3 +1190,130 @@ def allocation_summary(request):
         'students_by_category': students_by_category,
         'region': RegionSerializer(user.region).data if user.region else None,
     })
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def analysis_data(request):
+    from django.db.models import Count
+
+    user = request.user
+
+    if user.is_central_admin:
+        students = Student.objects.all()
+        buildings = Building.objects.filter(is_active=True)
+        rooms = Room.objects.filter(is_active=True)
+        transfers = Transfer.objects.all()
+    else:
+        students = Student.objects.filter(accepted_dorm_type__region=user.region)
+        buildings = Building.objects.filter(dorm_type__region=user.region, is_active=True)
+        rooms = Room.objects.filter(apartment__building__dorm_type__region=user.region, is_active=True)
+        transfers = Transfer.objects.filter(
+            Q(from_room__apartment__building__dorm_type__region=user.region) |
+            Q(to_room__apartment__building__dorm_type__region=user.region)
+        )
+
+    # Students by region (central admin only)
+    students_by_region = []
+    if user.is_central_admin:
+        students_by_region = list(
+            Student.objects.filter(accepted_dorm_type__isnull=False)
+            .values('accepted_dorm_type__region__name')
+            .annotate(count=Count('id'))
+            .order_by('-count')
+        )
+
+    # Students by gender
+    students_by_gender = list(
+        students.values('gender').annotate(count=Count('id'))
+    )
+
+    # Students by religion (requested_religion field)
+    students_by_religion = list(
+        students.values('requested_religion').annotate(count=Count('id'))
+    )
+
+    # Students by religious preference
+    students_by_religious = list(
+        students.values('religious').annotate(count=Count('id'))
+    )
+
+    # Students by category
+    students_by_category = list(
+        students.values('category').annotate(count=Count('id'))
+    )
+
+    # Students by housing_type
+    students_by_housing = list(
+        students.exclude(housing_type='')
+        .values('housing_type').annotate(count=Count('id'))
+    )
+
+    # Occupancy per building (top 20)
+    occupancy_data = []
+    for building in buildings[:20]:
+        total_beds = Bed.objects.filter(room__apartment__building=building).count()
+        assigned = BedAssignment.objects.filter(
+            bed__room__apartment__building=building,
+            status=BedAssignment.Status.ACTIVE
+        ).count()
+        occupancy_data.append({
+            'building': f'בניין {building.number}',
+            'region': building.dorm_type.region.name if building.dorm_type and building.dorm_type.region else '',
+            'total_beds': total_beds,
+            'assigned': assigned,
+            'occupancy_rate': round((assigned / total_beds * 100) if total_beds > 0 else 0),
+        })
+
+    # Transfers by status
+    transfers_by_status = list(
+        transfers.values('status').annotate(count=Count('id'))
+    )
+
+    # Transfers by movement_type (from MovementRequest)
+    transfers_by_type = list(
+        transfers.filter(movement_request__isnull=False)
+        .values('movement_request__movement_type')
+        .annotate(count=Count('id'))
+    )
+
+    # Priority students by reason
+    priority_by_reason = list(
+        students.filter(is_priority=True)
+        .exclude(priority_reason='')
+        .values('priority_reason').annotate(count=Count('id'))
+        .order_by('-count')[:10]
+    )
+
+    # Total beds & assigned beds
+    total_beds = Bed.objects.filter(room__in=rooms).count()
+    assigned_beds = BedAssignment.objects.filter(
+        bed__room__in=rooms,
+        status=BedAssignment.Status.ACTIVE
+    ).count()
+
+    return Response({
+        'students_by_region': students_by_region,
+        'students_by_gender': students_by_gender,
+        'students_by_religion': students_by_religion,
+        'students_by_religious': students_by_religious,
+        'students_by_category': students_by_category,
+        'students_by_housing': students_by_housing,
+        'occupancy_data': occupancy_data,
+        'transfers_by_status': transfers_by_status,
+        'transfers_by_type': transfers_by_type,
+        'priority_by_reason': priority_by_reason,
+        'summary': {
+            'total_students': students.count(),
+            'assigned_students': students.filter(assigned_room__isnull=False).count(),
+            'unassigned_students': students.filter(assigned_room__isnull=True).count(),
+            'priority_students': students.filter(is_priority=True).count(),
+            'total_buildings': buildings.count(),
+            'total_rooms': rooms.count(),
+            'total_beds': total_beds,
+            'assigned_beds': assigned_beds,
+            'available_beds': total_beds - assigned_beds,
+            'total_transfers': transfers.count(),
+            'pending_transfers': transfers.filter(status=Transfer.Status.PENDING).count(),
+            'approved_transfers': transfers.filter(status=Transfer.Status.APPROVED).count(),
+            'rejected_transfers': transfers.filter(status=Transfer.Status.REJECTED).count(),
+        }
+    })

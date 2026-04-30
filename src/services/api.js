@@ -118,3 +118,10 @@ export const uploadAPI = {
     return data;
   },
 };
+
+export const analysisAPI = {
+  getData: async () => {
+    const { data } = await api.get("/api/analysis/");
+    return data;
+  },
+};
