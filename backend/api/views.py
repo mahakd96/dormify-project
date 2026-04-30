@@ -1,5 +1,7 @@
 from decimal import Decimal, InvalidOperation
 import re
+import traceback
+
 import pandas as pd
 
 from rest_framework import viewsets, status, permissions
@@ -7,11 +9,13 @@ from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework.exceptions import ValidationError as DRFValidationError
 
 from django.utils import timezone
 from django.db import transaction
 from django.db.models import Q
 from django.core.exceptions import ValidationError
+from django.db import close_old_connections, connection
 
 from .models import (
     User, Region, Office, StaffProfile, DormType, Building, Apartment, Room, Bed,
@@ -21,10 +25,14 @@ from .models import (
 from .serializers import (
     UserSerializer, LoginSerializer, RegisterSerializer,
     RegionSerializer, BuildingSerializer, ApartmentSerializer,
-    RoomSerializer, StudentSerializer, TransferSerializer,
+    RoomSerializer, StudentSerializer,StudentListSerializer, TransferSerializer,
     AllocationRunSerializer, ImportBatchSerializer, RegionInboxSerializer
 )
 
+
+# =========================
+# Auth Views
+# =========================
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -108,6 +116,10 @@ def change_password_view(request):
     })
 
 
+# =========================
+# Permissions / Helpers
+# =========================
+
 class IsCentralAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
         return request.user.is_authenticated and request.user.is_central_admin
@@ -124,6 +136,32 @@ def filter_by_region(queryset, user, region_field='region'):
     if not user.region:
         return queryset.none()
     return queryset.filter(**{region_field: user.region})
+
+
+def _get_model_field_names(model_cls):
+    return {f.name for f in model_cls._meta.fields}
+
+
+def _resolve_region(region_value):
+    if region_value in (None, '', 'null', 'undefined'):
+        return None
+
+    try:
+        return Region.objects.get(pk=region_value)
+    except (Region.DoesNotExist, ValueError, TypeError):
+        pass
+
+    try:
+        return Region.objects.get(name=region_value)
+    except Region.DoesNotExist:
+        pass
+
+    try:
+        return Region.objects.get(name__iexact=str(region_value).strip())
+    except Region.DoesNotExist:
+        pass
+
+    return None
 
 
 def ensure_room_beds(room: Room):
@@ -201,7 +239,11 @@ def assign_student_to_room(
         assignment.save()
 
         student.assigned_room = room
-        student.save(update_fields=['assigned_room', 'updated_at'])
+        student_fields = _get_model_field_names(Student)
+        update_fields = ['assigned_room']
+        if 'updated_at' in student_fields:
+            update_fields.append('updated_at')
+        student.save(update_fields=update_fields)
 
     return assignment
 
@@ -253,6 +295,10 @@ def user_can_approve_transfer(user: User, transfer: Transfer):
 
     return same_from_region and same_to_region
 
+
+# =========================
+# ViewSets
+# =========================
 
 class RegionViewSet(viewsets.ModelViewSet):
     serializer_class = RegionSerializer
@@ -315,8 +361,17 @@ class StudentViewSet(viewsets.ModelViewSet):
     serializer_class = StudentSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return StudentListSerializer
+        return StudentSerializer
+
     def get_queryset(self):
-        queryset = Student.objects.all()
+        queryset = Student.objects.select_related(
+            'accepted_dorm_type',
+            'accepted_dorm_type__region',
+            'assigned_room',
+        ).all()
 
         if not self.request.user.is_central_admin:
             if not self.request.user.region:
@@ -345,6 +400,10 @@ class StudentViewSet(viewsets.ModelViewSet):
         religious = self.request.query_params.get('religious')
         if religious and religious != 'all':
             queryset = queryset.filter(religious=religious)
+
+        placement_sector = self.request.query_params.get('placement_sector')
+        if placement_sector and placement_sector != 'all':
+            queryset = queryset.filter(placement_sector=placement_sector)
 
         status_filter = self.request.query_params.get('status')
         if status_filter == 'assigned':
@@ -389,7 +448,7 @@ class TransferViewSet(viewsets.ModelViewSet):
         to_room = serializer.validated_data['to_room']
 
         if not from_room:
-            raise permissions.ValidationError('הסטודנט אינו משויך כרגע לחדר מקור')
+            raise DRFValidationError('הסטודנט אינו משויך כרגע לחדר מקור')
 
         validate_apartment_assignment(student, to_room)
         movement_type = infer_movement_type(from_room, to_room)
@@ -403,7 +462,7 @@ class TransferViewSet(viewsets.ModelViewSet):
         current_assignment = student.current_assignment
         target_bed = get_free_bed(to_room)
         if not target_bed:
-            raise permissions.ValidationError('אין מיטה פנויה בחדר היעד')
+            raise DRFValidationError('אין מיטה פנויה בחדר היעד')
 
         movement_request = MovementRequest(
             student=student,
@@ -418,7 +477,11 @@ class TransferViewSet(viewsets.ModelViewSet):
         movement_request.save()
 
         transfer.movement_request = movement_request
-        transfer.save(update_fields=['movement_request', 'updated_at'])
+        transfer_fields = _get_model_field_names(Transfer)
+        update_fields = ['movement_request']
+        if 'updated_at' in transfer_fields:
+            update_fields.append('updated_at')
+        transfer.save(update_fields=update_fields)
 
     @action(detail=True, methods=['put'])
     def approve(self, request, pk=None):
@@ -525,67 +588,323 @@ class TransferViewSet(viewsets.ModelViewSet):
         })
 
 
+# =========================
+# Allocation
+# =========================
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def run_allocation(request):
-    if not request.user.is_boss:
+    connection.close()
+    close_old_connections()
+    connection.ensure_connection()
+
+    print(">>> ENTERED run_allocation", request.data, flush=True)
+
+    if not (request.user.is_boss or request.user.is_central_admin):
         return Response({
-            'error': 'רק מנהל יכול להריץ שיבוץ'
+            'error': 'רק מנהל אזור או מנהל מרכזי יכולים להריץ שיבוץ'
         }, status=status.HTTP_403_FORBIDDEN)
 
-    region_id = request.data.get('region_id') or request.data.get('region_name')
+    region_value = (
+        request.data.get('region')
+        or request.data.get('region_id')
+        or request.data.get('region_name')
+    )
 
-    if not region_id:
+    if not region_value:
         if request.user.is_central_admin:
             return Response({
                 'error': 'נדרש לבחור אזור'
             }, status=status.HTTP_400_BAD_REQUEST)
+
         if not request.user.region:
             return Response({
                 'error': 'המשתמש אינו משויך לאזור'
             }, status=status.HTTP_400_BAD_REQUEST)
-        region_id = request.user.region_id
+
+        region = request.user.region
+    else:
+        region = _resolve_region(region_value)
+        if not region:
+            return Response({
+                'error': 'אזור לא נמצא'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+    if not request.user.is_central_admin:
+        if not request.user.region or request.user.region != region:
+            return Response({
+                'error': 'אין הרשאה להריץ שיבוץ עבור אזור זה'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+    constraints_config = request.data.get('constraints') or {}
+    allocation_run = None
 
     try:
-        region = Region.objects.get(pk=region_id)
-    except Region.DoesNotExist:
-        return Response({
-            'error': 'אזור לא נמצא'
-        }, status=status.HTTP_404_NOT_FOUND)
+        from allocation.solver import run_improved_ortools_allocation
 
-    allocation_run = AllocationRun.objects.create(
-        region=region,
-        run_by=request.user
-    )
+        student_fields = _get_model_field_names(Student)
 
-    try:
-        from backend.allocation.solver import run_allocation_algorithm
-        result = run_allocation_algorithm(region)
+        students = Student.objects.filter(
+            accepted_dorm_type__region=region
+        ).select_related(
+            'accepted_dorm_type',
+            'accepted_dorm_type__region'
+        )
+
+        if 'assigned_bed' in student_fields:
+            students = students.filter(assigned_bed__isnull=True)
+        elif 'assigned_room' in student_fields:
+            students = students.filter(assigned_room__isnull=True)
+
+        rooms = Room.objects.filter(
+            apartment__building__dorm_type__region=region,
+            is_active=True,
+            apartment__is_active=True,
+            apartment__building__is_active=True
+        ).select_related(
+            'apartment',
+            'apartment__building',
+            'apartment__building__dorm_type'
+        ).prefetch_related('beds')
+
+        # Count before running the solver, so we do not need another DB query after a long solver run.
+        students_count = students.count()
+        rooms_count = rooms.count()
+
+        allocation_run = AllocationRun.objects.create(
+            region=region,
+            run_by=request.user,
+            status=AllocationRun.Status.RUNNING
+        )
+
+        if students_count == 0:
+            allocation_run.status = AllocationRun.Status.COMPLETED
+            allocation_run.students_processed = 0
+            allocation_run.successful_assignments = 0
+            allocation_run.roommate_matches = 0
+            allocation_run.conflicts = 0
+            allocation_run.completed_at = timezone.now()
+            allocation_run.error_message = ''
+
+            connection.close()
+            close_old_connections()
+            connection.ensure_connection()
+            allocation_run.save()
+
+            return Response({
+                'success': True,
+                'message': 'לא נמצאו סטודנטים זמינים לשיבוץ באזור זה',
+                'result': {
+                    'students_processed': 0,
+                    'successful_assignments': 0,
+                    'roommate_matches': 0,
+                    'mutual_roommate_matches': 0,
+                    'one_sided_roommate_matches': 0,
+                    'conflicts': 0,
+                    'solver_status': 'NO_STUDENTS',
+                    'objective_value': None,
+                    'wall_time': None,
+                    'warnings': [],
+                    'students_with_no_feasible_beds': [],
+                    'assignments': [],
+                    'run': AllocationRunSerializer(allocation_run).data
+                }
+            }, status=status.HTTP_200_OK)
+
+        if rooms_count == 0:
+            allocation_run.status = AllocationRun.Status.FAILED
+            allocation_run.error_message = 'לא נמצאו חדרים פעילים באזור זה'
+            allocation_run.completed_at = timezone.now()
+
+            connection.close()
+            close_old_connections()
+            connection.ensure_connection()
+            allocation_run.save()
+
+            return Response({
+                'success': False,
+                'error': 'לא נמצאו חדרים פעילים באזור זה'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        result = run_improved_ortools_allocation(
+            students=students,
+            rooms=rooms,
+            constraints_config=constraints_config
+        ) or {}
+
+        print(">>> SOLVER RAW RESULT TYPE:", type(result), flush=True)
+
+        if isinstance(result, dict):
+            assignments_value = result.get("assignments", [])
+            conflicts_value = result.get("conflicts", 0)
+            no_feasible_value = result.get("students_with_no_feasible_beds", [])
+
+            print(">>> SOLVER RAW RESULT KEYS:", list(result.keys()), flush=True)
+            print(">>> SOLVER students_processed:", result.get("students_processed"), flush=True)
+            print(">>> SOLVER successful_assignments:", result.get("successful_assignments"), flush=True)
+            print(">>> SOLVER conflicts:", conflicts_value, flush=True)
+            print(">>> SOLVER solver_status:", result.get("solver_status"), flush=True)
+            print(">>> SOLVER objective_value:", result.get("objective_value"), flush=True)
+            print(">>> SOLVER wall_time:", result.get("wall_time"), flush=True)
+            print(">>> SOLVER warnings:", result.get("warnings", []), flush=True)
+
+            print(
+                ">>> SOLVER assignments len:",
+                len(assignments_value) if isinstance(assignments_value, list) else "not-list",
+                flush=True
+            )
+
+            print(
+                ">>> SOLVER students_with_no_feasible_beds len:",
+                len(no_feasible_value) if isinstance(no_feasible_value, list) else "not-list",
+                flush=True
+            )
+
+            print(
+                ">>> SOLVER students_with_no_feasible_beds sample:",
+                no_feasible_value[:10] if isinstance(no_feasible_value, list) else no_feasible_value,
+                flush=True
+            )
+        else:
+            print(">>> SOLVER RAW RESULT:", result, flush=True)
+
+        if not isinstance(result, dict):
+            raise ValueError(f'Unexpected solver result type: {type(result).__name__}')
+
+        roommate_matches = result.get('roommate_matches')
+        if roommate_matches is None:
+            roommate_matches = (
+                result.get('mutual_roommate_matches', 0)
+                + result.get('one_sided_roommate_matches', 0)
+            )
 
         allocation_run.status = AllocationRun.Status.COMPLETED
-        allocation_run.students_processed = result.get('students_processed', 0)
+        allocation_run.students_processed = result.get('students_processed', students_count)
         allocation_run.successful_assignments = result.get('successful_assignments', 0)
-        allocation_run.roommate_matches = result.get('roommate_matches', 0)
+        allocation_run.roommate_matches = roommate_matches
         allocation_run.conflicts = result.get('conflicts', 0)
         allocation_run.completed_at = timezone.now()
+
+        # Important after a long solver run with Neon:
+        # force Django to drop the stale SSL connection and open a fresh one.
+        connection.close()
+        close_old_connections()
+        connection.ensure_connection()
         allocation_run.save()
 
+        # ============================================================
+        # Build assignment table rows from DB for the frontend results
+        # ============================================================
+        assignment_rows = []
+
+        connection.close()
+        close_old_connections()
+        connection.ensure_connection()
+
+        active_assignments = BedAssignment.objects.filter(
+            status=BedAssignment.Status.ACTIVE,
+            bed__room__apartment__building__dorm_type__region=region
+        ).select_related(
+            'student',
+            'student__accepted_dorm_type',
+            'bed',
+            'bed__room',
+            'bed__room__apartment',
+            'bed__room__apartment__building',
+            'bed__room__apartment__building__dorm_type',
+            'bed__room__apartment__building__dorm_type__region',
+        ).order_by(
+            'bed__room__apartment__building__number',
+            'bed__room__apartment__number',
+            'bed__room__name',
+            'bed__label'
+        )
+
+        for assignment in active_assignments:
+            student = assignment.student
+            bed = assignment.bed
+            room = bed.room
+            apartment = room.apartment
+            building = apartment.building
+            dorm_type = building.dorm_type
+            assignment_region = dorm_type.region if dorm_type else None
+
+            assignment_rows.append({
+                'student_id': student.student_id,
+                'student_name': student.full_name,
+                'full_name': student.full_name,
+                'first_name': student.first_name,
+                'last_name': student.last_name,
+
+                'gender': student.gender,
+                'requested_religion': student.requested_religion,
+                'religion': student.requested_religion,
+                'religious': student.religious,
+                'placement_sector': student.placement_sector,
+                'sector': student.placement_sector,
+
+                'building': building.number,
+                'building_number': building.number,
+                'apartment': apartment.number,
+                'apartment_number': apartment.number,
+                'room': room.name,
+                'room_name': room.name,
+                'bed': bed.label,
+                'bed_label': bed.label,
+
+                'dorm_type': dorm_type.name if dorm_type else '',
+                'region': assignment_region.name if assignment_region else '',
+                'region_id': assignment_region.id if assignment_region else '',
+
+                'assignment_type': assignment.assignment_type,
+                'assignment_status': assignment.status,
+                'assigned_at': assignment.assigned_at.isoformat() if assignment.assigned_at else '',
+            })
+
+        print(">>> RESPONSE assignment_rows len:", len(assignment_rows), flush=True)
+
         return Response({
+            'success': True,
             'message': 'השיבוץ הושלם בהצלחה',
-            'result': AllocationRunSerializer(allocation_run).data
-        })
+            'result': {
+                'students_processed': result.get('students_processed', students_count),
+                'successful_assignments': result.get('successful_assignments', 0),
+                'roommate_matches': roommate_matches,
+                'mutual_roommate_matches': result.get('mutual_roommate_matches', 0),
+                'one_sided_roommate_matches': result.get('one_sided_roommate_matches', 0),
+                'conflicts': result.get('conflicts', 0),
+                'solver_status': result.get('solver_status'),
+                'objective_value': result.get('objective_value'),
+                'wall_time': result.get('wall_time'),
+                'warnings': result.get('warnings', []),
+                'students_with_no_feasible_beds': result.get('students_with_no_feasible_beds', []),
+                'assignments': assignment_rows,
+                'run': AllocationRunSerializer(allocation_run).data
+            }
+        }, status=status.HTTP_200_OK)
 
     except Exception as e:
-        allocation_run.status = AllocationRun.Status.FAILED
-        allocation_run.error_message = str(e)
-        allocation_run.completed_at = timezone.now()
-        allocation_run.save()
+        traceback.print_exc()
+
+        if allocation_run is not None:
+            try:
+                allocation_run.status = AllocationRun.Status.FAILED
+                allocation_run.error_message = str(e)
+                allocation_run.completed_at = timezone.now()
+
+                connection.close()
+                close_old_connections()
+                connection.ensure_connection()
+                allocation_run.save()
+            except Exception:
+                traceback.print_exc()
 
         return Response({
-            'error': f'שגיאה בהרצת השיבוץ: {str(e)}'
+            'success': False,
+            'error': f'שגיאה בהרצת השיבוץ: {str(e)}',
+            'error_type': e.__class__.__name__,
+            'traceback': traceback.format_exc(),
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def allocation_history(request):
@@ -597,6 +916,212 @@ def allocation_history(request):
     serializer = AllocationRunSerializer(queryset[:20], many=True)
     return Response({'runs': serializer.data})
 
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def allocation_results(request):
+    """
+    Return active BedAssignment rows for the requesting user's region.
+    Central admin may pass ?region=<id> to filter. Without a region, central admin sees all regions.
+    """
+    region_value = request.query_params.get('region') or None
+
+    if region_value:
+        region = _resolve_region(region_value)
+        if not region:
+            return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+    elif request.user.is_central_admin:
+        region = None
+    elif request.user.region:
+        region = request.user.region
+    else:
+        return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+
+    qs = BedAssignment.objects.filter(
+        status=BedAssignment.Status.ACTIVE
+    ).select_related(
+        'student',
+        'student__accepted_dorm_type',
+        'student__accepted_dorm_type__region',
+        'bed',
+        'bed__room',
+        'bed__room__apartment',
+        'bed__room__apartment__building',
+        'bed__room__apartment__building__dorm_type',
+        'bed__room__apartment__building__dorm_type__region',
+    )
+
+    if region:
+        qs = qs.filter(
+            bed__room__apartment__building__dorm_type__region=region
+        )
+
+    assignments = []
+    for ba in qs:
+        student = ba.student
+        bed = ba.bed
+        room = bed.room
+        apartment = room.apartment
+        building = apartment.building
+        dorm_type = building.dorm_type
+        dorm_region = dorm_type.region if dorm_type else None
+
+        assignments.append({
+            'student_id': student.student_id,
+            'full_name': student.full_name,
+            'first_name': student.first_name,
+            'last_name': student.last_name,
+            'gender': student.gender,
+            'religion': student.requested_religion,
+            'religious': student.religious,
+            'sector': student.placement_sector,
+            'building': building.number,
+            'apartment': apartment.number,
+            'room': room.name,
+            'bed': bed.label,
+            'dorm_type': dorm_type.name if dorm_type else '',
+            'region': dorm_region.name if dorm_region else '',
+            'region_id': dorm_region.id if dorm_region else '',
+            'assigned_at': ba.assigned_at.isoformat() if ba.assigned_at else '',
+        })
+
+    return Response({
+        'count': len(assignments),
+        'assignments': assignments,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def allocation_summary(request):
+    user = request.user
+
+    if user.is_central_admin:
+        region_value = (
+            request.query_params.get('region')
+            or request.query_params.get('region_id')
+            or request.query_params.get('region_name')
+        )
+
+        if region_value:
+            region = _resolve_region(region_value)
+            if not region:
+                return Response({
+                    'error': 'אזור לא נמצא'
+                }, status=status.HTTP_404_NOT_FOUND)
+        else:
+            return Response({
+                'region': None,
+                'total_students': 0,
+                'unassigned_students': 0,
+                'assigned_students': 0,
+                'available_beds': 0,
+                'priority_students': 0,
+                'total_capacity': 0,
+                'occupancy_rate': 0,
+                'students_by_category': {
+                    'new': 0,
+                    'continuing': 0,
+                    'transfer': 0,
+                    'leaving': 0,
+                },
+                'latest_inbox': None,
+                'latest_run': None,
+            }, status=status.HTTP_200_OK)
+    else:
+        if not user.region:
+            return Response({
+                'error': 'המשתמש אינו משויך לאזור'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        region = user.region
+
+    students_qs = Student.objects.filter(
+        accepted_dorm_type__region=region
+    )
+
+    total_students = students_qs.count()
+    assigned_students = students_qs.filter(assigned_room__isnull=False).count()
+    unassigned_students = students_qs.filter(assigned_room__isnull=True).count()
+    priority_students = students_qs.filter(is_priority=True).count()
+
+    students_by_category = {
+        'new': students_qs.filter(category=Student.StudentCategory.NEW).count(),
+        'continuing': students_qs.filter(category=Student.StudentCategory.CONTINUING).count(),
+        'transfer': students_qs.filter(category=Student.StudentCategory.TRANSFER).count(),
+        'leaving': students_qs.filter(category=Student.StudentCategory.LEAVING).count(),
+    }
+
+    rooms_qs = Room.objects.filter(
+        apartment__building__dorm_type__region=region,
+        is_active=True,
+        apartment__is_active=True,
+        apartment__building__is_active=True,
+    )
+
+    total_capacity = sum(rooms_qs.values_list('capacity', flat=True))
+
+    total_beds = Bed.objects.filter(
+        room__apartment__building__dorm_type__region=region,
+        room__is_active=True,
+        room__apartment__is_active=True,
+        room__apartment__building__is_active=True,
+    ).count()
+
+    occupied_beds = BedAssignment.objects.filter(
+        status=BedAssignment.Status.ACTIVE,
+        bed__room__apartment__building__dorm_type__region=region,
+        bed__room__is_active=True,
+        bed__room__apartment__is_active=True,
+        bed__room__apartment__building__is_active=True,
+    ).values('bed_id').distinct().count()
+
+    if total_beds > 0:
+        available_beds = max(total_beds - occupied_beds, 0)
+        denominator = total_beds
+    else:
+        available_beds = max(total_capacity - occupied_beds, 0)
+        denominator = total_capacity
+
+    occupancy_rate = 0
+    if denominator > 0:
+        occupancy_rate = round((occupied_beds / denominator) * 100, 2)
+
+    latest_inbox_obj = RegionInbox.objects.filter(
+        region=region,
+        status__in=[RegionInbox.Status.PENDING, RegionInbox.Status.VIEWED]
+    ).select_related('batch').order_by('-created_at').first()
+
+    latest_inbox = None
+    if latest_inbox_obj:
+        latest_inbox = RegionInboxSerializer(latest_inbox_obj).data
+
+    latest_run_obj = AllocationRun.objects.filter(
+        region=region
+    ).select_related('run_by').order_by('-started_at').first()
+
+    latest_run = None
+    if latest_run_obj:
+        latest_run = AllocationRunSerializer(latest_run_obj).data
+
+    return Response({
+        'region': RegionSerializer(region).data,
+        'total_students': total_students,
+        'unassigned_students': unassigned_students,
+        'assigned_students': assigned_students,
+        'available_beds': available_beds,
+        'priority_students': priority_students,
+        'total_capacity': total_capacity,
+        'occupancy_rate': occupancy_rate,
+        'students_by_category': students_by_category,
+        'latest_inbox': latest_inbox,
+        'latest_run': latest_run,
+    }, status=status.HTTP_200_OK)
+
+
+
+# =========================
+# Statistics
+# =========================
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -634,11 +1159,16 @@ def statistics(request):
     })
 
 
+# =========================
+# Excel Upload Helpers
+# =========================
+
 EXCEL_DORM_TYPE_TO_REGION = {
     'קנדה': 'canada',
+    'מעונות קנדה': 'canada',
     'ברושים': 'broshim',
+    'מזרח': 'mizrah',
     'מגדל המזרח': 'mizrah',
-    'הטכניון': 'technion',
 }
 
 ALLOWED_DECISION_STATUSES = {
@@ -646,22 +1176,31 @@ ALLOWED_DECISION_STATUSES = {
 }
 
 
-def slugify_hebrew(value: str) -> str:
-    value = safe_str(value)
-    value = value.replace('״', '').replace('"', '').replace("'", "")
-    value = value.replace('/', '-').replace('\\', '-')
-    value = re.sub(r'\s+', '-', value.strip())
-    return value.lower()
+def is_blank(value):
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    return str(value).strip() == ''
 
 
-def safe_str(value):
-    if value is None or pd.isna(value):
-        return ''
+def safe_str(value, default=''):
+    if is_blank(value):
+        return default
+
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return str(value).strip()
+
     return str(value).strip()
 
 
 def safe_int(value, default=0):
-    if value is None or pd.isna(value) or value == '':
+    if is_blank(value):
         return default
     try:
         return int(float(value))
@@ -670,7 +1209,7 @@ def safe_int(value, default=0):
 
 
 def safe_decimal(value, default=None):
-    if value is None or pd.isna(value) or value == '':
+    if is_blank(value):
         return default
     try:
         return Decimal(str(value))
@@ -678,193 +1217,421 @@ def safe_decimal(value, default=None):
         return default
 
 
+def get_row_value(row, *column_names, default=''):
+    for column_name in column_names:
+        if column_name in row.index:
+            value = row.get(column_name)
+            if not is_blank(value):
+                return value
+    return default
+
+
+def normalize_phone(value):
+    value = safe_str(value)
+    if not value:
+        return ''
+
+    value = value.replace('-', '').replace(' ', '').replace('.0', '')
+
+    if value.startswith('972') and len(value) >= 11:
+        value = '0' + value[3:]
+
+    return value
+
+
 def parse_yes_no_code(value):
     value = safe_str(value).lower()
 
-    yes_values = {'1', 'כן', 'yes', 'true', '136'}
-    no_values = {'0', 'לא', 'no', 'false', '135', ''}
-
-    if value in yes_values:
+    if value in {'כן', 'yes', 'true', '1', 'x', 'v', 'y'}:
         return True
-    if value in no_values:
-        return False
+
     return False
+
+
+def extract_roommate_flag(value):
+    value = safe_str(value).lower()
+
+    if value in {'כן', 'yes', 'true', '1', 'x', 'v', 'y'}:
+        return True
+
+    return False
+
+
+def parse_gender_from_housing_type(housing_type, tenant_type='', existing_student=None):
+    housing_type = safe_str(housing_type)
+    tenant_type = safe_str(tenant_type).upper()
+
+    if existing_student and getattr(existing_student, 'gender', None):
+        return existing_student.gender
+
+    male_values = {
+        'רווקים',
+        'בנים',
+        'זכר',
+        'male',
+        'men',
+        'man',
+        'Z1',
+    }
+
+    female_values = {
+        'רווקות',
+        'בנות',
+        'נקבה',
+        'female',
+        'women',
+        'woman',
+        'Z2',
+    }
+
+    if housing_type in male_values or tenant_type in male_values:
+        return Student.Gender.MALE
+
+    if housing_type in female_values or tenant_type in female_values:
+        return Student.Gender.FEMALE
+
+    if 'רווקות' in housing_type or 'בנות' in housing_type or 'נקבה' in housing_type:
+        return Student.Gender.FEMALE
+
+    if 'רווקים' in housing_type or 'בנים' in housing_type or 'זכר' in housing_type:
+        return Student.Gender.MALE
+
+    # Your model requires male/female only. For couple/family/ambiguous rows,
+    # keep a deterministic fallback instead of crashing the import.
+    return Student.Gender.MALE
 
 
 def parse_requested_religion(value):
     value = safe_str(value)
 
-    if not value:
-        return Student.Religion.NOT_SPECIFIED
-
-    if 'מוסל' in value or 'muslim' in value.lower():
-        return Student.Religion.Muslim
-    if 'יהוד' in value or 'jew' in value.lower():
+    if value in {'יהודי', 'Jewish', 'jewish'}:
         return Student.Religion.Jewish
-    if 'נוצר' in value or 'christ' in value.lower():
+
+    if value in {'מוסלמי', 'מוסלמים', 'Muslim', 'Muslims', 'muslim', 'muslims'}:
+        return Student.Religion.Muslim
+
+    if value in {'נוצרי', 'Christian', 'christian'}:
         return Student.Religion.Christian
-    if 'דרוז' in value or 'druze' in value.lower():
+
+    if value in {'דרוזי', 'Druze', 'druze'}:
         return Student.Religion.Druze
 
     return Student.Religion.NOT_SPECIFIED
 
 
+def parse_placement_sector(row):
+    religion = parse_requested_religion(
+        get_row_value(
+            row,
+            'החלטה-תאור קוד לאום מבוקש',
+            'החלטה-קוד לאום מבוקש',
+            default=''
+        )
+    )
+
+    if religion == Student.Religion.Jewish:
+        return Student.PlacementSector.JEWISH
+
+    if religion in {
+        Student.Religion.Muslim,
+        Student.Religion.Christian,
+        Student.Religion.Druze,
+    }:
+        return Student.PlacementSector.ARAB
+
+    return Student.PlacementSector.UNKNOWN
+
+
 def parse_religious(value):
     value = safe_str(value)
 
-    if not value:
-        return Student.Religious.NOT_SPECIFIED
-
-    if value in ['כן', 'דתי', 'religious']:
+    if value in {'כן', 'דתי', 'religious', 'Religious', 'yes', 'true', '1'}:
         return Student.Religious.RELIGIOUS
-    if value in ['לא', 'לא משנה', 'no_preference']:
+
+    if value in {'לא', 'לא משנה', 'no', 'false', '0', 'no_preference'}:
         return Student.Religious.NO_PREFERENCE
+
     return Student.Religious.NOT_SPECIFIED
-
-
-def parse_gender_from_housing_type(housing_type, existing_student=None):
-    housing_type = safe_str(housing_type)
-
-    if 'רווקות' in housing_type:
-        return Student.Gender.FEMALE
-    if 'רווקים' in housing_type:
-        return Student.Gender.MALE
-
-    if existing_student and existing_student.gender:
-        return existing_student.gender
-
-    return Student.Gender.MALE
 
 
 def parse_category(value):
     value = safe_str(value)
 
-    if not value:
-        return Student.StudentCategory.NEW
-
-    if 'חדש' in value:
-        return Student.StudentCategory.NEW
-    if 'ממשיכ' in value or 'ותיק' in value:
-        return Student.StudentCategory.CONTINUING
-    if 'מעבר' in value:
+    if any(x in value for x in ['מעבר', 'מעברים', 'transfer']):
         return Student.StudentCategory.TRANSFER
-    if 'עזיב' in value:
+
+    if any(x in value for x in ['עזיבה', 'עוזב', 'leaving']):
         return Student.StudentCategory.LEAVING
 
-    return Student.StudentCategory.NEW
+    if any(x in value for x in ['חדשים', 'חדש', 'new']):
+        return Student.StudentCategory.NEW
+
+    return Student.StudentCategory.CONTINUING
 
 
-def extract_roommate_flag(value):
-    return parse_yes_no_code(value)
-
-
-def normalize_phone(value):
-    value = safe_str(value)
-    return value.replace('.0', '') if value else ''
-
-
-def get_or_create_region_by_id(region_id, region_name=None):
-    region_id = safe_str(region_id)
-    region_name = safe_str(region_name) or region_id
-
-    region, _ = Region.objects.get_or_create(
-        id=region_id,
-        defaults={'name': region_name}
+def get_decision_status(row):
+    return safe_str(
+        get_row_value(
+            row,
+            'החלטה-החלטת מעונות - תאור',
+            'גריעה/תוספת-תיאור קוד החלטה',
+            'גריעה/תוספת-סוג החלטה',
+            default=''
+        )
     )
-    return region
 
 
-def get_or_create_dorm_type_from_excel(dorm_code, dorm_name):
+def get_decision_dorm_name(row):
+    """Return the dorm name from the most reliable human-readable dorm column."""
+    return safe_str(
+        get_row_value(
+            row,
+            'גריעה/תוספת-תוכן ההחלטה-תיאור',
+            'גריעה/תוספת-תוכן החלטה-תיאור',
+            'גריעה/תוספת-תוכן החלטה-סוג',
+            default=''
+        )
+    )
+
+
+def get_decision_dorm_code(row):
+    """Return the dorm code from code-specific columns only.
+
+    Important: do not read 'גריעה/תוספת-תוכן ההחלטה' here, because in the
+    fake/demo Excel it is an ambiguous numeric value and can collide with
+    existing DormType.code rows from another region.
+    """
+    return safe_str(
+        get_row_value(
+            row,
+            'גריעה/תוספת-תוכן החלטה מעונות-קוד חברה',
+            'החלטה-תוכן החלטה מעונות-קוד חברה',
+            default=''
+        )
+    )
+
+
+def resolve_region_from_dorm_name(dorm_name):
     dorm_name = safe_str(dorm_name)
-    dorm_code_int = safe_int(dorm_code, default=None)
 
-    if not dorm_name and dorm_code_int is None:
+    if not dorm_name:
         return None
 
-    dorm_type = None
+    for key, region_id in EXCEL_DORM_TYPE_TO_REGION.items():
+        if key in dorm_name:
+            try:
+                return Region.objects.get(pk=region_id)
+            except Region.DoesNotExist:
+                continue  # try next key, don't give up immediately
+    return None
 
-    if dorm_code_int is not None:
-        dorm_type = DormType.objects.filter(code=dorm_code_int).select_related('region').first()
 
-    if not dorm_type and dorm_name:
-        dorm_type = DormType.objects.filter(name=dorm_name).select_related('region').first()
+def get_or_create_dorm_type_from_excel(dorm_code=None, dorm_name=None):
+    """
+    Resolve DormType for imported students.
 
-    if dorm_type:
-        return dorm_type
+    Important:
+    We intentionally ignore dorm_code from Excel because it may represent
+    a company/organization code such as 16 = הטכניון, not a real dorm type.
 
-    region_id = EXCEL_DORM_TYPE_TO_REGION.get(dorm_name)
-    if region_id:
-        region = get_or_create_region_by_id(region_id, dorm_name)
-    else:
-        generated_region_id = slugify_hebrew(dorm_name) or f"dorm-{dorm_code_int or 'unknown'}"
-        region = get_or_create_region_by_id(generated_region_id, dorm_name)
+    Student import must not create new DormType rows.
+    DormTypes should already exist from import_buildings.
+    """
+    dorm_name = safe_str(dorm_name)
 
-    if dorm_code_int is None:
-        existing_max = DormType.objects.order_by('-code').values_list('code', flat=True).first()
-        dorm_code_int = (existing_max or 0) + 1
+    if not dorm_name:
+        return None
 
-    dorm_type, _ = DormType.objects.get_or_create(
-        code=dorm_code_int,
-        defaults={
-            'name': dorm_name or f'Dorm {dorm_code_int}',
-            'region': region,
-        }
-    )
+    region = resolve_region_from_dorm_name(dorm_name)
 
-    updated = False
-    if dorm_name and dorm_type.name != dorm_name:
-        dorm_type.name = dorm_name
-        updated = True
-    if dorm_type.region_id != region.id:
-        dorm_type.region = region
-        updated = True
-    if updated:
-        dorm_type.save(update_fields=['name', 'region'])
+    if not region:
+        return None
 
-    return dorm_type
+    return DormType.objects.filter(
+        region=region,
+        code__in=[1, 2, 3, 4, 5, 6]
+    ).select_related('region').first()
 
 
 def build_student_payload_from_row(row, existing_student=None):
-    housing_type = safe_str(row.get('החלטה-תאור סוג מגורים'))
-    accepted_dorm_type = get_or_create_dorm_type_from_excel(
-        row.get('החלטה-בחירת סוג מעון1'),
-        row.get('החלטה-תאור קוד חברה1')
+    housing_type = safe_str(
+        get_row_value(
+            row,
+            'החלטה-תאור סוג מגורים',
+            default=''
+        )
     )
 
+    tenant_type = safe_str(
+        get_row_value(
+            row,
+            'החלטה-סוג מגורים של הדייר',
+            default=''
+        )
+    )
+
+    decision_dorm_name = get_decision_dorm_name(row)
+    decision_dorm_code = get_decision_dorm_code(row)
+
+    accepted_dorm_type = get_or_create_dorm_type_from_excel(
+        decision_dorm_code,
+        decision_dorm_name
+    )
+
+    needs_accessibility = parse_yes_no_code(
+        get_row_value(
+            row,
+            'החלטה-זקוק להנגשה',
+            default=''
+        )
+    )
+
+    placement_sector = parse_placement_sector(row)
+
     return {
-        'student_id': safe_str(row.get('ת"ז ישראלית')),
-        'first_name': safe_str(row.get('שם פרטי')),
-        'last_name': safe_str(row.get('שם משפחה')),
-        'phone': normalize_phone(row.get('טלפון 1')),
-        'phone_secondary': normalize_phone(row.get('טלפון חירום')),
-        'email': safe_str(row.get('אימייל 1')),
-        'city': safe_str(row.get('שם ישוב')),
-        'gender': parse_gender_from_housing_type(housing_type, existing_student=existing_student),
-        'requested_religion': parse_requested_religion(row.get('החלטה-תאור קוד לאום מבוקש')),
-        'religious': parse_religious(row.get('החלטה אחרונה - דתי לצורך שיבוץ תיאור')),
-        'category': parse_category(row.get('החלטה-תאור קבוצת הקצאה')),
+        'student_id': safe_str(get_row_value(row, 'ת"ז ישראלית')),
+        'first_name': safe_str(get_row_value(row, 'שם פרטי')),
+        'last_name': safe_str(get_row_value(row, 'שם משפחה')),
+        'phone': normalize_phone(get_row_value(row, 'טלפון 1')),
+        'phone_secondary': normalize_phone(get_row_value(row, 'טלפון חירום')),
+        'email': safe_str(get_row_value(row, 'אימייל 1')),
+        'city': safe_str(get_row_value(row, 'שם ישוב')),
+
+        'gender': parse_gender_from_housing_type(
+            housing_type,
+            tenant_type=tenant_type,
+            existing_student=existing_student
+        ),
+
+        'requested_religion': parse_requested_religion(
+            get_row_value(
+                row,
+                'החלטה-תאור קוד לאום מבוקש',
+                'החלטה-קוד לאום מבוקש',
+                default=''
+            )
+        ),
+
+        'placement_sector': placement_sector,
+        'religious': parse_religious(
+            get_row_value(
+                row,
+                'החלטה אחרונה - דתי לצורך שיבוץ תיאור',
+                'החלטה אחרונה - דתי לצרכי שיבוץ',
+                default=''
+            )
+        ),
+
+        'category': parse_category(
+            get_row_value(
+                row,
+                'החלטה-תאור קבוצת הקצאה',
+                'החלטה-קבוצת הקצאה',
+                default=''
+            )
+        ),
+
         'housing_type': housing_type,
-        'allocation_group': safe_str(row.get('החלטה-קבוצת הקצאה')),
+        'allocation_group': safe_str(
+            get_row_value(
+                row,
+                'החלטה-קבוצת הקצאה',
+                default=''
+            )
+        ),
+
         'accepted_dorm_type': accepted_dorm_type,
-        'roommate_request_1': safe_str(row.get('החלטה אחרונה: שם חבר 1')),
-        'roommate_request_2': safe_str(row.get('החלטה אחרונה: שם חבר 2')),
-        'roommate_request_3': safe_str(row.get('החלטה אחרונה: שם חבר 3')),
-        'roommate_request_4': safe_str(row.get('החלטה אחרונה: שם חבר 4')),
-        'roommate_request_5': safe_str(row.get('החלטה אחרונה: שם חבר 5')),
-        'roommate_request_flag_1': extract_roommate_flag(row.get('בקשה לגור עם סטודנטים חבר1')),
-        'roommate_request_flag_2': extract_roommate_flag(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר2')),
-        'roommate_request_flag_3': extract_roommate_flag(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר3')),
-        'roommate_request_flag_4': extract_roommate_flag(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר4')),
-        'roommate_request_flag_5': extract_roommate_flag(row.get('החלטה אחרונה: בקשה לגור עם סטודנטים חבר5')),
-        'special_status_1': safe_str(row.get('תאור סטטוס מיוחד1')),
-        'special_status_2': safe_str(row.get('תאור סטטוס מיוחד2')),
-        'special_status_3': safe_str(row.get('תאור סטטוס מיוחד3')),
-        'special_status_4': safe_str(row.get('תאור סטטוס מיוחד4')),
-        'study_points': safe_decimal(row.get('נ.אקדמי מצטבר'), default=None),
-        'current_address': safe_str(row.get('כ.נוכחית-כתובת במעונות-תיאור')),
-        'current_dorm_type': safe_str(row.get('החלטה-תאור קוד חברה1')),
-        'is_priority': parse_yes_no_code(row.get('החלטה-זקוק להנגשה')),
-        'priority_reason': 'נגישות' if parse_yes_no_code(row.get('החלטה-זקוק להנגשה')) else '',
+
+        'roommate_request_1': safe_str(get_row_value(row, 'החלטה אחרונה: שם חבר 1')),
+        'roommate_request_2': safe_str(get_row_value(row, 'החלטה אחרונה: שם חבר 2')),
+        'roommate_request_3': safe_str(get_row_value(row, 'החלטה אחרונה: שם חבר 3')),
+        'roommate_request_4': safe_str(get_row_value(row, 'החלטה אחרונה: שם חבר 4')),
+        'roommate_request_5': safe_str(get_row_value(row, 'החלטה אחרונה: שם חבר 5')),
+
+        'roommate_request_student_id_1': safe_str(
+            get_row_value(
+                row,
+                'החלטה אחרונה: תז חבר 1',
+                'ת"ז חבר 1',
+                'מספר סטודנט חבר 1',
+                default=''
+            )
+        ),
+        'roommate_request_student_id_2': safe_str(
+            get_row_value(
+                row,
+                'החלטה אחרונה: תז חבר 2',
+                'ת"ז חבר 2',
+                'מספר סטודנט חבר 2',
+                default=''
+            )
+        ),
+        'roommate_request_student_id_3': safe_str(
+            get_row_value(
+                row,
+                'החלטה אחרונה: תז חבר 3',
+                'ת"ז חבר 3',
+                'מספר סטודנט חבר 3',
+                default=''
+            )
+        ),
+        'roommate_request_student_id_4': safe_str(
+            get_row_value(
+                row,
+                'החלטה אחרונה: תז חבר 4',
+                'ת"ז חבר 4',
+                'מספר סטודנט חבר 4',
+                default=''
+            )
+        ),
+        'roommate_request_student_id_5': safe_str(
+            get_row_value(
+                row,
+                'החלטה אחרונה: תז חבר 5',
+                'ת"ז חבר 5',
+                'מספר סטודנט חבר 5',
+                default=''
+            )
+        ),
+
+        'roommate_request_flag_1': extract_roommate_flag(
+            get_row_value(row, 'בקשה לגור עם סטודנטים חבר1', default='')
+        ),
+        'roommate_request_flag_2': extract_roommate_flag(
+            get_row_value(row, 'החלטה אחרונה: בקשה לגור עם סטודנטים חבר2', default='')
+        ),
+        'roommate_request_flag_3': extract_roommate_flag(
+            get_row_value(row, 'החלטה אחרונה: בקשה לגור עם סטודנטים חבר3', default='')
+        ),
+        'roommate_request_flag_4': extract_roommate_flag(
+            get_row_value(row, 'החלטה אחרונה: בקשה לגור עם סטודנטים חבר4', default='')
+        ),
+        'roommate_request_flag_5': extract_roommate_flag(
+            get_row_value(row, 'החלטה אחרונה: בקשה לגור עם סטודנטים חבר5', default='')
+        ),
+
+        'special_status_1': safe_str(get_row_value(row, 'תאור סטטוס מיוחד1')),
+        'special_status_2': safe_str(get_row_value(row, 'תאור סטטוס מיוחד2')),
+        'special_status_3': safe_str(get_row_value(row, 'תאור סטטוס מיוחד3')),
+        'special_status_4': safe_str(get_row_value(row, 'תאור סטטוס מיוחד4')),
+
+        'study_points': safe_decimal(
+            get_row_value(row, 'נ.אקדמי מצטבר', default=''),
+            default=None
+        ),
+
+        'current_address': safe_str(
+            get_row_value(
+                row,
+                'כ.נוכחית-כתובת במעונות-תיאור',
+                default=''
+            )
+        ),
+
+        'current_dorm_type': decision_dorm_name,
+
+        'is_priority': needs_accessibility,
+        'priority_reason': 'נגישות' if needs_accessibility else '',
     }
 
 
@@ -899,6 +1666,7 @@ def upload_excel(request):
 
     try:
         excel_file = pd.ExcelFile(uploaded_file)
+
         created_count = 0
         updated_count = 0
         skipped_count = 0
@@ -907,10 +1675,13 @@ def upload_excel(request):
 
         for sheet_name in excel_file.sheet_names:
             df = pd.read_excel(excel_file, sheet_name=sheet_name)
+            df.columns = [safe_str(col) for col in df.columns]
 
             required_columns = ['ת"ז ישראלית', 'שם פרטי', 'שם משפחה']
             missing_required = [col for col in required_columns if col not in df.columns]
+
             if missing_required:
+                skipped_count += len(df)
                 errors.append(
                     f"Sheet '{sheet_name}' missing required columns: {', '.join(missing_required)}"
                 )
@@ -918,14 +1689,20 @@ def upload_excel(request):
 
             for idx, row in df.iterrows():
                 try:
-                    student_id = safe_str(row.get('ת"ז ישראלית'))
+                    student_id = safe_str(get_row_value(row, 'ת"ז ישראלית'))
+
                     if not student_id:
                         skipped_count += 1
+                        errors.append(f"Sheet '{sheet_name}', row {idx + 2}: missing student_id")
                         continue
 
-                    decision_status = safe_str(row.get('החלטה-החלטת מעונות - תאור'))
+                    decision_status = get_decision_status(row)
+
                     if decision_status and decision_status not in ALLOWED_DECISION_STATUSES:
                         skipped_count += 1
+                        errors.append(
+                            f"Student {student_id}: skipped בגלל סטטוס החלטה '{decision_status}'"
+                        )
                         continue
 
                     existing = Student.objects.filter(student_id=student_id).select_related(
@@ -933,22 +1710,36 @@ def upload_excel(request):
                         'accepted_dorm_type__region'
                     ).first()
 
-                    student_payload = build_student_payload_from_row(row, existing_student=existing)
+                    student_payload = build_student_payload_from_row(
+                        row,
+                        existing_student=existing
+                    )
+
                     accepted_dorm_type = student_payload.get('accepted_dorm_type')
+                    decision_dorm_name = student_payload.get('current_dorm_type')
+                    decision_dorm_code = get_decision_dorm_code(row)
 
                     if accepted_dorm_type is None:
                         skipped_count += 1
                         errors.append(
-                            f"Student {student_id}: could not resolve accepted dorm type from columns "
-                            f"'החלטה-בחירת סוג מעון1' / 'החלטה-תאור קוד חברה1'"
+                            f"Student {student_id}: could not resolve accepted dorm type. "
+                            f"name='{decision_dorm_name}', code='{decision_dorm_code}'"
                         )
                         continue
 
                     target_region = accepted_dorm_type.region
 
+                    if target_region is None:
+                        skipped_count += 1
+                        errors.append(
+                            f"Student {student_id}: dorm type '{accepted_dorm_type.name}' has no region"
+                        )
+                        continue
+
                     if existing:
                         for key, value in student_payload.items():
                             setattr(existing, key, value)
+
                         existing.batch = batch
                         existing.save()
                         updated_count += 1
@@ -964,19 +1755,27 @@ def upload_excel(request):
                             'region': target_region,
                             'count': 0
                         }
+
                     region_counts[target_region.id]['count'] += 1
 
                 except Exception as e:
-                    errors.append(f"Sheet '{sheet_name}', row {idx + 2}: {str(e)}")
+                    skipped_count += 1
+                    errors.append(
+                        f"Sheet '{sheet_name}', row {idx + 2}: {e.__class__.__name__}: {str(e)}"
+                    )
                     continue
 
         for region_id in region_counts.keys():
             RegionInbox.objects.filter(
                 region_id=region_id,
-                status=RegionInbox.Status.PENDING
+                status__in=[
+                    RegionInbox.Status.PENDING,
+                    RegionInbox.Status.VIEWED,
+                ]
             ).update(status=RegionInbox.Status.SUPERSEDED)
 
         region_breakdown = []
+
         for region_id, data in region_counts.items():
             RegionInbox.objects.create(
                 region=data['region'],
@@ -994,7 +1793,8 @@ def upload_excel(request):
 
         batch.total_students = created_count + updated_count
         batch.status = ImportBatch.Status.COMPLETED
-        batch.save(update_fields=['total_students', 'status'])
+        batch.error_message = ''
+        batch.save(update_fields=['total_students', 'status', 'error_message'])
 
         return Response({
             'success': True,
@@ -1006,17 +1806,21 @@ def upload_excel(request):
             'updated': updated_count,
             'skipped': skipped_count,
             'region_breakdown': region_breakdown,
-            'errors': errors[:20]
-        })
+            'errors': errors[:100]
+        }, status=status.HTTP_200_OK)
 
     except Exception as e:
+        traceback.print_exc()
+
         batch.status = ImportBatch.Status.FAILED
         batch.error_message = str(e)
         batch.save(update_fields=['status', 'error_message'])
 
         return Response({
+            'success': False,
             'error': f'שגיאה בעיבוד הקובץ: {str(e)}',
-            'errorEn': f'Error processing file: {str(e)}'
+            'errorEn': f'Error processing file: {str(e)}',
+            'traceback': traceback.format_exc(),
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -1070,7 +1874,7 @@ def region_inbox_latest(request):
     inbox_item = RegionInbox.objects.filter(
         region=request.user.region,
         status__in=[RegionInbox.Status.PENDING, RegionInbox.Status.VIEWED]
-    ).first()
+    ).order_by('-created_at').first()
 
     if not inbox_item:
         return Response({
@@ -1132,188 +1936,3 @@ def mark_inbox_processed(request, inbox_id):
 
     serializer = RegionInboxSerializer(inbox_item)
     return Response({'inbox': serializer.data})
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def allocation_summary(request):
-    user = request.user
-
-    if user.is_central_admin:
-        students = Student.objects.all()
-        rooms = Room.objects.filter(is_active=True)
-        latest_inbox = None
-    else:
-        if not user.region:
-            return Response({
-                'error': 'משתמש לא משויך לאזור'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        students = Student.objects.filter(accepted_dorm_type__region=user.region)
-        rooms = Room.objects.filter(apartment__building__dorm_type__region=user.region, is_active=True)
-
-        latest_inbox = RegionInbox.objects.filter(
-            region=user.region,
-            status__in=[RegionInbox.Status.PENDING, RegionInbox.Status.VIEWED]
-        ).first()
-
-    total_students = students.count()
-    unassigned_students = students.filter(assigned_room__isnull=True).count()
-    assigned_students = total_students - unassigned_students
-    priority_students = students.filter(is_priority=True).count()
-    total_capacity = sum(r.capacity for r in rooms)
-    available_beds = sum(r.available_beds for r in rooms)
-
-    batch_info = None
-    if latest_inbox:
-        batch_info = {
-            'batch_id': latest_inbox.batch_id,
-            'students_count': latest_inbox.students_count,
-            'created_at': latest_inbox.created_at.isoformat(),
-            'message': latest_inbox.message,
-            'status': latest_inbox.status,
-        }
-
-    students_by_category = {}
-    for cat in Student.StudentCategory:
-        students_by_category[cat.value] = students.filter(category=cat.value).count()
-
-    return Response({
-        'total_students': total_students,
-        'unassigned_students': unassigned_students,
-        'assigned_students': assigned_students,
-        'priority_students': priority_students,
-        'total_capacity': total_capacity,
-        'available_beds': available_beds,
-        'occupancy_rate': round((assigned_students / total_capacity * 100) if total_capacity > 0 else 0),
-        'latest_inbox': batch_info,
-        'students_by_category': students_by_category,
-        'region': RegionSerializer(user.region).data if user.region else None,
-    })
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def analysis_data(request):
-    from django.db.models import Count
-
-    user = request.user
-
-    if user.is_central_admin:
-        students = Student.objects.all()
-        buildings = Building.objects.filter(is_active=True)
-        rooms = Room.objects.filter(is_active=True)
-        transfers = Transfer.objects.all()
-    else:
-        students = Student.objects.filter(accepted_dorm_type__region=user.region)
-        buildings = Building.objects.filter(dorm_type__region=user.region, is_active=True)
-        rooms = Room.objects.filter(apartment__building__dorm_type__region=user.region, is_active=True)
-        transfers = Transfer.objects.filter(
-            Q(from_room__apartment__building__dorm_type__region=user.region) |
-            Q(to_room__apartment__building__dorm_type__region=user.region)
-        )
-
-    # Students by region (central admin only)
-    students_by_region = []
-    if user.is_central_admin:
-        students_by_region = list(
-            Student.objects.filter(accepted_dorm_type__isnull=False)
-            .values('accepted_dorm_type__region__name')
-            .annotate(count=Count('id'))
-            .order_by('-count')
-        )
-
-    # Students by gender
-    students_by_gender = list(
-        students.values('gender').annotate(count=Count('id'))
-    )
-
-    # Students by religion (requested_religion field)
-    students_by_religion = list(
-        students.values('requested_religion').annotate(count=Count('id'))
-    )
-
-    # Students by religious preference
-    students_by_religious = list(
-        students.values('religious').annotate(count=Count('id'))
-    )
-
-    # Students by category
-    students_by_category = list(
-        students.values('category').annotate(count=Count('id'))
-    )
-
-    # Students by housing_type
-    students_by_housing = list(
-        students.exclude(housing_type='')
-        .values('housing_type').annotate(count=Count('id'))
-    )
-
-    # Occupancy per building (top 20)
-    occupancy_data = []
-    for building in buildings[:20]:
-        total_beds = Bed.objects.filter(room__apartment__building=building).count()
-        assigned = BedAssignment.objects.filter(
-            bed__room__apartment__building=building,
-            status=BedAssignment.Status.ACTIVE
-        ).count()
-        occupancy_data.append({
-            'building': f'בניין {building.number}',
-            'region': building.dorm_type.region.name if building.dorm_type and building.dorm_type.region else '',
-            'total_beds': total_beds,
-            'assigned': assigned,
-            'occupancy_rate': round((assigned / total_beds * 100) if total_beds > 0 else 0),
-        })
-
-    # Transfers by status
-    transfers_by_status = list(
-        transfers.values('status').annotate(count=Count('id'))
-    )
-
-    # Transfers by movement_type (from MovementRequest)
-    transfers_by_type = list(
-        transfers.filter(movement_request__isnull=False)
-        .values('movement_request__movement_type')
-        .annotate(count=Count('id'))
-    )
-
-    # Priority students by reason
-    priority_by_reason = list(
-        students.filter(is_priority=True)
-        .exclude(priority_reason='')
-        .values('priority_reason').annotate(count=Count('id'))
-        .order_by('-count')[:10]
-    )
-
-    # Total beds & assigned beds
-    total_beds = Bed.objects.filter(room__in=rooms).count()
-    assigned_beds = BedAssignment.objects.filter(
-        bed__room__in=rooms,
-        status=BedAssignment.Status.ACTIVE
-    ).count()
-
-    return Response({
-        'students_by_region': students_by_region,
-        'students_by_gender': students_by_gender,
-        'students_by_religion': students_by_religion,
-        'students_by_religious': students_by_religious,
-        'students_by_category': students_by_category,
-        'students_by_housing': students_by_housing,
-        'occupancy_data': occupancy_data,
-        'transfers_by_status': transfers_by_status,
-        'transfers_by_type': transfers_by_type,
-        'priority_by_reason': priority_by_reason,
-        'summary': {
-            'total_students': students.count(),
-            'assigned_students': students.filter(assigned_room__isnull=False).count(),
-            'unassigned_students': students.filter(assigned_room__isnull=True).count(),
-            'priority_students': students.filter(is_priority=True).count(),
-            'total_buildings': buildings.count(),
-            'total_rooms': rooms.count(),
-            'total_beds': total_beds,
-            'assigned_beds': assigned_beds,
-            'available_beds': total_beds - assigned_beds,
-            'total_transfers': transfers.count(),
-            'pending_transfers': transfers.filter(status=Transfer.Status.PENDING).count(),
-            'approved_transfers': transfers.filter(status=Transfer.Status.APPROVED).count(),
-            'rejected_transfers': transfers.filter(status=Transfer.Status.REJECTED).count(),
-        }
-    })

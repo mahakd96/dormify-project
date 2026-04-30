@@ -38,6 +38,7 @@ urlpatterns = [
     path('allocation/history/', views.allocation_history, name='allocation-history'),
     path('allocation/summary/', views.allocation_summary, name='allocation-summary'),
     path('analysis/', views.analysis_data, name='analysis'),
+    path('api/allocation/results/', views.allocation_results),
 
     # Include router URLs
     path('', include(router.urls)),
