@@ -2,6 +2,7 @@ import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { regions } from '../data/mockData';
+
 import {
   LayoutDashboard,
   Building2,
@@ -18,8 +19,8 @@ import {
   Shield,
   UserCog,
   Map,
+  TrendingUp,  // ← ADD THIS
 } from 'lucide-react';
-
 function Sidebar({ collapsed, onToggle, language }) {
   const auth = useAuth();
   const navigate = useNavigate();
@@ -75,6 +76,7 @@ function Sidebar({ collapsed, onToggle, language }) {
     { path: '/allocation', icon: Shuffle, label: language === 'he' ? 'שיבוץ' : 'Allocation', show: true },
     { path: '/transfers', icon: ArrowLeftRight, label: language === 'he' ? 'בקשות מעבר' : 'Transfer Requests', show: true },
     { path: '/reports', icon: BarChart3, label: language === 'he' ? 'דוחות' : 'Reports', show: true },
+    { path: '/analysis', icon: TrendingUp, label: language === 'he' ? 'ניתוח נתונים' : 'Data Analysis', show: true },
     { path: '/users', icon: UserCog, label: language === 'he' ? 'מידע על עובדים ' : 'Workers Contacts', show: canManageUsers() },
     { path: '/settings', icon: Settings, label: language === 'he' ? 'הגדרות' : 'Settings', show: true },
   ];
