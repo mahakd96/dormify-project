@@ -229,6 +229,11 @@ export const studentsAPI = {
   },
 };
 
+export const analysisAPI = {
+  getData: async () => {
+    const { data } = await api.get("/api/analysis/");
+    return data;
+  },
 export const transfersAPI = {
   getAll: async () => {
     try {
