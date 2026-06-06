@@ -7,21 +7,9 @@ from django.contrib.auth import authenticate, get_user_model
 from rest_framework import serializers
 
 from .models import (
-    Region,
-    Office,
-    StaffProfile,
-    DormType,
-    Building,
-    Apartment,
-    Room,
-    Bed,
-    Student,
-    BedAssignment,
-    MovementRequest,
-    Transfer,
-    AllocationRun,
-    ImportBatch,
-    RegionInbox,
+    User, Region, Office, StaffProfile, DormType, Building, Apartment, Room, Bed,
+    Student, BedAssignment, MovementRequest, Transfer,
+    AllocationRun, ImportBatch, RegionInbox
 )
 
 User = get_user_model()
@@ -134,7 +122,12 @@ class RegionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Region
         fields = ['id', 'name']
+class DormTypeSerializer(serializers.ModelSerializer):
+    region_name = serializers.CharField(source='region.name', read_only=True)
 
+    class Meta:
+        model = DormType
+        fields = ['id', 'code', 'name', 'region', 'region_name']
 
 class OfficeSerializer(serializers.ModelSerializer):
     """Serialize office data"""
