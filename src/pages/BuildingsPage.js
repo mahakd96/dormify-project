@@ -1,891 +1,1039 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { useAuth } from '../context/AuthContext';
-import { dormOffices, dorms, buildings, apartments, rooms, students as studentsSeed } from '../data/mockData';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  ArrowRightLeft,
+  Bed,
   Building2,
-  Home,
-  Users,
   ChevronDown,
   ChevronUp,
-  Search,
-  Star,
-  X,
-  Plus,
-  ArrowRightLeft,
+  Home,
+  Loader2,
   Pencil,
+  Plus,
+  Search,
+  Shield,
+  Users,
+  X,
 } from 'lucide-react';
 
-function BuildingsPage({ language }) {
-  const {
-    isCentralAdmin,
-    isRegionBoss,
-    isEmployee,
-    getUserRegion,
-    canEditRegion,
-  } = useAuth();
+import { api } from '../services/api';
+import { useAuth } from '../context/AuthContext';
 
-  const userRegionId = getUserRegion();
+/**
+ * BuildingsPage.jsx
+ *
+ * Real connected version:
+ * - No mockData.
+ * - Region -> Dorm Type selector.
+ * - Fetches buildings, apartments, rooms, students from Django API.
+ * - Shows assigned students by matching Student.assigned_room / assigned_room_id to Room.id.
+ * - Uses backend manual assignment endpoints:
+ *   POST /api/room-assignments/assign/
+ *   POST /api/room-assignments/move/
+ *   POST /api/room-assignments/unassign/
+ *   POST /api/room-assignments/swap/
+ */
 
-  const [studentsState, setStudentsState] = useState(() => [...studentsSeed]);
+const ENDPOINTS = {
+  regions: '/api/regions/',
+  dormTypes: '/api/dorm-types/',
+  buildings: '/api/buildings/',
+  students: '/api/students/',
+  apartmentsForBuilding: (buildingId) => `/api/buildings/${buildingId}/apartments/`,
+  roomsForBuilding: (buildingId) => `/api/buildings/${buildingId}/rooms/`,
+  assign: '/api/room-assignments/assign/',
+  move: '/api/room-assignments/move/',
+  unassign: '/api/room-assignments/unassign/',
+  swap: '/api/room-assignments/swap/',
+};
 
-  const [selectedBuilding, setSelectedBuilding] = useState(null);
-  const [selectedApartment, setSelectedApartment] = useState(null);
+function asArray(payload, key) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.results)) return payload.results;
+  if (key && Array.isArray(payload?.[key])) return payload[key];
+  return [];
+}
+
+function idOf(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'object') return String(value.id ?? value.pk ?? '');
+  return String(value);
+}
+
+function getStudentAssignedRoomId(student) {
+  return idOf(student.assigned_room_id ?? student.assigned_room);
+}
+
+function getStudentLabel(student) {
+  return (
+    student.full_name ||
+    [student.first_name, student.last_name].filter(Boolean).join(' ') ||
+    student.student_id ||
+    `#${student.id}`
+  );
+}
+
+function getBuildingLabel(building, t) {
+  return building.name || `${t.building} ${building.number ?? building.id}`;
+}
+
+function getDormTypeIdFromBuilding(building) {
+  return idOf(building.dorm_type_id ?? building.dorm_type);
+}
+
+function getRegionIdFromBuilding(building) {
+  return idOf(building.region_id ?? building.region);
+}
+
+function getRegionIdFromDormType(dormType) {
+  return idOf(dormType.region_id ?? dormType.region);
+}
+
+function getApartmentIdFromRoom(room) {
+  return idOf(room.apartment_id ?? room.apartment);
+}
+
+function getBuildingIdFromRoom(room) {
+  return idOf(room.building_id ?? room.building);
+}
+
+function getRoomCapacity(room) {
+  return Number(room.capacity ?? 0) || 0;
+}
+
+function normalizeText(value) {
+  return String(value ?? '').toLowerCase().trim();
+}
+
+
+
+function buildDormTypesFromBuildings(buildings) {
+  const map = new Map();
+
+  buildings.forEach((building) => {
+    const id = getDormTypeIdFromBuilding(building);
+    if (!id || map.has(id)) return;
+
+    map.set(id, {
+      id,
+      code: building.dorm_type_code ?? '',
+      name: building.dorm_type_name || `Dorm type ${id}`,
+      region: getRegionIdFromBuilding(building),
+      region_name: building.region_name || '',
+      _fallback: true,
+    });
+  });
+
+  return Array.from(map.values());
+}
+
+export default function BuildingsPage({ language = 'he' }) {
+  const auth = useAuth();
+
+  const currentUser = auth?.user || auth?.currentUser || {};
+  const isCentralAdmin =
+    typeof auth?.isCentralAdmin === 'function'
+      ? auth.isCentralAdmin
+      : () => Boolean(currentUser.is_central_admin || currentUser.role === 'central_admin');
+
+  const isRegionBoss =
+    typeof auth?.isRegionBoss === 'function'
+      ? auth.isRegionBoss
+      : () => Boolean(currentUser.is_boss || currentUser.role === 'boss' || currentUser.role === 'region_boss');
+
+  const isEmployee =
+    typeof auth?.isEmployee === 'function'
+      ? auth.isEmployee
+      : () => Boolean(currentUser.role === 'employee');
+
+  const getUserRegion =
+    typeof auth?.getUserRegion === 'function'
+      ? auth.getUserRegion
+      : () => currentUser.region || currentUser.region_id || null;
+
+  const canEditRegion =
+    typeof auth?.canEditRegion === 'function'
+      ? auth.canEditRegion
+      : (regionId) => isCentralAdmin() || idOf(regionId) === idOf(getUserRegion());
+
+  const userRegionId = idOf(getUserRegion());
+  const canViewAllRegions = isCentralAdmin() || isRegionBoss();
+  const isHe = language === 'he';
+
+  const t = isHe
+    ? {
+        title: 'בניינים וחדרים',
+        subtitle: 'ניהול חדרים ושיוך סטודנטים לפי הרשאות',
+        chooseRegion: 'בחר אזור',
+        chooseDormType: 'בחר סוג מעונות',
+        allDormTypes: 'כל סוגי המעונות באזור',
+        search: 'חיפוש בניין / דירה / חדר...',
+        building: 'בניין',
+        buildings: 'בניינים',
+        apartment: 'דירה',
+        apartments: 'דירות',
+        room: 'חדר',
+        rooms: 'חדרים',
+        students: 'סטודנטים',
+        capacity: 'קיבולת',
+        assigned: 'משויכים',
+        unassigned: 'לא משויכים',
+        occupied: 'תפוס',
+        free: 'פנוי',
+        active: 'פעיל',
+        inactive: 'לא פעיל',
+        loading: 'טוען...',
+        loadingRooms: 'טוען חדרים...',
+        noData: 'אין נתונים להצגה',
+        noRooms: 'אין חדרים בדירה הזו',
+        noStudents: 'אין סטודנטים בחדר',
+        noAvailableStudents: 'אין סטודנטים פנויים לשיוך',
+        selectApartment: 'בחרי דירה לצפייה',
+        selectApartmentHelp: 'בחרי בניין ואז דירה כדי לראות חדרים ושיוכים.',
+        addStudent: 'הוסף סטודנט/ית',
+        pickStudent: 'בחר סטודנט/ית לשיוך',
+        moveStudent: 'העברה / עדכון חדר',
+        moveTo: 'העבר אל',
+        remove: 'הסר',
+        swap: 'החלפה',
+        swapHint: 'בחרי סטודנט/ית נוסף/ת כדי לבצע החלפה',
+        cancel: 'ביטול',
+        confirm: 'אישור',
+        close: 'סגור',
+        roomFull: 'החדר מלא',
+        viewOnly: 'צפייה בלבד — אין הרשאה לערוך באזור זה',
+        centralOrBoss: 'צפייה לפי אזור וסוג מעונות',
+        employeeScope: 'מוצג רק האזור המשויך למשתמש',
+        error: 'שגיאה בטעינת הנתונים',
+        actionError: 'הפעולה נכשלה',
+        searchStudent: 'חיפוש סטודנט/ית...',
+        searchRoom: 'חיפוש חדר / דירה / בניין...',
+        clear: 'נקה',
+      }
+    : {
+        title: 'Buildings & Rooms',
+        subtitle: 'Manage room assignments according to permissions',
+        chooseRegion: 'Choose region',
+        chooseDormType: 'Choose dorm type',
+        allDormTypes: 'All dorm types in this region',
+        search: 'Search building / apartment / room...',
+        building: 'Building',
+        buildings: 'Buildings',
+        apartment: 'Apartment',
+        apartments: 'Apartments',
+        room: 'Room',
+        rooms: 'Rooms',
+        students: 'Students',
+        capacity: 'Capacity',
+        assigned: 'Assigned',
+        unassigned: 'Unassigned',
+        occupied: 'Occupied',
+        free: 'Free',
+        active: 'Active',
+        inactive: 'Inactive',
+        loading: 'Loading...',
+        loadingRooms: 'Loading rooms...',
+        noData: 'No data to display',
+        noRooms: 'No rooms in this apartment',
+        noStudents: 'No students in this room',
+        noAvailableStudents: 'No available students',
+        selectApartment: 'Select an apartment',
+        selectApartmentHelp: 'Pick a building and then an apartment to see rooms and assignments.',
+        addStudent: 'Add student',
+        pickStudent: 'Pick a student',
+        moveStudent: 'Move / update room',
+        moveTo: 'Move to',
+        remove: 'Remove',
+        swap: 'Swap',
+        swapHint: 'Pick another student to swap',
+        cancel: 'Cancel',
+        confirm: 'Confirm',
+        close: 'Close',
+        roomFull: 'Room is full',
+        viewOnly: 'View-only — no edit permission for this region',
+        centralOrBoss: 'Viewing by region and dorm type',
+        employeeScope: 'Showing only your assigned region',
+        error: 'Error loading data',
+        actionError: 'Action failed',
+        searchStudent: 'Search student...',
+        searchRoom: 'Search room / apartment / building...',
+        clear: 'Clear',
+      };
+
+  const [regions, setRegions] = useState([]);
+  const [dormTypes, setDormTypes] = useState([]);
+  const [buildings, setBuildings] = useState([]);
+  const [students, setStudents] = useState([]);
+
+  const [selectedRegionId, setSelectedRegionId] = useState('');
+  const [selectedDormTypeId, setSelectedDormTypeId] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [expandedBuildings, setExpandedBuildings] = useState({});
 
-  const [addModal, setAddModal] = useState({ open: false, roomId: null, query: '' });
+  const [expandedBuildingId, setExpandedBuildingId] = useState(null);
+  const [selectedApartmentId, setSelectedApartmentId] = useState(null);
+  const [apartments, setApartments] = useState([]);
+  const [buildingRooms, setBuildingRooms] = useState([]);
+
+  const [loading, setLoading] = useState(true);
+  const [loadingBuilding, setLoadingBuilding] = useState(false);
+  const [error, setError] = useState('');
+  const [actionError, setActionError] = useState('');
+
+  const [draggingStudentId, setDraggingStudentId] = useState(null);
+
+  const [addModal, setAddModal] = useState({
+    open: false,
+    roomId: null,
+    query: '',
+  });
 
   const [moveModal, setMoveModal] = useState({
     open: false,
     studentId: null,
-    fromRoomId: null,
-    toRoomId: '',
     query: '',
+    toRoomId: '',
   });
 
   const [swapMode, setSwapMode] = useState({
     active: false,
     studentId: null,
-    fromRoomId: null,
   });
 
-  const [draggingStudentId, setDraggingStudentId] = useState(null);
-
-  const t = {
-    he: {
-      title: 'בניינים וחדרים',
-      subtitle: '',
-      search: 'חיפוש בניין...',
-      chooseOffice: 'בחר משרד לצפייה',
-      chooseDorm: 'בחר מעונות לצפייה',
-      floor: 'קומה',
-      apartment: 'דירה',
-      room: 'חדר',
-      students: 'סטודנטים',
-      empty: 'פנוי',
-      reserved: 'שמור',
-      selectBuilding: 'בחר דירה לצפייה',
-      addStudent: 'הוסף סטודנט/ית',
-      remove: 'הסר',
-      close: 'סגור',
-      pickStudent: 'בחר סטודנט/ית לשיוך',
-      dropHere: 'שחרר כאן לשיוך',
-      capacity: 'קיבולת',
-      updateMove: 'עדכון / העברה',
-      swap: 'החלפה',
-      swapHint: 'בחר סטודנט נוסף להחלפה',
-      moveTo: 'העבר אל',
-      confirm: 'אישור',
-      cancel: 'ביטול',
-      roomFull: 'החדר מלא',
-      searchRoom: 'חיפוש חדר/דירה/בניין...',
-      statsBuildings: 'בניינים',
-      statsApartments: 'דירות',
-      statsRooms: 'חדרים',
-      statsAssigned: 'משוייכים',
-      statsUnassigned: 'לא משוייכים',
-      dragTip: 'שיוך סטודנטים לחדרים',
-      viewOnly: 'צפייה בלבד (אין הרשאה לעריכה באיזור זה)',
-      noOffice: 'לא נמצא משרד מתאים לאזור של המשתמש',
-      noDorm: 'לא נמצא אזור/מעונות מתאים למשתמש',
-      buildingsList: 'רשימת בניינים',
-      items: 'פריטים',
-      emptyHelp: 'בחרי בניין ואז דירה — ותראי את החדרים והשיוכים.',
-      noAvailableStudents: 'אין סטודנטים פנויים לשיוך',
-      noResults: 'אין תוצאות',
-      clear: 'נקה',
-      allRegionsView: 'צפייה בכל האזורים',
-    },
-    en: {
-      title: 'Buildings & Rooms',
-      subtitle: 'Assign students to rooms',
-      search: 'Search building...',
-      chooseOffice: 'Choose office',
-      chooseDorm: 'Choose dorm',
-      floor: 'Floor',
-      apartment: 'Apartment',
-      room: 'Room',
-      students: 'Students',
-      empty: 'Empty',
-      reserved: 'Reserved',
-      selectBuilding: 'Select an apartment to view',
-      addStudent: 'Add student',
-      remove: 'Remove',
-      close: 'Close',
-      pickStudent: 'Pick a student to assign',
-      dropHere: 'Drop here to assign',
-      capacity: 'Capacity',
-      updateMove: 'Update / Move',
-      swap: 'Swap',
-      swapHint: 'Pick another student to swap',
-      moveTo: 'Move to',
-      confirm: 'Confirm',
-      cancel: 'Cancel',
-      roomFull: 'Room is full',
-      searchRoom: 'Search room/apartment/building...',
-      statsBuildings: 'Buildings',
-      statsApartments: 'Apartments',
-      statsRooms: 'Rooms',
-      statsAssigned: 'Assigned',
-      statsUnassigned: 'Unassigned',
-      dragTip: 'Drag students between rooms',
-      viewOnly: 'View-only (no edit permission for this region)',
-      noOffice: 'No office found for this user region',
-      noDorm: 'No dorm/region found for this user',
-      buildingsList: 'Buildings list',
-      items: 'items',
-      emptyHelp: 'Pick a building and then an apartment to manage rooms.',
-      noAvailableStudents: 'No available students',
-      noResults: 'No results',
-      clear: 'Clear',
-      allRegionsView: 'Viewing all regions',
-    },
-  }[language];
-
-  const canViewAllRegions = isCentralAdmin() || isRegionBoss();
-  const isOwnRegionOnly = isEmployee();
-
-  const userDormObj = useMemo(() => {
-    return dorms.find((d) => String(d.id) === String(userRegionId)) || null;
-  }, [userRegionId]);
-
-  const userOfficeId = userDormObj?.officeId || null;
-
-  const defaultOfficeId = useMemo(() => {
-    if (canViewAllRegions) {
-      return userOfficeId || dormOffices?.[0]?.id || '';
-    }
-    return userOfficeId || '';
-  }, [canViewAllRegions, userOfficeId]);
-
-  const [selectedOfficeId, setSelectedOfficeId] = useState(defaultOfficeId);
-
-  useEffect(() => {
-    setSelectedOfficeId(defaultOfficeId);
-  }, [defaultOfficeId]);
-
-  const effectiveOfficeId = canViewAllRegions ? selectedOfficeId : userOfficeId;
-
-  const dormsInOffice = useMemo(() => {
-    const office = dormOffices.find((o) => String(o.id) === String(effectiveOfficeId));
-    if (!office) return [];
-    const allowed = new Set((office.dormIds || []).map(String));
-    return dorms.filter((d) => allowed.has(String(d.id)));
-  }, [effectiveOfficeId]);
-
-  const defaultDormId = useMemo(() => {
-    if (canViewAllRegions) {
-      return userRegionId || dormsInOffice[0]?.id || '';
-    }
-    return userRegionId || '';
-  }, [canViewAllRegions, dormsInOffice, userRegionId]);
-
-  const [selectedDormId, setSelectedDormId] = useState(defaultDormId);
-
-  useEffect(() => {
-    setSelectedDormId(defaultDormId);
-  }, [defaultDormId]);
-
-  const effectiveDormId = canViewAllRegions ? selectedDormId : userRegionId;
-
-  const effectiveDormObj = useMemo(
-    () => dorms.find((d) => String(d.id) === String(effectiveDormId)) || null,
-    [effectiveDormId]
+  const selectedRegion = useMemo(
+    () => regions.find((region) => idOf(region.id) === idOf(selectedRegionId)) || null,
+    [regions, selectedRegionId]
   );
 
-  const effectiveOfficeObj = useMemo(
-    () => dormOffices.find((o) => String(o.id) === String(effectiveOfficeId)) || null,
-    [effectiveOfficeId]
-  );
+  const dormTypesInRegion = useMemo(() => {
+    if (!selectedRegionId) return dormTypes;
+    return dormTypes.filter((dormType) => getRegionIdFromDormType(dormType) === idOf(selectedRegionId));
+  }, [dormTypes, selectedRegionId]);
 
-  const canEditThisDorm = useMemo(() => {
-    if (!effectiveDormId) return false;
-    return isCentralAdmin() || canEditRegion(effectiveDormId);
-  }, [effectiveDormId, isCentralAdmin, canEditRegion]);
-
-  const toggleBuilding = (buildingId) => {
-    setExpandedBuildings((prev) => ({ ...prev, [buildingId]: !prev[buildingId] }));
-    setSelectedBuilding(buildingId);
-    setSelectedApartment(null);
-  };
-
-  const getBuildingApartments = (buildingId) =>
-    apartments.filter((a) => String(a.buildingId) === String(buildingId));
-
-  const getApartmentRooms = (apartmentId) =>
-    rooms.filter((r) => String(r.apartmentId) === String(apartmentId));
-
-  const getRoomStudents = (roomId) =>
-    studentsState.filter((s) => String(s.assignedRoomId) === String(roomId));
-
-  const unassignedStudents = useMemo(
-    () => studentsState.filter((s) => !s.assignedRoomId),
-    [studentsState]
-  );
-
-  const filteredBuildings = useMemo(() => {
+  const scopeBuildings = useMemo(() => {
     let list = buildings;
 
-    if (isOwnRegionOnly && userRegionId) {
-      list = list.filter((b) => String(b.regionId) === String(userRegionId));
-    } else if (effectiveDormId) {
-      list = list.filter((b) => String(b.regionId) === String(effectiveDormId));
+    if (selectedRegionId) {
+      list = list.filter((building) => getRegionIdFromBuilding(building) === idOf(selectedRegionId));
     }
 
-    if (searchQuery.trim()) {
-      const q = searchQuery.trim().toLowerCase();
-      list = list.filter((b) => {
-        const dorm = dorms.find((d) => String(d.id) === String(b.regionId));
-        return (
-          (b.name || '').toLowerCase().includes(q) ||
-          (dorm?.name || '').toLowerCase().includes(q) ||
-          (dorm?.nameEn || '').toLowerCase().includes(q)
-        );
-      });
+    if (selectedDormTypeId && selectedDormTypeId !== 'all') {
+      list = list.filter((building) => getDormTypeIdFromBuilding(building) === idOf(selectedDormTypeId));
     }
 
     return list;
-  }, [effectiveDormId, isOwnRegionOnly, userRegionId, searchQuery]);
+  }, [buildings, selectedRegionId, selectedDormTypeId]);
 
-  const canDropIntoRoom = (room) => {
-    const current = getRoomStudents(room.id).length;
-    return current < (Number(room.capacity) || 0);
-  };
+  const filteredBuildings = useMemo(() => {
+    const q = normalizeText(searchQuery);
+    if (!q) return scopeBuildings;
 
-  const assignStudentToRoom = (studentId, roomId) => {
-    if (!canEditThisDorm) return;
-    setStudentsState((prev) =>
-      prev.map((s) => (String(s.id) === String(studentId) ? { ...s, assignedRoomId: roomId } : s))
-    );
-  };
-
-  const unassignStudent = (studentId) => {
-    if (!canEditThisDorm) return;
-    setStudentsState((prev) =>
-      prev.map((s) => (String(s.id) === String(studentId) ? { ...s, assignedRoomId: null } : s))
-    );
-  };
-
-  const swapStudents = (studentAId, roomAId, studentBId, roomBId) => {
-    if (!canEditThisDorm) return;
-    setStudentsState((prev) =>
-      prev.map((s) => {
-        if (String(s.id) === String(studentAId)) return { ...s, assignedRoomId: roomBId };
-        if (String(s.id) === String(studentBId)) return { ...s, assignedRoomId: roomAId };
-        return s;
-      })
-    );
-  };
-
-  const filteredUnassigned = useMemo(() => {
-    const q = addModal.query.trim().toLowerCase();
-    if (!q) return unassignedStudents;
-    return unassignedStudents.filter((s) =>
-      `${s.firstName} ${s.lastName}`.toLowerCase().includes(q)
-    );
-  }, [unassignedStudents, addModal.query]);
-
-  const allRoomsInDorm = useMemo(() => {
-    if (!effectiveDormId) return [];
-    return rooms.filter((r) => String(r.regionId) === String(effectiveDormId));
-  }, [effectiveDormId]);
-
-  const filteredRoomsForMove = useMemo(() => {
-    const q = moveModal.query.trim().toLowerCase();
-    if (!q) return allRoomsInDorm;
-
-    return allRoomsInDorm.filter((r) => {
-      const apt = apartments.find((a) => String(a.id) === String(r.apartmentId));
-      const bld = buildings.find((b) => String(b.id) === String(r.buildingId));
-
-      const hay = [
-        r.id,
-        r.name,
-        String(apt?.number ?? ''),
-        String(apt?.floor ?? ''),
-        bld?.name || '',
-        bld?.id || '',
-        r.apartmentId || '',
-        r.buildingId || '',
+    return scopeBuildings.filter((building) => {
+      const haystack = [
+        building.id,
+        building.number,
+        building.name,
+        building.dorm_type_name,
+        building.region_name,
       ]
         .join(' ')
         .toLowerCase();
 
-      return hay.includes(q);
+      return haystack.includes(q);
     });
-  }, [allRoomsInDorm, moveModal.query]);
+  }, [scopeBuildings, searchQuery]);
 
-  const safeResetSelection = () => {
-    setSelectedBuilding(null);
-    setSelectedApartment(null);
-    setExpandedBuildings({});
-    setSearchQuery('');
-    setSwapMode({ active: false, studentId: null, fromRoomId: null });
-    setDraggingStudentId(null);
-    setAddModal({ open: false, roomId: null, query: '' });
-    setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' });
-  };
-
-  const handleOfficeChange = (nextOfficeId) => {
-    setSelectedOfficeId(nextOfficeId);
-
-    const office = dormOffices.find((o) => String(o.id) === String(nextOfficeId));
-    const nextDormId =
-      office?.dormIds?.find((id) => dorms.some((d) => String(d.id) === String(id))) || '';
-
-    setSelectedDormId(nextDormId);
-    safeResetSelection();
-  };
-
-  const handleDormChange = (nextDormId) => {
-    setSelectedDormId(nextDormId);
-    safeResetSelection();
-  };
-
-  const selectedApartmentObj = useMemo(
-    () => (selectedApartment ? apartments.find((a) => String(a.id) === String(selectedApartment)) : null),
-    [selectedApartment]
+  const selectedBuilding = useMemo(
+    () => buildings.find((building) => idOf(building.id) === idOf(expandedBuildingId)) || null,
+    [buildings, expandedBuildingId]
   );
 
-  const selectedBuildingObj = useMemo(() => {
-    if (!selectedApartmentObj) return null;
-    return buildings.find((b) => String(b.id) === String(selectedApartmentObj.buildingId)) || null;
-  }, [selectedApartmentObj]);
+  const selectedApartment = useMemo(
+    () => apartments.find((apt) => idOf(apt.id) === idOf(selectedApartmentId)) || null,
+    [apartments, selectedApartmentId]
+  );
 
   const selectedApartmentRooms = useMemo(() => {
-    if (!selectedApartment) return [];
-    return getApartmentRooms(selectedApartment);
-  }, [selectedApartment]);
+    if (!selectedApartmentId) return [];
+
+    return buildingRooms
+      .filter((room) => getApartmentIdFromRoom(room) === idOf(selectedApartmentId))
+      .sort((a, b) => String(a.name ?? a.number ?? a.id).localeCompare(String(b.name ?? b.number ?? b.id)));
+  }, [buildingRooms, selectedApartmentId]);
 
   const assignedCount = useMemo(
-    () => studentsState.filter((s) => !!s.assignedRoomId).length,
-    [studentsState]
+    () => students.filter((student) => Boolean(getStudentAssignedRoomId(student))).length,
+    [students]
   );
 
-  const unassignedCount = useMemo(
-    () => studentsState.filter((s) => !s.assignedRoomId).length,
-    [studentsState]
+  const unassignedStudents = useMemo(
+    () => students.filter((student) => !getStudentAssignedRoomId(student)),
+    [students]
   );
 
-  const apartmentsCountInFiltered = useMemo(() => {
-    let total = 0;
-    filteredBuildings.forEach((b) => {
-      total += getBuildingApartments(b.id).length;
+  const canEditSelectedRegion = useMemo(() => {
+    if (!selectedRegionId) return false;
+    return Boolean(canEditRegion(selectedRegionId));
+  }, [canEditRegion, selectedRegionId]);
+
+  const viewOnly = !canEditSelectedRegion;
+
+  const getRoomStudents = useCallback(
+    (roomId) => {
+      const rid = idOf(roomId);
+      return students
+        .filter((student) => getStudentAssignedRoomId(student) === rid)
+        .sort((a, b) => getStudentLabel(a).localeCompare(getStudentLabel(b)));
+    },
+    [students]
+  );
+
+  const refreshStudents = useCallback(async () => {
+    const res = await api.get(ENDPOINTS.students);
+    setStudents(asArray(res.data));
+  }, []);
+
+  const resetBuildingSelection = useCallback(() => {
+    setExpandedBuildingId(null);
+    setSelectedApartmentId(null);
+    setApartments([]);
+    setBuildingRooms([]);
+    setAddModal({ open: false, roomId: null, query: '' });
+    setMoveModal({ open: false, studentId: null, query: '', toRoomId: '' });
+    setSwapMode({ active: false, studentId: null });
+    setDraggingStudentId(null);
+    setActionError('');
+  }, []);
+
+  const fetchBuildingData = useCallback(async (buildingId) => {
+    setLoadingBuilding(true);
+    setActionError('');
+    setSelectedApartmentId(null);
+    setApartments([]);
+    setBuildingRooms([]);
+
+    try {
+      const [apartmentsRes, roomsRes] = await Promise.all([
+        api.get(ENDPOINTS.apartmentsForBuilding(buildingId)),
+        api.get(ENDPOINTS.roomsForBuilding(buildingId)),
+      ]);
+
+      setApartments(asArray(apartmentsRes.data, 'apartments'));
+      setBuildingRooms(asArray(roomsRes.data, 'rooms'));
+    } catch (err) {
+      console.error('ERROR LOADING BUILDING DATA:', err);
+      setActionError(err?.response?.data?.error || t.error);
+      setApartments([]);
+      setBuildingRooms([]);
+    } finally {
+      setLoadingBuilding(false);
+    }
+  }, [t.error]);
+
+  const refreshOpenBuilding = useCallback(async () => {
+    await refreshStudents();
+    if (expandedBuildingId) {
+      await fetchBuildingData(expandedBuildingId);
+    }
+  }, [expandedBuildingId, fetchBuildingData, refreshStudents]);
+
+  useEffect(() => {
+    const fetchInitialData = async () => {
+      setLoading(true);
+      setError('');
+
+      try {
+        const [regionsRes, buildingsRes, studentsRes, dormTypesRes] = await Promise.all([
+          api.get(ENDPOINTS.regions),
+          api.get(ENDPOINTS.buildings),
+          api.get(ENDPOINTS.students),
+          api.get(ENDPOINTS.dormTypes).catch((err) => {
+            console.warn('Dorm types endpoint failed. Falling back to buildings-derived dorm types.', err);
+            return null;
+          }),
+        ]);
+
+        const nextRegions = asArray(regionsRes.data);
+        const nextBuildings = asArray(buildingsRes.data);
+        const nextStudents = asArray(studentsRes.data);
+        const nextDormTypes = dormTypesRes ? asArray(dormTypesRes.data) : buildDormTypesFromBuildings(nextBuildings);
+
+        setRegions(nextRegions);
+        setBuildings(nextBuildings);
+        setStudents(nextStudents);
+        setDormTypes(nextDormTypes);
+
+        const initialRegionId = canViewAllRegions
+          ? idOf(userRegionId || nextRegions[0]?.id)
+          : idOf(userRegionId || nextRegions[0]?.id);
+
+        setSelectedRegionId(initialRegionId);
+        setSelectedDormTypeId('all');
+      } catch (err) {
+        console.error('ERROR LOADING BUILDINGS PAGE:', err);
+        setError(err?.response?.data?.detail || err?.response?.data?.error || t.error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchInitialData();
+  }, [language]);
+
+  useEffect(() => {
+    if (!selectedRegionId) return;
+
+    const hasSelectedDormInRegion =
+      selectedDormTypeId === 'all' ||
+      dormTypesInRegion.some((dormType) => idOf(dormType.id) === idOf(selectedDormTypeId));
+
+    if (!hasSelectedDormInRegion) {
+      setSelectedDormTypeId('all');
+    }
+  }, [selectedRegionId, selectedDormTypeId, dormTypesInRegion]);
+
+  useEffect(() => {
+    resetBuildingSelection();
+  }, [selectedRegionId, selectedDormTypeId, resetBuildingSelection]);
+
+
+  const handleRegionChange = (nextRegionId) => {
+    setSelectedRegionId(nextRegionId);
+    setSelectedDormTypeId('all');
+    setSearchQuery('');
+  };
+
+  const toggleBuilding = async (buildingId) => {
+    if (idOf(expandedBuildingId) === idOf(buildingId)) {
+      resetBuildingSelection();
+      return;
+    }
+
+    setExpandedBuildingId(buildingId);
+    await fetchBuildingData(buildingId);
+  };
+
+  const filteredUnassignedStudents = useMemo(() => {
+    const q = normalizeText(addModal.query);
+    if (!q) return unassignedStudents;
+
+    return unassignedStudents.filter((student) => {
+      const haystack = [
+        getStudentLabel(student),
+        student.student_id,
+        student.business_partner_id,
+        student.email,
+      ]
+        .join(' ')
+        .toLowerCase();
+
+      return haystack.includes(q);
     });
-    return total;
-  }, [filteredBuildings]);
+  }, [addModal.query, unassignedStudents]);
+const filteredMoveRooms = useMemo(() => {
+  const q = normalizeText(moveModal.query);
+  const rooms = buildingRooms;
 
-  const roomsCountInFiltered = useMemo(() => {
-    let total = 0;
-    filteredBuildings.forEach((b) => {
-      const apts = getBuildingApartments(b.id);
-      apts.forEach((a) => {
-        total += getApartmentRooms(a.id).length;
+  if (!q) return rooms;
+
+  return rooms.filter((room) => {
+    const building = buildings.find((b) => idOf(b.id) === getBuildingIdFromRoom(room));
+    const aptNumber = room.apartment_number || room.apartmentNumber || '';
+    const haystack = [
+      room.id,
+      room.name,
+      room.number,
+      aptNumber,
+      building?.number,
+      building?.name,
+    ]
+      .join(' ')
+      .toLowerCase();
+
+    return haystack.includes(q);
+  });
+}, [moveModal.query, buildingRooms, buildings]);
+
+
+  const callAction = async (callback) => {
+    if (viewOnly) return;
+
+    setActionError('');
+
+    try {
+      await callback();
+      await refreshOpenBuilding();
+      setAddModal({ open: false, roomId: null, query: '' });
+      setMoveModal({ open: false, studentId: null, query: '', toRoomId: '' });
+      setSwapMode({ active: false, studentId: null });
+      setDraggingStudentId(null);
+    } catch (err) {
+      console.error('BUILDINGS PAGE ACTION ERROR:', err);
+      setActionError(err?.response?.data?.error || err?.response?.data?.detail || t.actionError);
+    }
+  };
+
+  const assignStudentToRoom = (studentId, roomId) =>
+    callAction(async () => {
+      await api.post(ENDPOINTS.assign, {
+        student_id: studentId,
+        room_id: roomId,
       });
     });
-    return total;
-  }, [filteredBuildings]);
 
-  const viewOnlyTitle = !canEditThisDorm ? t.viewOnly : '';
-  const showSelectors = canViewAllRegions;
-  const hasUserRegionMismatch = !isCentralAdmin() && !userDormObj;
+  const moveStudentToRoom = (studentId, roomId) =>
+    callAction(async () => {
+      await api.post(ENDPOINTS.move, {
+        student_id: studentId,
+        room_id: roomId,
+      });
+    });
+
+  const unassignStudent = (studentId) =>
+    callAction(async () => {
+      await api.post(ENDPOINTS.unassign, {
+        student_id: studentId,
+      });
+    });
+
+  const swapStudents = (studentAId, studentBId) =>
+    callAction(async () => {
+      await api.post(ENDPOINTS.swap, {
+        student_a_id: studentAId,
+        student_b_id: studentBId,
+      });
+    });
+
+  const StatCard = ({ icon: Icon, label, value }) => (
+    <div className="bp-stat">
+      <div className="bp-statIcon">
+        <Icon size={20} />
+      </div>
+      <div>
+        <div className="bp-statValue">{value}</div>
+        <div className="bp-statLabel">{label}</div>
+      </div>
+    </div>
+  );
+
+  if (loading) {
+    return (
+      <div className="bp-page bp-center" dir={isHe ? 'rtl' : 'ltr'}>
+        <Loader2 className="bp-spin" size={28} />
+        <span>{t.loading}</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bp-page bp-center" dir={isHe ? 'rtl' : 'ltr'}>
+        <div className="bp-errorBox">{error}</div>
+      </div>
+    );
+  }
 
   return (
-    <div className="bp-shell">
-      <div className="bp-top">
-        <div className="bp-titleRow">
-          <div className="bp-titleBlock">
-            <h1 className="bp-title">{t.title}</h1>
-            <div className="bp-sub">
-              <span className="bp-subText">{t.subtitle}</span>
-              <span className="bp-dot">•</span>
-              <span className="bp-tip" title={viewOnlyTitle}>
-                <Users size={14} />
-                {t.dragTip}
-              </span>
-              {!canEditThisDorm && <span className="bp-viewOnly">{t.viewOnly}</span>}
-              {isRegionBoss() && <span className="bp-viewOnly">{t.allRegionsView}</span>}
-            </div>
-          </div>
-
-          <div className="bp-contextPills">
-            <span className="bp-pill">
-              {language === 'he' ? effectiveOfficeObj?.name : effectiveOfficeObj?.nameEn}
-            </span>
-            <span className="bp-pill bp-pillPrimary">
-              {language === 'he' ? effectiveDormObj?.name : effectiveDormObj?.nameEn}
-            </span>
-          </div>
+    <div className="bp-page" dir={isHe ? 'rtl' : 'ltr'}>
+      <div className="bp-header">
+        <div>
+          <h1>{t.title}</h1>
+          <p>
+            {t.subtitle}
+            {' · '}
+            {canViewAllRegions ? t.centralOrBoss : t.employeeScope}
+          </p>
         </div>
 
-        {hasUserRegionMismatch && (
-          <div className="bp-warningBox">
-            {t.noDorm} ({String(userRegionId ?? '')})
-          </div>
-        )}
-
-        <div className="bp-controls">
-          <div className="bp-selectCard">
-            <div className="bp-selectGrid">
-              <div className="bp-field">
-                <label>{t.chooseOffice}</label>
-                <select
-                  value={effectiveOfficeId || ''}
-                  onChange={(e) => handleOfficeChange(e.target.value)}
-                  disabled={!showSelectors}
-                >
-                  {showSelectors
-                    ? dormOffices.map((o) => (
-                        <option key={o.id} value={o.id}>
-                          {language === 'he' ? o.name : o.nameEn}
-                        </option>
-                      ))
-                    : effectiveOfficeObj && (
-                        <option value={effectiveOfficeObj.id}>
-                          {language === 'he' ? effectiveOfficeObj.name : effectiveOfficeObj.nameEn}
-                        </option>
-                      )}
-                </select>
-              </div>
-
-              <div className="bp-field">
-                <label>{t.chooseDorm}</label>
-                <select
-                  value={effectiveDormId || ''}
-                  onChange={(e) => handleDormChange(e.target.value)}
-                  disabled={!showSelectors}
-                >
-                  {showSelectors
-                    ? dormsInOffice.map((d) => (
-                        <option key={d.id} value={d.id}>
-                          {language === 'he' ? d.name : d.nameEn}
-                        </option>
-                      ))
-                    : effectiveDormObj && (
-                        <option value={effectiveDormObj.id}>
-                          {language === 'he' ? effectiveDormObj.name : effectiveDormObj.nameEn}
-                        </option>
-                      )}
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div className="bp-searchCard">
-            <div className="bp-search">
-              <Search size={18} />
-              <input
-                type="text"
-                placeholder={t.search}
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
-              {searchQuery?.trim() && (
-                <button className="bp-clear" onClick={() => setSearchQuery('')} title={t.clear}>
-                  <X size={16} />
-                </button>
-              )}
-            </div>
-
-            <div className="bp-stats">
-              <div className="bp-stat">
-                <span className="bp-statLabel">{t.statsBuildings}</span>
-                <span className="bp-statValue">{filteredBuildings.length}</span>
-              </div>
-              <div className="bp-stat">
-                <span className="bp-statLabel">{t.statsApartments}</span>
-                <span className="bp-statValue">{apartmentsCountInFiltered}</span>
-              </div>
-              <div className="bp-stat">
-                <span className="bp-statLabel">{t.statsRooms}</span>
-                <span className="bp-statValue">{roomsCountInFiltered}</span>
-              </div>
-              <div className="bp-stat bp-statAccent">
-                <span className="bp-statLabel">{t.statsAssigned}</span>
-                <span className="bp-statValue">{assignedCount}</span>
-              </div>
-              <div className="bp-stat">
-                <span className="bp-statLabel">{t.statsUnassigned}</span>
-                <span className="bp-statValue">{unassignedCount}</span>
-              </div>
-            </div>
-          </div>
+        <div className={`bp-permission ${viewOnly ? 'readonly' : ''}`}>
+          <Shield size={16} />
+          {viewOnly ? t.viewOnly : canViewAllRegions ? t.centralOrBoss : t.employeeScope}
         </div>
-
-        {showSelectors && (
-          <div className="bp-chipRow">
-            {dormsInOffice.slice(0, 14).map((d) => (
-              <button
-                key={d.id}
-                className={`bp-chip ${String(effectiveDormId) === String(d.id) ? 'active' : ''}`}
-                onClick={() => handleDormChange(d.id)}
-                title={language === 'he' ? d.name : d.nameEn}
-              >
-                {language === 'he' ? d.name : d.nameEn}
-              </button>
-            ))}
-          </div>
-        )}
       </div>
 
-      <div className="bp-grid">
-        <div className="bp-left">
-          <div className="bp-panel">
-            <div className="bp-panelHeader">
-              <div className="bp-panelHeaderLeft">
-                <Building2 size={18} />
-                <span className="bp-panelTitle">{t.buildingsList}</span>
-              </div>
-              <span className="bp-panelMeta">
-                {filteredBuildings.length} {t.items}
-              </span>
-            </div>
+      <div className="bp-toolbar">
+        <div className="bp-field">
+          <label>{t.chooseRegion}</label>
+          <select
+            value={selectedRegionId}
+            disabled={!canViewAllRegions}
+            onChange={(e) => handleRegionChange(e.target.value)}
+          >
+            {regions.map((region) => (
+              <option key={region.id} value={region.id}>
+                {region.name}
+              </option>
+            ))}
+          </select>
+        </div>
 
-            <div className="bp-panelBody">
-              {filteredBuildings.map((building) => {
-                const buildingApartments = getBuildingApartments(building.id);
-                const isExpanded = expandedBuildings[building.id];
+        <div className="bp-field">
+          <label>{t.chooseDormType}</label>
+          <select
+            value={selectedDormTypeId}
+            disabled={!canViewAllRegions && isEmployee()}
+            onChange={(e) => setSelectedDormTypeId(e.target.value)}
+          >
+            <option value="all">{t.allDormTypes}</option>
+            {dormTypesInRegion.map((dormType) => (
+              <option key={dormType.id} value={dormType.id}>
+                {dormType.name}
+                {dormType.code ? ` (${dormType.code})` : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="bp-search">
+          <Search size={18} />
+          <input
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={t.search}
+          />
+          {searchQuery && (
+            <button type="button" onClick={() => setSearchQuery('')} title={t.clear}>
+              <X size={16} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {actionError && (
+        <div className="bp-errorBox small">
+          {actionError}
+          <button type="button" onClick={() => setActionError('')}>
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
+      <div className="bp-statsGrid">
+        <StatCard icon={Building2} label={t.buildings} value={filteredBuildings.length} />
+        <StatCard icon={Home} label={t.apartments} value={apartments.length || '—'} />
+        <StatCard icon={Bed} label={t.rooms} value={buildingRooms.length || '—'} />
+        <StatCard icon={Users} label={t.assigned} value={assignedCount} />
+        <StatCard icon={Users} label={t.unassigned} value={unassignedStudents.length} />
+      </div>
+
+      <div className="bp-layout">
+        <section className="bp-panel bp-listPanel">
+          <div className="bp-panelHead">
+            <div>
+              <Building2 size={18} />
+              <strong>{t.buildings}</strong>
+            </div>
+            <span>{filteredBuildings.length}</span>
+          </div>
+
+          <div className="bp-list">
+            {filteredBuildings.length === 0 ? (
+              <div className="bp-emptyMini">{t.noData}</div>
+            ) : (
+              filteredBuildings.map((building) => {
+                const expanded = idOf(expandedBuildingId) === idOf(building.id);
+                const buildingApartments = expanded ? apartments : [];
 
                 return (
-                  <div key={building.id} className="bp-bldCard">
+                  <div className="bp-buildingCard" key={building.id}>
                     <button
-                      className={`bp-bldHead ${selectedBuilding === building.id ? 'selected' : ''}`}
+                      type="button"
+                      className={`bp-buildingButton ${expanded ? 'selected' : ''}`}
                       onClick={() => toggleBuilding(building.id)}
                     >
-                      <div className="bp-bldIcon">
+                      <div className="bp-iconBubble">
                         <Building2 size={18} />
                       </div>
-                      <div className="bp-bldInfo">
-                        <div className="bp-bldName">{building.name}</div>
-                        <div className="bp-bldSub">
-                          <span>
-                            {building.floors ?? '-'} {t.floor}
-                          </span>
-                          <span className="bp-dotSmall">•</span>
-                          <span>
-                            {buildingApartments.length} {t.apartment}
-                          </span>
-                        </div>
+
+                      <div className="bp-buildingInfo">
+                        <strong>{getBuildingLabel(building, t)}</strong>
+                        <span>
+                          {building.dorm_type_name || '—'}
+                          {' · '}
+                          {building.region_name || selectedRegion?.name || '—'}
+                        </span>
                       </div>
-                      <div className="bp-bldChevron">
-                        {isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
-                      </div>
+
+                      <span className={`bp-status ${building.is_active ? 'ok' : 'bad'}`}>
+                        {building.is_active ? t.active : t.inactive}
+                      </span>
+
+                      {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
                     </button>
 
-                    {isExpanded && (
-                      <div className="bp-aptList">
-                        {buildingApartments.map((apt) => (
-                          <button
-                            key={apt.id}
-                            className={`bp-aptItem ${apt.isReserved ? 'reserved' : ''} ${
-                              selectedApartment === apt.id ? 'selected' : ''
-                            }`}
-                            onClick={() => setSelectedApartment(apt.id)}
-                          >
-                            <div className="bp-aptLeft">
-                              <Home size={16} />
-                              <span className="bp-aptText">
-                                {t.apartment} {apt.number}
-                              </span>
-                              {apt.isReserved && <Star size={14} className="bp-aptStar" />}
-                            </div>
+                    {expanded && (
+                      <div className="bp-apartmentList">
+                        {loadingBuilding ? (
+                          <div className="bp-loadingLine">
+                            <Loader2 className="bp-spin" size={15} />
+                            {t.loading}
+                          </div>
+                        ) : buildingApartments.length === 0 ? (
+                          <div className="bp-emptyMini">{t.noData}</div>
+                        ) : (
+                          buildingApartments.map((apt) => {
+                            const selected = idOf(selectedApartmentId) === idOf(apt.id);
+                            const aptRoomsCount = buildingRooms.filter((room) => getApartmentIdFromRoom(room) === idOf(apt.id)).length;
 
-                            <span className="bp-floorBadge">
-                              {t.floor} {apt.floor ?? '-'}
-                            </span>
-                          </button>
-                        ))}
+                            return (
+                              <button
+                                key={apt.id}
+                                type="button"
+                                className={`bp-apartmentButton ${selected ? 'selected' : ''}`}
+                                onClick={() => setSelectedApartmentId(selected ? null : apt.id)}
+                              >
+                                <Home size={15} />
+                                <div>
+                                  <strong>
+                                    {t.apartment} {apt.number}
+                                  </strong>
+                                  <span>
+                                    {apt.category_display || apt.category || '—'} ·{' '}
+                                    {apt.apartment_type_display || apt.apartment_type || '—'} ·{' '}
+                                    {apt.apartment_capacity ?? apt.capacity ?? '—'} {t.capacity} ·{' '}
+                                    {aptRoomsCount || apt.room_count || 0} {t.rooms}
+                                  </span>
+                                </div>
+                              </button>
+                            );
+                          })
+                        )}
                       </div>
                     )}
                   </div>
                 );
-              })}
-            </div>
+              })
+            )}
           </div>
-        </div>
+        </section>
 
-        <div className="bp-right">
-          <div className="bp-panel bp-panelBig">
-            {selectedApartment ? (
-              <>
-                <div className="bp-workHeader">
-                  <div className="bp-workHeaderTop">
-                    <div className="bp-workTitle">
-                      <div className="bp-workTitleLine">
-                        <span className="bp-workH">
-                          {t.apartment} {selectedApartmentObj?.number}
-                        </span>
-                        {selectedApartmentObj?.isReserved && (
-                          <span className="bp-reservedBadge">
-                            <Star size={14} />
-                            {t.reserved}
-                          </span>
-                        )}
-                        {!canEditThisDorm && <span className="bp-viewPill">{t.viewOnly}</span>}
-                      </div>
-                      <div className="bp-breadcrumb">
-                        <span className="bp-breadItem">{selectedBuildingObj?.name}</span>
-                        <span className="bp-dotSmall">•</span>
-                        <span className="bp-breadItem">
-                          {language === 'he' ? effectiveDormObj?.name : effectiveDormObj?.nameEn}
-                        </span>
-                      </div>
-                    </div>
-
-                    {swapMode.active && canEditThisDorm && (
-                      <div className="bp-swapBanner">
-                        <div className="bp-swapLeft">
-                          <ArrowRightLeft size={16} />
-                          <span>{t.swapHint}</span>
-                        </div>
-                        <button
-                          className="bp-swapCancel"
-                          onClick={() =>
-                            setSwapMode({ active: false, studentId: null, fromRoomId: null })
-                          }
-                        >
-                          {t.cancel}
-                        </button>
-                      </div>
-                    )}
-                  </div>
+        <section className="bp-panel bp-workPanel">
+          {!selectedApartmentId ? (
+            <div className="bp-emptyState">
+              <div className="bp-bigIcon">
+                <Home size={38} />
+              </div>
+              <strong>{t.selectApartment}</strong>
+              <span>{t.selectApartmentHelp}</span>
+            </div>
+          ) : (
+            <>
+              <div className="bp-workHead">
+                <div>
+                  <span className="bp-breadcrumb">
+                    {selectedBuilding ? getBuildingLabel(selectedBuilding, t) : t.building}
+                    {' / '}
+                    {t.apartment} {selectedApartment?.number ?? selectedApartmentId}
+                  </span>
+                  <h2>
+                    {t.apartment} {selectedApartment?.number ?? selectedApartmentId}
+                  </h2>
                 </div>
 
-                <div className="bp-workBody">
-                  <div className="bp-roomsGrid">
-                    {selectedApartmentRooms.map((room) => {
-                      const roomStudents = getRoomStudents(room.id);
-                      const cap = Number(room.capacity) || 0;
-                      const count = roomStudents.length;
-                      const full = count >= cap;
-                      const pct = cap > 0 ? Math.min(100, Math.round((count / cap) * 100)) : 0;
+                {swapMode.active && !viewOnly && (
+                  <div className="bp-swapBanner">
+                    <ArrowRightLeft size={16} />
+                    <span>{t.swapHint}</span>
+                    <button type="button" onClick={() => setSwapMode({ active: false, studentId: null })}>
+                      {t.cancel}
+                    </button>
+                  </div>
+                )}
+              </div>
 
-                      return (
-                        <div
-                          key={room.id}
-                          className={`bp-roomCard ${full ? 'full' : ''} ${!canEditThisDorm ? 'viewOnly' : ''}`}
-                          onDragOver={(e) => {
-                            if (!canEditThisDorm) return;
-                            e.preventDefault();
-                          }}
-                          onDrop={() => {
-                            if (!canEditThisDorm) return;
-                            if (!draggingStudentId) return;
-                            if (!canDropIntoRoom(room)) return;
-                            assignStudentToRoom(draggingStudentId, room.id);
-                            setDraggingStudentId(null);
-                          }}
-                          title={!canEditThisDorm ? t.viewOnly : ''}
-                        >
-                          <div className="bp-roomTop">
-                            <div className="bp-roomTitle">
-                              <span className="bp-roomName">{room.name}</span>
-                              <span className="bp-roomCap">
-                                {t.capacity}: {count}/{cap}
-                                {full ? ` • ${t.roomFull}` : ''}
-                              </span>
-                            </div>
+              <div className="bp-roomGrid">
+                {loadingBuilding ? (
+                  <div className="bp-loadingBlock">
+                    <Loader2 className="bp-spin" size={24} />
+                    {t.loadingRooms}
+                  </div>
+                ) : selectedApartmentRooms.length === 0 ? (
+                  <div className="bp-emptyState small">{t.noRooms}</div>
+                ) : (
+                  selectedApartmentRooms.map((room) => {
+                    const roomStudents = getRoomStudents(room.id);
+                    const capacity = getRoomCapacity(room);
+                    const occupied = roomStudents.length || Number(room.current_occupancy ?? 0) || 0;
+                    const full = capacity > 0 && occupied >= capacity;
+                    const percent = capacity > 0 ? Math.min(100, Math.round((occupied / capacity) * 100)) : 0;
 
-                            <button
-                              className="bp-addBtn"
-                              onClick={() => {
-                                if (!canEditThisDorm) return;
-                                setAddModal({ open: true, roomId: room.id, query: '' });
-                              }}
-                              title={!canEditThisDorm ? t.viewOnly : t.addStudent}
-                              disabled={!canEditThisDorm}
-                            >
-                              <Plus size={16} />
-                              <span className="bp-addBtnText">{t.addStudent}</span>
-                            </button>
+                    return (
+                      <article
+                        key={room.id}
+                        className={`bp-roomCard ${full ? 'full' : ''} ${viewOnly ? 'readonly' : ''}`}
+                        onDragOver={(e) => {
+                          if (!viewOnly && !full) e.preventDefault();
+                        }}
+                        onDrop={() => {
+                          if (viewOnly || full || !draggingStudentId) return;
+                          assignStudentToRoom(draggingStudentId, room.id);
+                        }}
+                      >
+                        <div className="bp-roomTop">
+                          <div>
+                            <h3>
+                              {t.room} {room.name || room.number || room.id}
+                            </h3>
+                            <span>
+                              {t.capacity}: {occupied}/{capacity || '—'}
+                              {full ? ` · ${t.roomFull}` : ''}
+                            </span>
                           </div>
 
-                          <div className="bp-meter">
-                            <div className="bp-meterTrack">
-                              <div className="bp-meterFill" style={{ width: `${pct}%` }} />
-                            </div>
-                            <span className="bp-meterText">{pct}%</span>
-                          </div>
+                          <button
+                            type="button"
+                            className="bp-primarySmall"
+                            disabled={viewOnly || full}
+                            onClick={() => setAddModal({ open: true, roomId: room.id, query: '' })}
+                          >
+                            <Plus size={15} />
+                            {t.addStudent}
+                          </button>
+                        </div>
 
-                          <div className="bp-roomBody">
-                            {roomStudents.length > 0 ? (
-                              roomStudents.map((student) => (
+                        <div className="bp-meter">
+                          <div style={{ width: `${percent}%` }} />
+                        </div>
+
+                        <div className="bp-studentList">
+                          {roomStudents.length === 0 ? (
+                            <div className="bp-emptyRoom">
+                              <Bed size={18} />
+                              <span>{t.noStudents}</span>
+                            </div>
+                          ) : (
+                            roomStudents.map((student) => {
+                              const selectedForSwap = idOf(swapMode.studentId) === idOf(student.id);
+
+                              return (
                                 <div
                                   key={student.id}
-                                  className={`bp-studentRow ${
-                                    swapMode.active && swapMode.studentId === student.id ? 'swapSelected' : ''
-                                  } ${!canEditThisDorm ? 'viewOnly' : ''}`}
-                                  draggable={canEditThisDorm}
+                                  className={`bp-studentRow ${selectedForSwap ? 'swapSelected' : ''}`}
+                                  draggable={!viewOnly}
                                   onDragStart={() => {
-                                    if (!canEditThisDorm) return;
-                                    setDraggingStudentId(student.id);
+                                    if (!viewOnly) setDraggingStudentId(student.id);
                                   }}
+                                  onDragEnd={() => setDraggingStudentId(null)}
                                   onClick={() => {
-                                    if (!canEditThisDorm) return;
-                                    if (!swapMode.active) return;
-
+                                    if (viewOnly || !swapMode.active) return;
                                     if (!swapMode.studentId) {
-                                      setSwapMode({
-                                        active: true,
-                                        studentId: student.id,
-                                        fromRoomId: room.id,
-                                      });
+                                      setSwapMode({ active: true, studentId: student.id });
                                       return;
                                     }
-
-                                    if (swapMode.studentId === student.id) return;
-
-                                    swapStudents(swapMode.studentId, swapMode.fromRoomId, student.id, room.id);
-                                    setSwapMode({ active: false, studentId: null, fromRoomId: null });
+                                    if (idOf(swapMode.studentId) !== idOf(student.id)) {
+                                      swapStudents(swapMode.studentId, student.id);
+                                    }
                                   }}
-                                  title={!canEditThisDorm ? t.viewOnly : ''}
                                 >
-                                  <div className="bp-studentLeft">
+                                  <div className="bp-studentMain">
                                     <div className="bp-avatar">
                                       <Users size={14} />
                                     </div>
-                                    <span className="bp-studentName">
-                                      {student.firstName} {student.lastName}
-                                    </span>
+                                    <div>
+                                      <strong>{getStudentLabel(student)}</strong>
+                                      <span>{student.student_id || student.business_partner_id || ''}</span>
+                                    </div>
                                   </div>
 
-                                  <div className="bp-studentActions">
+                                  <div className="bp-actions">
                                     <button
-                                      className="bp-iconBtn"
+                                      type="button"
+                                      disabled={viewOnly}
+                                      title={t.moveStudent}
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        if (!canEditThisDorm) return;
                                         setMoveModal({
                                           open: true,
                                           studentId: student.id,
-                                          fromRoomId: room.id,
-                                          toRoomId: '',
                                           query: '',
+                                          toRoomId: '',
                                         });
                                       }}
-                                      title={!canEditThisDorm ? t.viewOnly : t.updateMove}
-                                      disabled={!canEditThisDorm}
                                     >
-                                      <Pencil size={16} />
+                                      <Pencil size={15} />
                                     </button>
 
                                     <button
-                                      className="bp-iconBtn"
+                                      type="button"
+                                      disabled={viewOnly}
+                                      title={t.swap}
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        if (!canEditThisDorm) return;
-                                        setSwapMode((prev) => ({
-                                          active: !prev.active,
-                                          studentId: !prev.active ? student.id : null,
-                                          fromRoomId: !prev.active ? room.id : null,
-                                        }));
+                                        setSwapMode((prev) =>
+                                          prev.active && idOf(prev.studentId) === idOf(student.id)
+                                            ? { active: false, studentId: null }
+                                            : { active: true, studentId: student.id }
+                                        );
                                       }}
-                                      title={!canEditThisDorm ? t.viewOnly : t.swap}
-                                      disabled={!canEditThisDorm}
                                     >
-                                      <ArrowRightLeft size={16} />
+                                      <ArrowRightLeft size={15} />
                                     </button>
 
                                     <button
-                                      className="bp-iconBtn danger"
+                                      type="button"
+                                      disabled={viewOnly}
+                                      className="danger"
+                                      title={t.remove}
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        if (!canEditThisDorm) return;
                                         unassignStudent(student.id);
                                       }}
-                                      title={!canEditThisDorm ? t.viewOnly : t.remove}
-                                      disabled={!canEditThisDorm}
                                     >
-                                      <X size={16} />
+                                      <X size={15} />
                                     </button>
                                   </div>
                                 </div>
-                              ))
-                            ) : (
-                              <div className="bp-emptyDrop">
-                                <div className="bp-emptyTop">{t.empty}</div>
-                                <div className="bp-emptySub">{t.dropHere}</div>
-                              </div>
-                            )}
-                          </div>
+                              );
+                            })
+                          )}
                         </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="bp-emptyState">
-                <div className="bp-emptyIcon">
-                  <Building2 size={44} />
-                </div>
-                <div className="bp-emptyText">{t.selectBuilding}</div>
-                <div className="bp-emptySubText">{t.emptyHelp}</div>
+                      </article>
+                    );
+                  })
+                )}
               </div>
-            )}
-          </div>
-        </div>
+            </>
+          )}
+        </section>
       </div>
 
       {addModal.open && (
-        <div
-          className="bp-modalBackdrop"
-          onClick={() => setAddModal({ open: false, roomId: null, query: '' })}
-        >
-          <div className="bp-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="bp-modalHeader">
-              <div className="bp-modalTitle">
-                <Users size={18} />
-                <h4>{t.pickStudent}</h4>
-              </div>
-              <button
-                className="bp-closeBtn"
-                onClick={() => setAddModal({ open: false, roomId: null, query: '' })}
-                title={t.close}
-              >
+        <div className="bp-modalBackdrop" onMouseDown={() => setAddModal({ open: false, roomId: null, query: '' })}>
+          <div className="bp-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="bp-modalHead">
+              <strong>{t.pickStudent}</strong>
+              <button type="button" onClick={() => setAddModal({ open: false, roomId: null, query: '' })}>
                 <X size={18} />
               </button>
             </div>
 
-            <div className="bp-modalSearch">
+            <div className="bp-search modalSearch">
               <Search size={16} />
               <input
                 value={addModal.query}
                 onChange={(e) => setAddModal((prev) => ({ ...prev, query: e.target.value }))}
-                placeholder={language === 'he' ? 'חיפוש סטודנט/ית...' : 'Search student...'}
+                placeholder={t.searchStudent}
+                autoFocus
               />
             </div>
 
             <div className="bp-modalList">
-              {filteredUnassigned.length === 0 ? (
-                <div className="bp-modalEmpty">
-                  <span>{t.noAvailableStudents}</span>
-                </div>
+              {filteredUnassignedStudents.length === 0 ? (
+                <div className="bp-emptyMini">{t.noAvailableStudents}</div>
               ) : (
-                filteredUnassigned.map((s) => (
+                filteredUnassignedStudents.map((student) => (
                   <button
-                    key={s.id}
+                    key={student.id}
+                    type="button"
                     className="bp-modalItem"
-                    onClick={() => {
-                      if (!canEditThisDorm) return;
-                      const targetRoom = rooms.find((r) => String(r.id) === String(addModal.roomId));
-                      if (!targetRoom) return;
-                      if (!canDropIntoRoom(targetRoom)) return;
-                      assignStudentToRoom(s.id, addModal.roomId);
-                      setAddModal({ open: false, roomId: null, query: '' });
-                    }}
-                    disabled={!canEditThisDorm}
-                    title={!canEditThisDorm ? t.viewOnly : ''}
+                    onClick={() => assignStudentToRoom(student.id, addModal.roomId)}
                   >
-                    <div className="bp-modalItemLeft">
-                      <div className="bp-avatar">
-                        <Users size={14} />
-                      </div>
-                      <span>
-                        {s.firstName} {s.lastName}
-                      </span>
+                    <div className="bp-avatar">
+                      <Users size={14} />
                     </div>
-                    <span className="bp-modalChevron">+</span>
+                    <div>
+                      <strong>{getStudentLabel(student)}</strong>
+                      <span>{student.student_id || student.business_partner_id || ''}</span>
+                    </div>
+                    <Plus size={16} />
                   </button>
                 ))
               )}
@@ -895,73 +1043,56 @@ function BuildingsPage({ language }) {
       )}
 
       {moveModal.open && (
-        <div
-          className="bp-modalBackdrop"
-          onClick={() =>
-            setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' })
-          }
-        >
-          <div className="bp-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="bp-modalHeader">
-              <div className="bp-modalTitle">
-                <Pencil size={18} />
-                <h4>{t.updateMove}</h4>
-              </div>
-              <button
-                className="bp-closeBtn"
-                onClick={() =>
-                  setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' })
-                }
-                title={t.close}
-              >
+        <div className="bp-modalBackdrop" onMouseDown={() => setMoveModal({ open: false, studentId: null, query: '', toRoomId: '' })}>
+          <div className="bp-modal large" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="bp-modalHead">
+              <strong>{t.moveStudent}</strong>
+              <button type="button" onClick={() => setMoveModal({ open: false, studentId: null, query: '', toRoomId: '' })}>
                 <X size={18} />
               </button>
             </div>
 
-            <div className="bp-modalSearch">
+            <div className="bp-search modalSearch">
               <Search size={16} />
               <input
                 value={moveModal.query}
                 onChange={(e) => setMoveModal((prev) => ({ ...prev, query: e.target.value }))}
                 placeholder={t.searchRoom}
+                autoFocus
               />
             </div>
 
-            <div className="bp-modalList">
-              {filteredRoomsForMove.length === 0 ? (
-                <div className="bp-modalEmpty">
-                  <span>{t.noResults}</span>
-                </div>
+            <div className="bp-modalList rooms">
+              {filteredMoveRooms.length === 0 ? (
+                <div className="bp-emptyMini">{t.noData}</div>
               ) : (
-                filteredRoomsForMove.map((r) => {
-                  const apt = apartments.find((a) => String(a.id) === String(r.apartmentId));
-                  const bld = buildings.find((b) => String(b.id) === String(r.buildingId));
-                  const count = getRoomStudents(r.id).length;
-                  const full = count >= (Number(r.capacity) || 0);
+                filteredMoveRooms.map((room) => {
+                  const roomStudents = getRoomStudents(room.id);
+                  const capacity = getRoomCapacity(room);
+                  const full = capacity > 0 && roomStudents.length >= capacity;
+                  const selected = idOf(moveModal.toRoomId) === idOf(room.id);
+                  const building = buildings.find((b) => idOf(b.id) === getBuildingIdFromRoom(room));
 
                   return (
                     <button
-                      key={r.id}
-                      className={`bp-modalItem ${full ? 'disabled' : ''} ${
-                        moveModal.toRoomId === r.id ? 'active' : ''
-                      }`}
-                      onClick={() => {
-                        if (!canEditThisDorm) return;
-                        if (full) return;
-                        setMoveModal((prev) => ({ ...prev, toRoomId: r.id }));
-                      }}
-                      disabled={full || !canEditThisDorm}
-                      title={!canEditThisDorm ? t.viewOnly : full ? t.roomFull : r.id}
+                      key={room.id}
+                      type="button"
+                      className={`bp-modalItem room ${selected ? 'selected' : ''} ${full ? 'disabled' : ''}`}
+                      disabled={full}
+                      onClick={() => setMoveModal((prev) => ({ ...prev, toRoomId: room.id }))}
                     >
-                      <div className="bp-modalItemLeft">
-                        <Home size={14} />
-                        <span className="bp-modalRoom">
-                          {bld?.name || ''} • {t.apartment} {apt?.number ?? '-'} • {r.name}
+                      <Home size={15} />
+                      <div>
+                        <strong>
+                          {building ? getBuildingLabel(building, t) : t.building} · {t.room}{' '}
+                          {room.name || room.number || room.id}
+                        </strong>
+                        <span>
+                          {t.apartment} {room.apartment_number || getApartmentIdFromRoom(room)} ·{' '}
+                          {roomStudents.length}/{capacity || '—'}
+                          {full ? ` · ${t.roomFull}` : ''}
                         </span>
                       </div>
-                      <span className="bp-modalCap">
-                        {count}/{r.capacity}
-                      </span>
                     </button>
                   );
                 })
@@ -969,24 +1100,14 @@ function BuildingsPage({ language }) {
             </div>
 
             <div className="bp-modalFooter">
-              <button
-                className="bp-btn secondary"
-                onClick={() =>
-                  setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' })
-                }
-              >
+              <button type="button" className="bp-secondary" onClick={() => setMoveModal({ open: false, studentId: null, query: '', toRoomId: '' })}>
                 {t.cancel}
               </button>
               <button
-                className="bp-btn primary"
-                disabled={!moveModal.toRoomId || !canEditThisDorm}
-                onClick={() => {
-                  if (!canEditThisDorm) return;
-                  if (!moveModal.studentId || !moveModal.toRoomId) return;
-                  assignStudentToRoom(moveModal.studentId, moveModal.toRoomId);
-                  setMoveModal({ open: false, studentId: null, fromRoomId: null, toRoomId: '', query: '' });
-                }}
-                title={!canEditThisDorm ? t.viewOnly : ''}
+                type="button"
+                className="bp-primary"
+                disabled={!moveModal.toRoomId}
+                onClick={() => moveStudentToRoom(moveModal.studentId, moveModal.toRoomId)}
               >
                 {t.confirm}
               </button>
@@ -996,886 +1117,805 @@ function BuildingsPage({ language }) {
       )}
 
       <style>{`
-        :root{
-          --bg: #f6f8fc;
-          --card: #ffffff;
-          --text: #0f172a;
-          --muted: #64748b;
-          --border: rgba(15, 23, 42, 0.10);
-          --shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
-          --shadow2: 0 6px 18px rgba(15, 23, 42, 0.08);
-          --primary: #2563eb;
-          --primary2: rgba(37, 99, 235, 0.12);
-          --danger: #b91c1c;
-          --dangerBg: rgba(185, 28, 28, 0.10);
-          --warn: #b45309;
-          --warnBg: rgba(180, 83, 9, 0.14);
-          --radius: 16px;
-          --radius2: 12px;
+        :root {
+          --bp-bg: #f5f8fc;
+          --bp-card: #ffffff;
+          --bp-text: #0f172a;
+          --bp-muted: #64748b;
+          --bp-border: rgba(15, 23, 42, 0.10);
+          --bp-blue: #2563eb;
+          --bp-blue-soft: #dbeafe;
+          --bp-green: #059669;
+          --bp-green-soft: #d1fae5;
+          --bp-red: #dc2626;
+          --bp-red-soft: #fee2e2;
+          --bp-orange: #f97316;
+          --bp-shadow: 0 10px 25px rgba(15, 23, 42, 0.07);
+          --bp-radius: 18px;
         }
 
-        .bp-shell{
-          padding: 18px;
-          background: var(--bg);
-          min-height: calc(100vh - 40px);
+        .bp-page {
+          min-height: 100vh;
+          background: var(--bp-bg);
+          padding: 24px;
+          color: var(--bp-text);
         }
 
-        .bp-top{
-          position: sticky;
-          top: 0;
-          z-index: 5;
-          background: linear-gradient(to bottom, rgba(246,248,252,1), rgba(246,248,252,0.88));
-          backdrop-filter: blur(8px);
-          padding-bottom: 14px;
+        .bp-center {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 12px;
+          color: var(--bp-muted);
+          font-weight: 700;
+        }
+
+        .bp-spin {
+          animation: bp-spin 0.9s linear infinite;
+        }
+
+        @keyframes bp-spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+
+        .bp-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-end;
+          gap: 16px;
+          margin-bottom: 18px;
+        }
+
+        .bp-header h1 {
+          margin: 0;
+          font-size: 28px;
+          font-weight: 900;
+          letter-spacing: -0.03em;
+        }
+
+        .bp-header p {
+          margin: 6px 0 0;
+          color: var(--bp-muted);
+          font-size: 14px;
+          font-weight: 650;
+        }
+
+        .bp-permission {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          background: var(--bp-blue-soft);
+          color: #1d4ed8;
+          border: 1px solid #bfdbfe;
+          border-radius: 999px;
+          padding: 9px 13px;
+          font-weight: 800;
+          font-size: 13px;
+        }
+
+        .bp-permission.readonly {
+          color: #92400e;
+          background: #fef3c7;
+          border-color: #fde68a;
+        }
+
+        .bp-toolbar {
+          display: grid;
+          grid-template-columns: 1fr 1fr 1.5fr;
+          gap: 14px;
           margin-bottom: 14px;
         }
 
-        .bp-warningBox{
-          margin-bottom: 12px;
-          padding: 10px 12px;
-          border-radius: 12px;
-          background: rgba(180, 83, 9, 0.14);
-          border: 1px solid rgba(180, 83, 9, 0.25);
-          color: #92400e;
-          font-weight: 800;
-          font-size: 13px;
+        .bp-field,
+        .bp-search {
+          background: var(--bp-card);
+          border: 1px solid var(--bp-border);
+          border-radius: 15px;
+          box-shadow: 0 3px 12px rgba(15, 23, 42, 0.04);
         }
 
-        .bp-titleRow{
-          display:flex;
-          align-items:flex-end;
-          justify-content: space-between;
-          gap: 12px;
-          margin-bottom: 12px;
+        .bp-field {
+          padding: 10px 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
         }
-        .bp-titleBlock{ display:flex; flex-direction:column; gap:6px; }
-        .bp-title{
-          margin:0;
-          font-size: 24px;
-          letter-spacing: -0.02em;
-          color: var(--text);
+
+        .bp-field label {
+          color: var(--bp-muted);
+          font-size: 12px;
           font-weight: 800;
         }
-        .bp-sub{
-          display:flex;
-          align-items:center;
-          gap:10px;
-          color: var(--muted);
-          font-size: 13px;
-          flex-wrap: wrap;
-        }
-        .bp-subText{ font-weight: 600; }
-        .bp-dot{ opacity: .6; }
-        .bp-tip{
-          display:inline-flex;
-          align-items:center;
-          gap:6px;
-          padding: 6px 10px;
-          border-radius: 999px;
-          background: rgba(15, 23, 42, 0.04);
-          border: 1px solid var(--border);
-        }
-        .bp-viewOnly{
-          display:inline-flex;
-          align-items:center;
-          padding: 6px 10px;
-          border-radius: 999px;
-          background: rgba(180, 83, 9, 0.14);
-          border: 1px solid rgba(180, 83, 9, 0.25);
-          color: #92400e;
-          font-weight: 900;
-          font-size: 12px;
-        }
 
-        .bp-contextPills{
-          display:flex;
-          flex-wrap: wrap;
-          gap: 8px;
-          justify-content: flex-end;
-        }
-        .bp-pill{
-          display:inline-flex;
-          align-items:center;
-          padding: 8px 12px;
-          border-radius: 999px;
-          background: rgba(15, 23, 42, 0.04);
-          border: 1px solid var(--border);
-          color: var(--text);
-          font-weight: 700;
-          font-size: 13px;
-          white-space: nowrap;
-        }
-        .bp-pillPrimary{
-          background: var(--primary2);
-          border-color: rgba(37, 99, 235, 0.25);
-          color: #1d4ed8;
-        }
-
-        .bp-controls{
-          display:grid;
-          grid-template-columns: 1.1fr 1.6fr;
-          gap: 14px;
-          align-items: stretch;
-        }
-
-        .bp-selectCard,
-        .bp-searchCard{
-          background: var(--card);
-          border: 1px solid var(--border);
-          border-radius: var(--radius);
-          box-shadow: var(--shadow2);
-          padding: 12px;
-        }
-
-        .bp-selectGrid{
-          display:grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 12px;
-        }
-
-        .bp-field{ display:flex; flex-direction:column; gap:6px; }
-        .bp-field label{
-          font-size: 12px;
-          color: var(--muted);
-          font-weight: 700;
-        }
-        .bp-field select{
-          border: 1px solid var(--border);
-          border-radius: 12px;
-          padding: 10px 12px;
-          font-family: inherit;
-          font-size: 14px;
+        .bp-field select {
+          border: none;
+          background: transparent;
           outline: none;
-          background: white;
-          color: var(--text);
+          font: inherit;
+          font-weight: 750;
+          color: var(--bp-text);
         }
 
-        .bp-search{
-          display:flex;
-          align-items:center;
+        .bp-search {
+          display: flex;
+          align-items: center;
           gap: 10px;
-          border: 1px solid var(--border);
-          background: #fff;
-          border-radius: 14px;
-          padding: 10px 12px;
+          padding: 0 12px;
+          min-height: 58px;
         }
-        .bp-search svg{ color: #94a3b8; }
-        .bp-search input{
+
+        .bp-search input {
+          flex: 1;
           border: none;
           outline: none;
-          flex: 1;
-          font-size: 14px;
-          font-family: inherit;
-          color: var(--text);
+          background: transparent;
+          font: inherit;
+          color: var(--bp-text);
         }
-        .bp-clear{
-          border:none;
-          background: rgba(15,23,42,0.04);
-          border: 1px solid var(--border);
-          border-radius: 10px;
-          padding: 6px;
-          cursor: pointer;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-        }
-        .bp-clear:hover{ background: rgba(15,23,42,0.06); }
 
-        .bp-stats{
-          display:grid;
-          grid-template-columns: repeat(5, minmax(0, 1fr));
-          gap: 10px;
-          margin-top: 10px;
+        .bp-search button {
+          border: none;
+          background: transparent;
+          cursor: pointer;
+          color: var(--bp-muted);
+          display: flex;
         }
-        .bp-stat{
-          border: 1px solid var(--border);
-          background: rgba(15, 23, 42, 0.02);
+
+        .bp-errorBox {
+          background: var(--bp-red-soft);
+          border: 1px solid #fecaca;
+          color: #991b1b;
           border-radius: 14px;
-          padding: 10px 10px;
-          display:flex;
-          flex-direction:column;
-          gap: 4px;
-        }
-        .bp-statAccent{
-          background: var(--primary2);
-          border-color: rgba(37, 99, 235, 0.25);
-        }
-        .bp-statLabel{
-          font-size: 11px;
-          color: var(--muted);
-          font-weight: 700;
-        }
-        .bp-statValue{
-          font-size: 18px;
-          font-weight: 900;
-          color: var(--text);
-          letter-spacing: -0.02em;
+          padding: 12px 14px;
+          font-weight: 750;
+          margin-bottom: 14px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
         }
 
-        .bp-chipRow{
-          margin-top: 12px;
-          display:flex;
-          flex-wrap: wrap;
-          gap: 8px;
-        }
-        .bp-chip{
-          border: 1px solid var(--border);
-          background: var(--card);
-          border-radius: 999px;
-          padding: 8px 12px;
+        .bp-errorBox.small button {
+          border: none;
+          background: transparent;
           cursor: pointer;
-          font-size: 13px;
-          font-weight: 700;
-          color: var(--text);
-        }
-        .bp-chip:hover{
-          border-color: rgba(37, 99, 235, 0.25);
-          background: rgba(37, 99, 235, 0.06);
-        }
-        .bp-chip.active{
-          background: var(--primary2);
-          border-color: rgba(37, 99, 235, 0.25);
-          color: #1d4ed8;
+          color: #991b1b;
+          display: flex;
         }
 
-        .bp-grid{
-          display:grid;
-          grid-template-columns: 1fr 1.6fr;
+        .bp-statsGrid {
+          display: grid;
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+          gap: 14px;
+          margin-bottom: 16px;
+        }
+
+        .bp-stat {
+          background: var(--bp-card);
+          border: 1px solid var(--bp-border);
+          border-radius: var(--bp-radius);
+          box-shadow: var(--bp-shadow);
+          padding: 15px;
+          display: flex;
+          align-items: center;
+          gap: 14px;
+        }
+
+        .bp-statIcon {
+          width: 44px;
+          height: 44px;
+          border-radius: 15px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: var(--bp-blue-soft);
+          color: var(--bp-blue);
+          flex: 0 0 auto;
+        }
+
+        .bp-statValue {
+          font-size: 24px;
+          font-weight: 950;
+          line-height: 1;
+        }
+
+        .bp-statLabel {
+          margin-top: 5px;
+          color: var(--bp-muted);
+          font-size: 12px;
+          font-weight: 750;
+        }
+
+        .bp-layout {
+          display: grid;
+          grid-template-columns: minmax(360px, 42%) 1fr;
           gap: 16px;
+          align-items: start;
         }
 
-        .bp-panel{
-          background: var(--card);
-          border: 1px solid var(--border);
-          border-radius: var(--radius);
-          box-shadow: var(--shadow);
+        .bp-panel {
+          background: var(--bp-card);
+          border: 1px solid var(--bp-border);
+          border-radius: var(--bp-radius);
+          box-shadow: var(--bp-shadow);
           overflow: hidden;
         }
-        .bp-panelBig{ min-height: 520px; }
 
-        .bp-panelHeader{
-          display:flex;
-          align-items:center;
+        .bp-panelHead {
+          padding: 14px 16px;
+          background: #f8fafc;
+          border-bottom: 1px solid var(--bp-border);
+          display: flex;
+          align-items: center;
           justify-content: space-between;
-          padding: 12px 14px;
-          border-bottom: 1px solid var(--border);
-          background: rgba(15, 23, 42, 0.02);
-        }
-        .bp-panelHeaderLeft{
-          display:flex;
-          align-items:center;
-          gap: 10px;
-          color: var(--text);
-          font-weight: 900;
-        }
-        .bp-panelTitle{ font-size: 13px; }
-        .bp-panelMeta{
-          font-size: 12px;
-          color: var(--muted);
-          font-weight: 700;
+          font-size: 14px;
         }
 
-        .bp-panelBody{
-          padding: 12px;
-          max-height: calc(100vh - 320px);
+        .bp-panelHead > div {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
+        .bp-panelHead span {
+          background: #e2e8f0;
+          color: #475569;
+          border-radius: 999px;
+          padding: 3px 9px;
+          font-size: 12px;
+          font-weight: 850;
+        }
+
+        .bp-list {
+          padding: 10px;
+          max-height: calc(100vh - 340px);
           overflow: auto;
         }
 
-        .bp-bldCard{ margin-bottom: 10px; }
-        .bp-bldHead{
+        .bp-buildingCard {
+          margin-bottom: 8px;
+        }
+
+        .bp-buildingButton,
+        .bp-apartmentButton {
           width: 100%;
-          display:flex;
-          align-items:center;
-          gap: 12px;
+          border: 1px solid var(--bp-border);
+          background: white;
+          border-radius: 15px;
           padding: 12px;
-          border-radius: 14px;
-          border: 1px solid var(--border);
-          background: #fff;
+          display: flex;
+          align-items: center;
+          gap: 10px;
           cursor: pointer;
-          text-align: left;
+          color: var(--bp-text);
+          text-align: start;
         }
-        .bp-bldHead:hover{
-          border-color: rgba(37, 99, 235, 0.25);
-          background: rgba(37,99,235,0.03);
+
+        .bp-buildingButton:hover,
+        .bp-apartmentButton:hover {
+          border-color: #93c5fd;
+          background: #f8fbff;
         }
-        .bp-bldHead.selected{
-          background: var(--primary2);
-          border-color: rgba(37, 99, 235, 0.25);
+
+        .bp-buildingButton.selected,
+        .bp-apartmentButton.selected {
+          background: #eff6ff;
+          border-color: #93c5fd;
         }
-        .bp-bldIcon{
+
+        .bp-iconBubble {
           width: 40px;
           height: 40px;
           border-radius: 14px;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          background: rgba(37,99,235,0.10);
-          color: #1d4ed8;
-          flex-shrink: 0;
+          background: var(--bp-blue-soft);
+          color: var(--bp-blue);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex: 0 0 auto;
         }
-        .bp-bldInfo{ flex: 1; min-width: 0; }
-        .bp-bldName{
+
+        .bp-buildingInfo {
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+          flex: 1;
+        }
+
+        .bp-buildingInfo strong,
+        .bp-apartmentButton strong {
+          font-size: 14px;
           font-weight: 900;
-          color: var(--text);
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
         }
-        .bp-bldSub{
-          display:flex;
-          align-items:center;
-          gap: 8px;
+
+        .bp-buildingInfo span,
+        .bp-apartmentButton span {
+          color: var(--bp-muted);
           font-size: 12px;
-          color: var(--muted);
-          font-weight: 700;
+          font-weight: 650;
           margin-top: 2px;
         }
-        .bp-dotSmall{ opacity: .55; }
-        .bp-bldChevron{ color: #64748b; }
 
-        .bp-aptList{
-          padding: 10px 10px 0 10px;
-          display:flex;
-          flex-direction:column;
-          gap: 8px;
+        .bp-status {
+          border-radius: 999px;
+          padding: 4px 9px;
+          font-size: 11px;
+          font-weight: 900;
+          white-space: nowrap;
         }
-        .bp-aptItem{
-          width: 100%;
-          display:flex;
-          align-items:center;
-          justify-content: space-between;
-          gap: 10px;
-          border: 1px solid var(--border);
-          background: #fff;
-          border-radius: 14px;
-          padding: 10px 12px;
-          cursor: pointer;
-          text-align: left;
+
+        .bp-status.ok {
+          background: var(--bp-green-soft);
+          color: #047857;
         }
-        .bp-aptItem:hover{
-          border-color: rgba(37, 99, 235, 0.25);
-          background: rgba(37,99,235,0.03);
+
+        .bp-status.bad {
+          background: var(--bp-red-soft);
+          color: #991b1b;
         }
-        .bp-aptItem.selected{
-          background: var(--primary2);
-          border-color: rgba(37, 99, 235, 0.25);
+
+        .bp-apartmentList {
+          padding: 8px 0 0 16px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
         }
-        .bp-aptItem.reserved{
-          background: var(--warnBg);
-          border-color: rgba(180, 83, 9, 0.25);
+
+        [dir="rtl"] .bp-apartmentList {
+          padding: 8px 16px 0 0;
         }
-        .bp-aptLeft{
-          display:flex;
-          align-items:center;
-          gap: 10px;
-          color: var(--text);
-          font-weight: 800;
+
+        .bp-apartmentButton {
+          border-radius: 13px;
+          background: #f8fafc;
+        }
+
+        .bp-apartmentButton > div {
+          display: flex;
+          flex-direction: column;
           min-width: 0;
         }
-        .bp-aptText{
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-        .bp-aptStar{ color: #f59e0b; }
-        .bp-floorBadge{
-          font-size: 11px;
-          color: var(--muted);
-          font-weight: 800;
-          background: rgba(15,23,42,0.04);
-          border: 1px solid var(--border);
-          padding: 4px 10px;
-          border-radius: 999px;
-          white-space: nowrap;
+
+        .bp-workPanel {
+          min-height: 560px;
         }
 
-        .bp-workHeader{
-          padding: 16px 16px 0 16px;
-        }
-        .bp-workHeaderTop{
-          display:flex;
-          align-items:flex-start;
+        .bp-workHead {
+          padding: 18px 20px;
+          border-bottom: 1px solid var(--bp-border);
+          background: linear-gradient(135deg, #f8fafc, #eff6ff);
+          display: flex;
+          align-items: center;
           justify-content: space-between;
-          gap: 12px;
-        }
-        .bp-workTitleLine{
-          display:flex;
-          align-items:center;
-          gap: 10px;
-        }
-        .bp-workH{
-          font-size: 18px;
-          font-weight: 950;
-          color: var(--text);
-          letter-spacing: -0.02em;
-        }
-        .bp-viewPill{
-          display:inline-flex;
-          align-items:center;
-          padding: 6px 10px;
-          border-radius: 999px;
-          background: rgba(180, 83, 9, 0.14);
-          border: 1px solid rgba(180, 83, 9, 0.25);
-          color: #92400e;
-          font-weight: 900;
-          font-size: 12px;
-          white-space: nowrap;
-        }
-        .bp-breadcrumb{
-          margin-top: 6px;
-          display:flex;
-          align-items:center;
-          gap: 8px;
-          color: var(--muted);
-          font-size: 12px;
-          font-weight: 700;
-        }
-        .bp-reservedBadge{
-          display:inline-flex;
-          align-items:center;
-          gap: 6px;
-          padding: 6px 10px;
-          border-radius: 999px;
-          background: var(--warnBg);
-          border: 1px solid rgba(180, 83, 9, 0.25);
-          color: var(--warn);
-          font-weight: 900;
-          font-size: 12px;
+          gap: 16px;
         }
 
-        .bp-swapBanner{
-          display:flex;
-          align-items:center;
-          gap: 12px;
-          padding: 10px 12px;
-          border-radius: 14px;
-          background: var(--primary2);
-          border: 1px solid rgba(37, 99, 235, 0.25);
-          color: #1d4ed8;
-          font-weight: 900;
-          font-size: 13px;
-          white-space: nowrap;
+        .bp-workHead h2 {
+          margin: 4px 0 0;
+          font-size: 22px;
+          font-weight: 950;
         }
-        .bp-swapLeft{
-          display:flex;
-          align-items:center;
+
+        .bp-breadcrumb {
+          color: var(--bp-muted);
+          font-size: 12px;
+          font-weight: 800;
+        }
+
+        .bp-swapBanner {
+          display: flex;
+          align-items: center;
           gap: 8px;
-        }
-        .bp-swapCancel{
-          border: none;
-          background: rgba(255,255,255,0.85);
-          border: 1px solid rgba(37, 99, 235, 0.25);
-          color: #1d4ed8;
+          background: #fff7ed;
+          border: 1px solid #fed7aa;
+          color: #9a3412;
+          border-radius: 999px;
           padding: 8px 10px;
-          border-radius: 12px;
-          cursor:pointer;
-          font-weight: 950;
+          font-size: 12px;
+          font-weight: 850;
         }
-        .bp-swapCancel:hover{ background: #fff; }
 
-        .bp-workBody{ padding: 16px; }
-        .bp-roomsGrid{
-          display:grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+        .bp-swapBanner button {
+          border: none;
+          background: #fed7aa;
+          color: #9a3412;
+          border-radius: 999px;
+          padding: 5px 8px;
+          cursor: pointer;
+          font-weight: 900;
+        }
+
+        .bp-roomGrid {
+          padding: 16px;
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
           gap: 14px;
         }
 
-        .bp-roomCard{
-          border: 1px solid var(--border);
-          border-radius: var(--radius);
-          background: #fff;
-          overflow:hidden;
-          box-shadow: 0 2px 10px rgba(15,23,42,0.05);
-        }
-        .bp-roomCard.full{
-          outline: 2px solid rgba(185, 28, 28, 0.15);
-        }
-        .bp-roomCard.viewOnly{
-          opacity: 0.92;
+        .bp-roomCard {
+          border: 1px solid var(--bp-border);
+          border-radius: 18px;
+          background: white;
+          padding: 14px;
+          box-shadow: 0 3px 10px rgba(15, 23, 42, 0.04);
         }
 
-        .bp-roomTop{
-          display:flex;
-          align-items:flex-start;
+        .bp-roomCard.full {
+          border-color: #fca5a5;
+          background: #fffafa;
+        }
+
+        .bp-roomCard.readonly {
+          opacity: 0.88;
+        }
+
+        .bp-roomTop {
+          display: flex;
+          align-items: flex-start;
           justify-content: space-between;
           gap: 10px;
-          padding: 12px 12px 10px 12px;
-          border-bottom: 1px solid var(--border);
-          background: rgba(15, 23, 42, 0.02);
-        }
-        .bp-roomTitle{ display:flex; flex-direction:column; gap: 2px; }
-        .bp-roomName{
-          font-weight: 950;
-          color: var(--text);
-          letter-spacing: -0.01em;
-        }
-        .bp-roomCap{
-          font-size: 12px;
-          color: var(--muted);
-          font-weight: 800;
+          margin-bottom: 12px;
         }
 
-        .bp-addBtn{
-          display:inline-flex;
-          align-items:center;
-          gap: 8px;
-          border: 1px solid rgba(37, 99, 235, 0.25);
-          background: rgba(37,99,235,0.06);
-          color: #1d4ed8;
-          padding: 9px 10px;
-          border-radius: 14px;
-          cursor:pointer;
-          font-weight: 900;
-          white-space: nowrap;
-        }
-        .bp-addBtn:hover{ background: rgba(37,99,235,0.10); }
-        .bp-addBtnText{ font-size: 13px; }
-        .bp-addBtn:disabled{
-          opacity: 0.55;
-          cursor: not-allowed;
-        }
-
-        .bp-meter{
-          display:flex;
-          align-items:center;
-          justify-content: space-between;
-          gap: 10px;
-          padding: 10px 12px 0 12px;
-        }
-        .bp-meterTrack{
-          height: 8px;
-          border-radius: 999px;
-          background: rgba(15, 23, 42, 0.08);
-          flex: 1;
-          overflow:hidden;
-        }
-        .bp-meterFill{
-          height: 100%;
-          border-radius: 999px;
-          background: rgba(37, 99, 235, 0.65);
-        }
-        .bp-meterText{
-          font-size: 12px;
-          color: var(--muted);
-          font-weight: 900;
-          width: 44px;
-          text-align: right;
-        }
-
-        .bp-roomBody{
-          padding: 12px;
-          min-height: 90px;
-        }
-
-        .bp-studentRow{
-          display:flex;
-          align-items:center;
-          justify-content: space-between;
-          gap: 10px;
-          padding: 10px 10px;
-          border-radius: 14px;
-          border: 1px solid rgba(15, 23, 42, 0.08);
-          background: rgba(15, 23, 42, 0.02);
-          margin-bottom: 10px;
-          cursor: grab;
-        }
-        .bp-studentRow.viewOnly{
-          cursor: default;
-        }
-        .bp-studentRow:active{ cursor: grabbing; }
-        .bp-studentRow:hover{ background: rgba(37,99,235,0.04); border-color: rgba(37, 99, 235, 0.18); }
-        .bp-studentRow.swapSelected{
-          background: var(--primary2);
-          border-color: rgba(37, 99, 235, 0.25);
-        }
-
-        .bp-studentLeft{
-          display:flex;
-          align-items:center;
-          gap: 10px;
-          min-width: 0;
-        }
-        .bp-avatar{
-          width: 28px;
-          height: 28px;
-          border-radius: 10px;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          background: rgba(37,99,235,0.10);
-          color: #1d4ed8;
-          flex-shrink: 0;
-        }
-        .bp-studentName{
-          font-weight: 900;
-          color: var(--text);
-          white-space: nowrap;
-          overflow:hidden;
-          text-overflow: ellipsis;
-        }
-
-        .bp-studentActions{
-          display:flex;
-          align-items:center;
-          gap: 8px;
-          flex-shrink: 0;
-        }
-        .bp-iconBtn{
-          border: 1px solid rgba(15,23,42,0.10);
-          background: #fff;
-          color: #334155;
-          border-radius: 12px;
-          padding: 7px;
-          cursor:pointer;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-        }
-        .bp-iconBtn:hover{
-          border-color: rgba(37, 99, 235, 0.25);
-          background: rgba(37,99,235,0.06);
-          color: #1d4ed8;
-        }
-        .bp-iconBtn.danger:hover{
-          border-color: rgba(185, 28, 28, 0.25);
-          background: var(--dangerBg);
-          color: var(--danger);
-        }
-        .bp-iconBtn:disabled{
-          opacity: 0.55;
-          cursor: not-allowed;
-        }
-
-        .bp-emptyDrop{
-          display:flex;
-          flex-direction:column;
-          gap: 6px;
-          padding: 10px;
-          border-radius: 14px;
-          border: 1px dashed rgba(15,23,42,0.18);
-          background: rgba(15,23,42,0.015);
-        }
-        .bp-emptyTop{
-          font-weight: 900;
-          color: #64748b;
-        }
-        .bp-emptySub{
-          font-size: 12px;
-          color: #64748b;
-          font-weight: 700;
-        }
-
-        .bp-emptyState{
-          height: 100%;
-          min-height: 520px;
-          display:flex;
-          flex-direction:column;
-          align-items:center;
-          justify-content:center;
-          gap: 12px;
-          padding: 24px;
-          text-align:center;
-        }
-        .bp-emptyIcon{
-          width: 78px;
-          height: 78px;
-          border-radius: 24px;
-          background: rgba(37,99,235,0.10);
-          color: #1d4ed8;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          border: 1px solid rgba(37, 99, 235, 0.20);
-        }
-        .bp-emptyText{
+        .bp-roomTop h3 {
+          margin: 0;
           font-size: 16px;
           font-weight: 950;
-          color: var(--text);
-        }
-        .bp-emptySubText{
-          max-width: 520px;
-          color: var(--muted);
-          font-weight: 700;
-          font-size: 13px;
         }
 
-        .bp-modalBackdrop{
-          position: fixed;
-          inset: 0;
-          background: rgba(15, 23, 42, 0.55);
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          z-index: 50;
-          padding: 18px;
-        }
-        .bp-modal{
-          width: 600px;
-          max-width: 96vw;
-          background: #fff;
-          border-radius: 18px;
-          border: 1px solid rgba(255,255,255,0.12);
-          box-shadow: 0 25px 80px rgba(0,0,0,0.35);
-          overflow:hidden;
-        }
-        .bp-modalHeader{
-          display:flex;
-          align-items:center;
-          justify-content: space-between;
-          padding: 14px 16px;
-          border-bottom: 1px solid var(--border);
-          background: rgba(15, 23, 42, 0.02);
-        }
-        .bp-modalTitle{
-          display:flex;
-          align-items:center;
-          gap: 10px;
-          color: var(--text);
-        }
-        .bp-modalTitle h4{
-          margin:0;
-          font-size: 15px;
-          font-weight: 950;
-        }
-        .bp-closeBtn{
-          border: 1px solid var(--border);
-          background: #fff;
-          border-radius: 12px;
-          padding: 7px;
-          cursor:pointer;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-        }
-        .bp-closeBtn:hover{ background: rgba(15,23,42,0.04); }
-
-        .bp-modalSearch{
-          display:flex;
-          align-items:center;
-          gap: 10px;
-          padding: 12px 16px;
-          border-bottom: 1px solid var(--border);
-        }
-        .bp-modalSearch input{
-          flex: 1;
-          border:none;
-          outline:none;
-          font-family: inherit;
-          font-size: 14px;
-          color: var(--text);
+        .bp-roomTop span {
+          display: block;
+          margin-top: 3px;
+          color: var(--bp-muted);
+          font-size: 12px;
+          font-weight: 750;
         }
 
-        .bp-modalList{
-          max-height: 420px;
-          overflow:auto;
-          padding: 12px;
+        .bp-primarySmall,
+        .bp-primary,
+        .bp-secondary {
+          border: none;
+          border-radius: 13px;
+          padding: 9px 11px;
+          cursor: pointer;
+          font-weight: 900;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
         }
 
-        .bp-modalItem{
-          width: 100%;
-          display:flex;
-          align-items:center;
+        .bp-primarySmall,
+        .bp-primary {
+          background: var(--bp-blue);
+          color: white;
+        }
+
+        .bp-secondary {
+          background: #f1f5f9;
+          color: #334155;
+        }
+
+        .bp-primarySmall:disabled,
+        .bp-primary:disabled,
+        .bp-secondary:disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+
+        .bp-meter {
+          height: 8px;
+          background: #e2e8f0;
+          border-radius: 999px;
+          overflow: hidden;
+          margin-bottom: 12px;
+        }
+
+        .bp-meter > div {
+          height: 100%;
+          background: linear-gradient(90deg, #60a5fa, #2563eb);
+          border-radius: 999px;
+        }
+
+        .bp-studentList {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+
+        .bp-studentRow {
+          border: 1px solid var(--bp-border);
+          background: #f8fafc;
+          border-radius: 14px;
+          padding: 9px;
+          display: flex;
+          align-items: center;
           justify-content: space-between;
           gap: 10px;
-          padding: 12px 12px;
-          border-radius: 16px;
-          border: 1px solid var(--border);
-          background: #fff;
-          cursor:pointer;
-          margin-bottom: 10px;
-          text-align:left;
+          cursor: grab;
         }
-        .bp-modalItem:hover{
-          border-color: rgba(37, 99, 235, 0.25);
-          background: rgba(37,99,235,0.03);
+
+        .bp-studentRow.swapSelected {
+          background: #fff7ed;
+          border-color: #fb923c;
         }
-        .bp-modalItem.active{
-          background: var(--primary2);
-          border-color: rgba(37, 99, 235, 0.25);
-        }
-        .bp-modalItem.disabled{
-          opacity: 0.6;
-          cursor:not-allowed;
-        }
-        .bp-modalItemLeft{
-          display:flex;
-          align-items:center;
+
+        .bp-studentMain,
+        .bp-modalItem {
+          display: flex;
+          align-items: center;
           gap: 10px;
           min-width: 0;
         }
-        .bp-modalRoom{
+
+        .bp-studentMain > div:last-child,
+        .bp-modalItem > div:not(.bp-avatar) {
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+        }
+
+        .bp-studentMain strong,
+        .bp-modalItem strong {
           font-size: 13px;
-          font-weight: 800;
-          color: var(--text);
+          font-weight: 900;
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
         }
-        .bp-modalCap{
-          font-size: 12px;
-          color: var(--muted);
-          font-weight: 900;
-          white-space: nowrap;
-        }
-        .bp-modalChevron{
-          font-weight: 950;
-          color: #1d4ed8;
-          opacity: 0.9;
-        }
-        .bp-modalEmpty{
-          padding: 18px;
-          color: var(--muted);
-          font-weight: 800;
+
+        .bp-studentMain span,
+        .bp-modalItem span {
+          color: var(--bp-muted);
+          font-size: 11px;
+          font-weight: 700;
+          margin-top: 2px;
         }
 
-        .bp-modalFooter{
-          display:flex;
-          align-items:center;
-          justify-content:flex-end;
+        .bp-avatar {
+          width: 30px;
+          height: 30px;
+          border-radius: 11px;
+          background: var(--bp-blue-soft);
+          color: var(--bp-blue);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex: 0 0 auto;
+        }
+
+        .bp-actions {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+        }
+
+        .bp-actions button,
+        .bp-modalHead button {
+          border: 1px solid var(--bp-border);
+          background: white;
+          border-radius: 10px;
+          width: 31px;
+          height: 31px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          color: #475569;
+        }
+
+        .bp-actions button:disabled {
+          opacity: 0.45;
+          cursor: not-allowed;
+        }
+
+        .bp-actions button.danger {
+          color: var(--bp-red);
+        }
+
+        .bp-emptyState {
+          min-height: 520px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
           gap: 10px;
-          padding: 12px 16px;
-          border-top: 1px solid var(--border);
-          background: rgba(15, 23, 42, 0.02);
+          color: var(--bp-muted);
+          text-align: center;
+          padding: 28px;
         }
-        .bp-btn{
-          border:none;
-          cursor:pointer;
-          border-radius: 14px;
-          padding: 10px 14px;
-          font-weight: 950;
-          font-family: inherit;
-        }
-        .bp-btn.secondary{
-          background: #fff;
-          border: 1px solid var(--border);
-          color: var(--text);
-        }
-        .bp-btn.secondary:hover{
-          border-color: rgba(37, 99, 235, 0.25);
-          background: rgba(37,99,235,0.03);
-        }
-        .bp-btn.primary{
-          background: rgba(37, 99, 235, 0.95);
-          color: #fff;
-        }
-        .bp-btn.primary:hover:enabled{ filter: brightness(0.95); }
-        .bp-btn.primary:disabled{ opacity: 0.6; cursor:not-allowed; }
 
-        @media (max-width: 1120px){
-          .bp-controls{ grid-template-columns: 1fr; }
-          .bp-selectGrid{ grid-template-columns: 1fr; }
-          .bp-stats{ grid-template-columns: repeat(3, minmax(0,1fr)); }
+        .bp-emptyState strong {
+          color: var(--bp-text);
+          font-size: 18px;
+          font-weight: 950;
         }
-        @media (max-width: 980px){
-          .bp-grid{ grid-template-columns: 1fr; }
-          .bp-panelBody{ max-height: unset; }
-          .bp-roomsGrid{ grid-template-columns: 1fr; }
-          .bp-titleRow{ flex-direction: column; align-items:flex-start; }
-          .bp-contextPills{ justify-content:flex-start; }
+
+        .bp-emptyState.small {
+          min-height: 260px;
+          grid-column: 1 / -1;
+        }
+
+        .bp-bigIcon {
+          width: 78px;
+          height: 78px;
+          border-radius: 24px;
+          background: var(--bp-blue-soft);
+          color: var(--bp-blue);
+          border: 1px solid #bfdbfe;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .bp-emptyMini,
+        .bp-emptyRoom,
+        .bp-loadingLine,
+        .bp-loadingBlock {
+          color: var(--bp-muted);
+          font-weight: 750;
+          font-size: 13px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          padding: 16px;
+        }
+
+        .bp-emptyRoom {
+          border: 1px dashed #cbd5e1;
+          border-radius: 14px;
+          background: #f8fafc;
+        }
+
+        .bp-loadingBlock {
+          min-height: 260px;
+          grid-column: 1 / -1;
+        }
+
+        .bp-modalBackdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 50;
+          background: rgba(15, 23, 42, 0.45);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 18px;
+        }
+
+        .bp-modal {
+          width: min(520px, 100%);
+          max-height: 82vh;
+          background: white;
+          border-radius: 20px;
+          border: 1px solid var(--bp-border);
+          box-shadow: 0 20px 60px rgba(15, 23, 42, 0.22);
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
+        }
+
+        .bp-modal.large {
+          width: min(760px, 100%);
+        }
+
+        .bp-modalHead {
+          padding: 14px 16px;
+          border-bottom: 1px solid var(--bp-border);
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+        }
+
+        .bp-modalHead strong {
+          font-size: 16px;
+          font-weight: 950;
+        }
+
+        .modalSearch {
+          margin: 12px;
+          min-height: 46px;
+          box-shadow: none;
+        }
+
+        .bp-modalList {
+          padding: 0 12px 12px;
+          overflow: auto;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+
+        .bp-modalList.rooms {
+          max-height: 430px;
+        }
+
+        .bp-modalItem {
+          width: 100%;
+          border: 1px solid var(--bp-border);
+          background: #f8fafc;
+          border-radius: 14px;
+          padding: 10px;
+          cursor: pointer;
+          color: var(--bp-text);
+          text-align: start;
+        }
+
+        .bp-modalItem:hover {
+          border-color: #93c5fd;
+          background: #eff6ff;
+        }
+
+        .bp-modalItem.selected {
+          background: var(--bp-blue-soft);
+          border-color: #60a5fa;
+        }
+
+        .bp-modalItem.disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+
+        .bp-modalItem.room {
+          display: grid;
+          grid-template-columns: auto 1fr;
+        }
+
+        .bp-modalFooter {
+          padding: 12px 16px;
+          border-top: 1px solid var(--bp-border);
+          background: #f8fafc;
+          display: flex;
+          justify-content: flex-end;
+          gap: 10px;
+        }
+
+        @media (max-width: 1120px) {
+          .bp-toolbar {
+            grid-template-columns: 1fr;
+          }
+
+          .bp-statsGrid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+
+          .bp-layout {
+            grid-template-columns: 1fr;
+          }
+
+          .bp-list {
+            max-height: none;
+          }
+        }
+
+        @media (max-width: 640px) {
+          .bp-page {
+            padding: 14px;
+          }
+
+          .bp-header {
+            flex-direction: column;
+            align-items: stretch;
+          }
+
+          .bp-statsGrid {
+            grid-template-columns: 1fr;
+          }
+
+          .bp-roomGrid {
+            grid-template-columns: 1fr;
+          }
+
+          .bp-workHead {
+            flex-direction: column;
+            align-items: stretch;
+          }
         }
       `}</style>
     </div>
   );
 }
-
-export default BuildingsPage;
