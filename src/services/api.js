@@ -37,7 +37,7 @@ const clearStoredAuth = () => {
   localStorage.removeItem(STORAGE_KEYS.refresh);
   localStorage.removeItem(STORAGE_KEYS.user);
 };
-// api.js — replace getErrorMessage with this
+
 const getErrorMessage = (err, fallback = "Request failed") => {
   const data = err?.response?.data;
   const status = err?.response?.status;
@@ -45,15 +45,17 @@ const getErrorMessage = (err, fallback = "Request failed") => {
   if (typeof data === "string" && data.trim()) {
     return data.length > 400 ? `${status || ""} ${data.slice(0, 400)}…` : data;
   }
+
   if (data?.detail) return data.detail;
   if (data?.error) return data.error;
   if (data?.message) return data.message;
   if (data?.non_field_errors?.length) return data.non_field_errors[0];
 
-
   if (!err?.response) {
     const code = err?.code ? ` [${err.code}]` : "";
-    return `${fallback}: no response from server${code} — ${err?.message || "Network Error"}`;
+    return `${fallback}: no response from server${code} — ${
+      err?.message || "Network Error"
+    }`;
   }
 
   return `${fallback}: HTTP ${status || "?"} with empty/unknown body`;
@@ -188,7 +190,9 @@ export const inboxAPI = {
         `markProcessed failed for inbox item ${id}:`,
         err?.response?.data || err.message
       );
-      throw new Error(getErrorMessage(err, "Failed to mark inbox item as processed"));
+      throw new Error(
+        getErrorMessage(err, "Failed to mark inbox item as processed")
+      );
     }
   },
 };
@@ -206,6 +210,66 @@ export const uploadAPI = {
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Excel upload failed"));
+    }
+  },
+};
+
+export const studentsAPI = {
+  getAll: async () => {
+    try {
+      const { data } = await api.get("/api/students/");
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load students"));
+    }
+  },
+
+  getById: async (id) => {
+    try {
+      const { data } = await api.get(`/api/students/${id}/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load student"));
+    }
+  },
+};
+
+export const analysisAPI = {
+  getData: async () => {
+    try {
+      const { data } = await api.get("/api/analysis/");
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load analysis data"));
+    }
+  },
+};
+
+export const transfersAPI = {
+  getAll: async () => {
+    try {
+      const { data } = await api.get("/api/transfers/");
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load transfers"));
+    }
+  },
+
+  approve: async (id) => {
+    try {
+      const { data } = await api.put(`/api/transfers/${id}/approve/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to approve transfer"));
+    }
+  },
+
+  reject: async (id) => {
+    try {
+      const { data } = await api.put(`/api/transfers/${id}/reject/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to reject transfer"));
     }
   },
 };
