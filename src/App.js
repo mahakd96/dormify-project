@@ -105,8 +105,10 @@ function AppContent() {
         <Route path="/transfers" element={<TransfersPage language={language} />} />
         <Route path="/reports" element={<ReportsPage language={language} />} />
         <Route path="/users" element={<UsersPage language={language} />} />
-        <Route path="/settings" element={<SettingsPage language={language} onLanguageToggle={toggleLanguage} />} />
-        <Route path="/analysis" element={<AnalysisPage language={language} />} />
+        <Route
+          path="/settings"
+          element={<SettingsPage language={language} onLanguageToggle={toggleLanguage} />}
+        />
       </Route>
 
       {/* Fallback */}
