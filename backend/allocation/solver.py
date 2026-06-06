@@ -1173,7 +1173,6 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
         pair_apartment_keys=len(pair_apartment_keys),
         no_feasible=len(results["students_with_no_feasible_beds"]),
     )
-
     model = cp_model.CpModel()
 
     y = {}
@@ -1411,6 +1410,7 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
     except Exception:
         results["objective_value"] = None
 
+    candidate_bed_by_id = {b.id: b for b in candidate_beds}
     assigned_students = set()
     selected_room_by_student_id = {}
 

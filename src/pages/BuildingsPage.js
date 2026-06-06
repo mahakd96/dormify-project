@@ -738,6 +738,19 @@ const filteredMoveRooms = useMemo(() => {
                       type="button"
                       className={`bp-buildingButton ${expanded ? 'selected' : ''}`}
                       onClick={() => toggleBuilding(building.id)}
+                      style={{
+                        width: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '12px',
+                        padding: '12px',
+                        border: '1px solid',
+                        borderColor: isExpanded ? '#93c5fd' : '#e2e8f0',
+                        borderRadius: '12px',
+                        background: isExpanded ? '#eff6ff' : 'white',
+                        cursor: 'pointer',
+                        textAlign: isHe ? 'right' : 'left',
+                      }}
                     >
                       <div className="bp-iconBubble">
                         <Building2 size={18} />
@@ -827,6 +840,22 @@ const filteredMoveRooms = useMemo(() => {
                     {t.apartment} {selectedApartment?.number ?? selectedApartmentId}
                   </h2>
                 </div>
+              </div>
+
+              <div style={{ padding: '20px' }}>
+                <h3
+                  style={{
+                    fontSize: '14px',
+                    fontWeight: '700',
+                    color: '#1e293b',
+                    marginBottom: '14px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                  }}
+                >
+                  <Bed size={16} color="#3b82f6" /> {t.rooms}
+                </h3>
 
                 {swapMode.active && !viewOnly && (
                   <div className="bp-swapBanner">
