@@ -33,6 +33,10 @@ from .serializers import (
 # Auth Views
 # =========================
 
+# =========================
+# Auth Views
+# =========================
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def login_view(request):
@@ -1568,6 +1572,16 @@ def parse_gender_from_housing_type(housing_type, tenant_type='', existing_studen
     # Model requires male/female. Keep deterministic fallback instead of crashing import.
     return Student.Gender.MALE
 
+def get_decision_status(row):
+    return safe_str(
+        get_row_value(
+            row,
+            'החלטה-החלטת מעונות - תאור',
+            'גריעה/תוספת-תיאור קוד החלטה',
+            'גריעה/תוספת-סוג החלטה',
+            default=''
+        )
+    )
 
 def parse_requested_religion(value):
     value = safe_str(value)
