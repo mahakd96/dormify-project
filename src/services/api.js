@@ -37,7 +37,7 @@ const clearStoredAuth = () => {
   localStorage.removeItem(STORAGE_KEYS.refresh);
   localStorage.removeItem(STORAGE_KEYS.user);
 };
-// api.js — replace getErrorMessage with this
+
 const getErrorMessage = (err, fallback = "Request failed") => {
   const data = err?.response?.data;
   const status = err?.response?.status;
@@ -50,7 +50,6 @@ const getErrorMessage = (err, fallback = "Request failed") => {
   if (data?.message) return data.message;
   if (data?.non_field_errors?.length) return data.non_field_errors[0];
 
-
   if (!err?.response) {
     const code = err?.code ? ` [${err.code}]` : "";
     return `${fallback}: no response from server${code} — ${err?.message || "Network Error"}`;
@@ -62,13 +61,10 @@ const getErrorMessage = (err, fallback = "Request failed") => {
 api.interceptors.request.use(
   (config) => {
     const token = getAccessToken();
-
     config.headers = config.headers || {};
-
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
-
     return config;
   },
   (error) => Promise.reject(error)
@@ -138,7 +134,6 @@ export const allocationAPI = {
         region: regionId,
         ...payload,
       };
-
       const { data } = await api.post("/api/allocation/run/", body);
       return data;
     } catch (err) {
@@ -209,6 +204,7 @@ export const uploadAPI = {
     }
   },
 };
+
 export const studentsAPI = {
   getAll: async () => {
     try {
@@ -231,9 +227,15 @@ export const studentsAPI = {
 
 export const analysisAPI = {
   getData: async () => {
-    const { data } = await api.get("/api/analysis/");
-    return data;
+    try {
+      const { data } = await api.get("/api/analysis/");
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load analysis data"));
+    }
   },
+};
+
 export const transfersAPI = {
   getAll: async () => {
     try {
@@ -262,7 +264,6 @@ export const transfersAPI = {
     }
   },
 };
-
 
 export const debugAuthAPI = {
   getAccessToken,
