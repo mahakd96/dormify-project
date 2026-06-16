@@ -25,6 +25,7 @@ urlpatterns = [
 
     # Excel Upload & Split
     path('upload/excel/', views.upload_excel, name='upload-excel'),
+    path('upload/additions-excel/', views.upload_additions_excel, name='upload-additions-excel'),
     path('batches/', views.list_batches, name='list-batches'),
 
     # Region Inbox
