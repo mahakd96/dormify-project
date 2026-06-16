@@ -203,8 +203,8 @@ export const uploadAPI = {
       const form = new FormData();
       form.append("file", file);
 
-      const { data } = await api.post("/api/upload/excel/", form, {
-        headers: { "Content-Type": "multipart/form-data" },
+      const {data} = await api.post("/api/upload/excel/", form, {
+        headers: {"Content-Type": "multipart/form-data"},
       });
 
       return data;
@@ -212,52 +212,7 @@ export const uploadAPI = {
       throw new Error(getErrorMessage(err, "Excel upload failed"));
     }
   },
-
-  uploadAdditionsExcel: async (file) => {
-    try {
-      const form = new FormData();
-      form.append("file", file);
-
-      const { data } = await api.post("/api/upload/additions-excel/", form, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-
-      return data;
-    } catch (err) {
-      throw new Error(getErrorMessage(err, "Additions Excel upload failed"));
-    }
-  },
 };
-
-export const transfersAPI = {
-  getAll: async () => {
-    try {
-      const { data } = await api.get("/api/transfers/");
-      return data;
-    } catch (err) {
-      throw new Error(getErrorMessage(err, "Failed to load transfers"));
-    }
-  },
-
-  approve: async (id) => {
-    try {
-      const { data } = await api.put(`/api/transfers/${id}/approve/`);
-      return data;
-    } catch (err) {
-      throw new Error(getErrorMessage(err, "Failed to approve transfer"));
-    }
-  },
-
-  reject: async (id) => {
-    try {
-      const { data } = await api.put(`/api/transfers/${id}/reject/`);
-      return data;
-    } catch (err) {
-      throw new Error(getErrorMessage(err, "Failed to reject transfer"));
-    }
-  },
-};
-
 export const studentsAPI = {
   getAll: async () => {
     try {
@@ -285,6 +240,34 @@ export const analysisAPI = {
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to load analysis data"));
+    }
+  },
+};
+export const transfersAPI = {
+  getAll: async () => {
+    try {
+      const { data } = await api.get("/api/transfers/");
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load transfers"));
+    }
+  },
+
+  approve: async (id) => {
+    try {
+      const { data } = await api.put(`/api/transfers/${id}/approve/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to approve transfer"));
+    }
+  },
+
+  reject: async (id) => {
+    try {
+      const { data } = await api.put(`/api/transfers/${id}/reject/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to reject transfer"));
     }
   },
 };
