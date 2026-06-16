@@ -21,12 +21,24 @@ function UploadPage({ language }) {
   const [error, setError] = useState(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
+   // Additions file states
+  const [additionsFile, setAdditionsFile] = useState(null);
+  const [uploadingAdditions, setUploadingAdditions] = useState(false);
+  const [additionsResult, setAdditionsResult] = useState(null);
+  const [additionsError, setAdditionsError] = useState(null);
+  const [additionsDragOver, setAdditionsDragOver] = useState(false);
+
   const isHebrew = language === 'he';
 
   const t = {
     he: {
       title: 'העלאת קובץ שיבוץ',
       subtitle: 'ייבוא קובץ המעונות הרשמי, בדיקת הנתונים וחלוקה לפי אזורים',
+      additionsTitle: 'העלאת קובץ מתווספים',
+      additionsSubtitle: 'קובץ זה מוסיף סטודנטים עם החלטה חיובית ומשלים מידע לסטודנטים קיימים',
+      additionsUpload: 'התחל ייבוא קובץ מתווספים',
+      additionsUploading: 'קובץ המתווספים בתהליך עיבוד...',
+      additionsSuccess: 'קובץ המתווספים הועלה ועובד בהצלחה',
       eyebrow: 'ניהול נתוני שיבוץ',
       template: 'הורד תבנית',
       dropTitle: 'גרור קובץ לכאן או לחץ לבחירה',
@@ -90,6 +102,11 @@ function UploadPage({ language }) {
     en: {
       title: 'Upload Allocation File',
       subtitle: 'Import the official dormitory Excel file, validate records, and split by regions',
+      additionsTitle: 'Upload Additions File',
+      additionsSubtitle: 'This file adds students with positive decisions and enriches existing student records',
+      additionsUpload: 'Start additions import',
+      additionsUploading: 'Processing additions file...',
+      additionsSuccess: 'Additions file uploaded and processed successfully',
       eyebrow: 'Allocation Data Management',
       template: 'Download template',
       dropTitle: 'Drag a file here or click to browse',
@@ -204,14 +221,39 @@ function UploadPage({ language }) {
     resetResultState();
   };
 
+  const setSelectedAdditionsFile = (selectedFile) => {
+  if (!selectedFile) return;
+
+  if (!isValidExcelFile(selectedFile)) {
+    setAdditionsFile(null);
+    setAdditionsResult(null);
+    setAdditionsError(t.error);
+    return;
+  }
+
+  setAdditionsFile(selectedFile);
+  setAdditionsResult(null);
+  setAdditionsError(null);
+  setShowDetails(true);
+  };
+
   const handleDrop = (event) => {
     event.preventDefault();
     setDragOver(false);
     setSelectedFile(event.dataTransfer.files[0]);
   };
+  const handleAdditionsDrop = (event) => {
+  event.preventDefault();
+  setAdditionsDragOver(false);
+  setSelectedAdditionsFile(event.dataTransfer.files[0]);
+  };
 
   const handleFileSelect = (event) => {
     setSelectedFile(event.target.files[0]);
+  };
+
+  const handleAdditionsFileSelect = (event) => {
+  setSelectedAdditionsFile(event.target.files[0]);
   };
 
   const handleRemoveFile = (event) => {
@@ -223,6 +265,18 @@ function UploadPage({ language }) {
 
     const input = document.getElementById('file-input');
     if (input) input.value = '';
+  };
+
+  const handleRemoveAdditionsFile = (event) => {
+  if (event) event.stopPropagation();
+
+  setAdditionsFile(null);
+  setUploadingAdditions(false);
+  setAdditionsResult(null);
+  setAdditionsError(null);
+
+  const input = document.getElementById('additions-file-input');
+  if (input) input.value = '';
   };
 
   const handleUpload = async () => {
@@ -241,6 +295,25 @@ function UploadPage({ language }) {
     } finally {
       setUploading(false);
     }
+  };
+
+
+  const handleUploadAdditions = async () => {
+  if (!additionsFile || uploadingAdditions) return;
+
+  setUploadingAdditions(true);
+  setAdditionsError(null);
+  setAdditionsResult(null);
+  setShowDetails(true);
+
+  try {
+    const result = await uploadAPI.uploadAdditionsExcel(additionsFile);
+    setAdditionsResult(result || { success: true });
+  } catch (err) {
+    setAdditionsError(err?.message || t.error);
+  } finally {
+    setUploadingAdditions(false);
+  }
   };
 
   const fileSize = file ? `${(file.size / 1024).toFixed(1)} KB` : '';
@@ -530,6 +603,145 @@ function UploadPage({ language }) {
               </button>
             </div>
           )}
+          <div className="upload-divider" />
+
+<div className="upload-subsection">
+  <div className="subsection-heading">
+    <h2>{t.additionsTitle}</h2>
+    <p>{t.additionsSubtitle}</p>
+  </div>
+
+  <div
+    className={`drop-zone ${additionsDragOver ? 'drag-over' : ''} ${additionsFile ? 'has-file' : ''} ${uploadingAdditions ? 'is-uploading' : ''}`}
+    onDragOver={(event) => {
+      event.preventDefault();
+      setAdditionsDragOver(true);
+    }}
+    onDragLeave={() => setAdditionsDragOver(false)}
+    onDrop={handleAdditionsDrop}
+    onClick={() => {
+      if (!uploadingAdditions) {
+        const input = document.getElementById('additions-file-input');
+        if (input) input.click();
+      }
+    }}
+    role="button"
+    tabIndex={0}
+    onKeyDown={(event) => {
+      if ((event.key === 'Enter' || event.key === ' ') && !uploadingAdditions) {
+        const input = document.getElementById('additions-file-input');
+        if (input) input.click();
+      }
+    }}
+  >
+    <input
+      type="file"
+      id="additions-file-input"
+      accept=".xlsx,.xls"
+      onChange={handleAdditionsFileSelect}
+      hidden
+    />
+
+    {additionsFile ? (
+      <div className="file-selected">
+        <div className="file-icon additions-file-icon">
+          <FileSpreadsheet size={32} />
+        </div>
+
+        <div className="file-meta">
+          <span className="file-label">{t.selectedFile}</span>
+          <strong>{additionsFile.name}</strong>
+          <small>{`${(additionsFile.size / 1024).toFixed(1)} KB`}</small>
+        </div>
+
+        {!uploadingAdditions && (
+          <button
+            className="remove-btn"
+            type="button"
+            onClick={handleRemoveAdditionsFile}
+            aria-label={t.removeFile}
+            title={t.removeFile}
+          >
+            <X size={18} />
+          </button>
+        )}
+      </div>
+    ) : (
+      <div className="drop-empty">
+        <div className="upload-icon additions-icon">
+          <Upload size={38} />
+        </div>
+        <h2>{t.dropTitle}</h2>
+        <p>{t.dropSubtitle}</p>
+      </div>
+    )}
+  </div>
+
+  {additionsFile && !additionsResult && (
+    <button
+      className="upload-btn additions-btn"
+      type="button"
+      onClick={handleUploadAdditions}
+      disabled={uploadingAdditions}
+    >
+      {uploadingAdditions ? (
+        <>
+          <Loader size={20} className="spin" />
+          {t.additionsUploading}
+        </>
+      ) : (
+        t.additionsUpload
+      )}
+    </button>
+  )}
+
+  {additionsError && (
+    <div className="result-card error">
+      <div className="result-header">
+        <AlertCircle size={24} />
+        <div>
+          <strong>{t.error}</strong>
+          <span>{additionsError}</span>
+        </div>
+      </div>
+    </div>
+  )}
+
+  {additionsResult && additionsResult.success && (
+    <div className="result-card success">
+      <div className="result-header">
+        <Check size={24} />
+        <div>
+          <strong>{t.additionsSuccess}</strong>
+          {additionsResult.batch_id && <span>{t.batchId}: #{additionsResult.batch_id}</span>}
+        </div>
+      </div>
+
+      <div className="stats-grid">
+        {renderMiniStat(t.totalStudents, additionsResult.total_students, 'primary')}
+        {renderMiniStat(t.created, additionsResult.created)}
+        {renderMiniStat(t.updated, additionsResult.updated)}
+        {renderMiniStat(t.skipped, additionsResult.skipped ?? 0, additionsResult.skipped > 0 ? 'warning' : '')}
+      </div>
+
+      {additionsResult.existing_category_preserved !== undefined && (
+        <div className="notification-info">
+          <Check size={16} />
+          <span>
+            {isHebrew
+              ? `נשמר סטטוס קיים עבור ${additionsResult.existing_category_preserved} סטודנטים`
+              : `Existing category preserved for ${additionsResult.existing_category_preserved} students`}
+          </span>
+        </div>
+      )}
+
+      <button className="secondary-action" type="button" onClick={handleRemoveAdditionsFile}>
+        {t.uploadAnother}
+      </button>
+    </div>
+  )}
+</div>
+
         </section>
 
         <aside className="side-panel">
@@ -1348,6 +1560,48 @@ const styles = `
   .access-card p {
     margin: 0;
     color: #64748b;
+  }
+    .upload-divider {
+    height: 1px;
+    background: #e2e8f0;
+    margin: 30px 0;
+  }
+
+  .upload-subsection {
+    display: grid;
+    gap: 16px;
+  }
+
+  .subsection-heading h2 {
+    margin: 0 0 6px;
+    color: #0f172a;
+    font-size: 22px;
+    font-weight: 900;
+  }
+
+  .subsection-heading p {
+    margin: 0;
+    color: #64748b;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .additions-icon {
+    background: linear-gradient(135deg, #14b8a6, #0f766e);
+  }
+
+  .additions-file-icon {
+    color: #0f766e;
+    background: #ccfbf1;
+  }
+
+  .additions-btn {
+    background: linear-gradient(135deg, #14b8a6, #0f766e);
+    box-shadow: 0 18px 35px rgba(15, 118, 110, 0.22);
+  }
+
+  .additions-btn:hover {
+    box-shadow: 0 22px 42px rgba(15, 118, 110, 0.28);
   }
 
   @media (max-width: 1120px) {
