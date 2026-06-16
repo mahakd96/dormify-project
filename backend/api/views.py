@@ -1921,7 +1921,48 @@ def build_student_payload_from_row(row, existing_student=None, sheet_name=''):
     payload.update(optional_fields)
     return filter_payload_to_student_fields(payload)
 
+def get_additions_decision_status(row):
+    """
+    For additions file, use the final dorm decision status.
+    We do not want to rely on gria/tosefet status if the final decision exists.
+    """
+    return safe_str(
+        get_row_value(
+            row,
+            'החלטה-החלטת מעונות - תאור',
+            default=''
+        )
+    )
 
+
+def get_additions_decision_dorm_code(row):
+    """
+    In the additions file, the real dorm decision code is usually in
+    the 'decision content - dorms' column.
+
+    Important:
+    Do NOT use company code columns like 3000 as dorm type code.
+    """
+    return safe_str(
+        get_row_value(
+            row,
+            'החלטה-תוכן החלטה – מעונות',
+            'החלטה-תוכן החלטה - מעונות',
+            'החלטה-תוכן החלטה מעונות',
+            'החלטה-תוכן החלטה מעונות-קוד',
+            'אזור החלטה לאביב',
+            default=''
+        )
+    )
+
+
+def is_additions_positive_decision(row):
+    decision_status = get_additions_decision_status(row)
+
+    if is_blank(decision_status):
+        return False
+
+    return normalize_compact(decision_status) == normalize_compact('החלטה חיובית')
 
 
 def refresh_db_connection():
@@ -1945,6 +1986,24 @@ def refresh_db_connection():
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def upload_excel(request):
+    """
+    Upload status report Excel.
+
+    This import supports all four sheets:
+    - עוזבים
+    - מעברים
+    - נכנסים חדשים
+    - נשארים
+
+    Important:
+    - No students are deleted.
+    - Leaving students are imported with category=LEAVING.
+    - Students are not skipped because of non-positive decision status.
+    - Students are not skipped because accepted_dorm_type could not be resolved.
+    - Existing students are updated carefully without clearing existing values
+      when the Excel cell is empty.
+    """
+
     if not request.user.is_central_admin:
         return Response({
             'error': 'רק מנהל מרכזי יכול להעלות קבצים',
@@ -1959,7 +2018,7 @@ def upload_excel(request):
 
     uploaded_file = request.FILES['file']
 
-    if not uploaded_file.name.endswith(('.xlsx', '.xls')):
+    if not uploaded_file.name.lower().endswith(('.xlsx', '.xls')):
         return Response({
             'error': 'סוג קובץ לא נתמך. נא להעלות קובץ Excel (.xlsx או .xls)',
             'errorEn': 'Unsupported file type. Please upload an Excel file (.xlsx or .xls)'
@@ -1977,31 +2036,100 @@ def upload_excel(request):
         created_count = 0
         updated_count = 0
         skipped_count = 0
+
         errors = []
+        warnings = []
         region_counts = {}
         sheet_counts = {}
         skipped_by_reason = {}
+
+        category_counts = {
+            'new': 0,
+            'continuing': 0,
+            'transfer': 0,
+            'leaving': 0,
+        }
+
+        # If a student appears in more than one sheet, we keep the stronger status.
+        category_priority = {
+            Student.StudentCategory.CONTINUING: 1,
+            Student.StudentCategory.NEW: 2,
+            Student.StudentCategory.TRANSFER: 3,
+            Student.StudentCategory.LEAVING: 4,
+        }
+
+        imported_student_category_priority = {}
 
         def add_skip(reason, amount=1):
             nonlocal skipped_count
             skipped_count += amount
             skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + amount
 
+        def add_region_count(region, created=False, updated=False):
+            if not region:
+                return
+
+            if region.id not in region_counts:
+                region_counts[region.id] = {
+                    'region': region,
+                    'count': 0,
+                    'created': 0,
+                    'updated': 0,
+                }
+
+            region_counts[region.id]['count'] += 1
+
+            if created:
+                region_counts[region.id]['created'] += 1
+
+            if updated:
+                region_counts[region.id]['updated'] += 1
+
+        def update_existing_student(existing, student_payload):
+            """
+            Update an existing student carefully:
+            - Always update category and batch.
+            - Do not clear existing values when Excel value is blank.
+            - Do not replace accepted_dorm_type with None.
+            """
+            for key, value in student_payload.items():
+                if key == 'student_id':
+                    continue
+
+                if key == 'category':
+                    setattr(existing, key, value)
+                    continue
+
+                if key == 'accepted_dorm_type':
+                    if value is not None:
+                        setattr(existing, key, value)
+                    continue
+
+                # Preserve existing data if the Excel value is empty.
+                if is_blank(value):
+                    continue
+
+                setattr(existing, key, value)
+
+            existing.batch = batch
+            existing.save()
+
         for sheet_name in excel_file.sheet_names:
             df = pd.read_excel(excel_file, sheet_name=sheet_name)
             df.columns = [safe_str(col) for col in df.columns]
+
             sheet_counts[sheet_name] = {
                 'rows': len(df),
                 'created': 0,
                 'updated': 0,
                 'skipped': 0,
+                'categories': {
+                    'new': 0,
+                    'continuing': 0,
+                    'transfer': 0,
+                    'leaving': 0,
+                }
             }
-
-            if normalize_compact(sheet_name) in {normalize_compact(x) for x in LEAVING_SHEET_NAMES}:
-                add_skip('leaving_sheet', len(df))
-                sheet_counts[sheet_name]['skipped'] += len(df)
-                errors.append(f"Sheet '{sheet_name}' skipped: leaving students are not imported for allocation")
-                continue
 
             required_columns = ['ת"ז ישראלית', 'שם פרטי', 'שם משפחה']
             missing_required = [col for col in required_columns if col not in df.columns]
@@ -2021,16 +2149,8 @@ def upload_excel(request):
                     if not student_id:
                         add_skip('missing_student_id')
                         sheet_counts[sheet_name]['skipped'] += 1
-                        errors.append(f"Sheet '{sheet_name}', row {idx + 2}: missing student_id")
-                        continue
-
-                    decision_status = get_decision_status(row)
-
-                    if not is_positive_decision(decision_status):
-                        add_skip('non_positive_decision')
-                        sheet_counts[sheet_name]['skipped'] += 1
                         errors.append(
-                            f"Student {student_id}: skipped בגלל סטטוס החלטה '{decision_status}'"
+                            f"Sheet '{sheet_name}', row {idx + 2}: missing student_id"
                         )
                         continue
 
@@ -2045,70 +2165,80 @@ def upload_excel(request):
                         sheet_name=sheet_name,
                     )
 
+                    student_category = student_payload.get('category') or parse_category('', sheet_name=sheet_name)
+                    student_payload['category'] = student_category
+
+                    # Handle duplicate students inside the same uploaded Excel.
+                    new_priority = category_priority.get(student_category, 0)
+                    old_priority = imported_student_category_priority.get(student_id)
+
+                    if old_priority is not None and new_priority < old_priority:
+                        # Do not allow a weaker sheet to overwrite a stronger category.
+                        if existing:
+                            student_payload['category'] = existing.category
+
+                        warnings.append(
+                            f"Student {student_id} appeared again in sheet '{sheet_name}' "
+                            f"with weaker category '{student_category}'. Category was not overwritten."
+                        )
+                    else:
+                        imported_student_category_priority[student_id] = new_priority
+
                     accepted_dorm_type = student_payload.get('accepted_dorm_type')
-                    decision_dorm_name = get_decision_dorm_name(row)
-                    decision_dorm_code = get_decision_dorm_code(row)
+                    target_region = accepted_dorm_type.region if accepted_dorm_type else None
 
+                    # In this status-report import, we do NOT skip students if dorm type is missing.
+                    # This is especially important for leaving students.
                     if accepted_dorm_type is None:
-                        add_skip('could_not_resolve_dorm_type')
-                        sheet_counts[sheet_name]['skipped'] += 1
-                        errors.append(
-                            f"Student {student_id}: could not resolve accepted dorm type. "
-                            f"name='{decision_dorm_name}', code='{decision_dorm_code}'"
+                        warnings.append(
+                            f"Student {student_id}: accepted_dorm_type could not be resolved. "
+                            f"Student was imported anyway."
                         )
-                        continue
 
-                    target_region = accepted_dorm_type.region
-
-                    if target_region is None:
-                        add_skip('dorm_type_without_region')
-                        sheet_counts[sheet_name]['skipped'] += 1
-                        errors.append(
-                            f"Student {student_id}: dorm type '{accepted_dorm_type.name}' has no region"
+                    if accepted_dorm_type is not None and target_region is None:
+                        warnings.append(
+                            f"Student {student_id}: dorm type '{accepted_dorm_type.name}' has no region. "
+                            f"Student was imported anyway."
                         )
-                        continue
 
                     if existing:
-                        for key, value in student_payload.items():
-                            setattr(existing, key, value)
+                        update_existing_student(existing, student_payload)
 
-                        existing.batch = batch
-                        existing.save()
                         updated_count += 1
                         sheet_counts[sheet_name]['updated'] += 1
+
+                        if target_region:
+                            add_region_count(target_region, updated=True)
+
                     else:
                         Student.objects.create(
                             batch=batch,
                             **student_payload
                         )
+
                         created_count += 1
                         sheet_counts[sheet_name]['created'] += 1
 
-                    if target_region.id not in region_counts:
-                        region_counts[target_region.id] = {
-                            'region': target_region,
-                            'count': 0,
-                            'created': 0,
-                            'updated': 0,
-                        }
+                        if target_region:
+                            add_region_count(target_region, created=True)
 
-                    region_counts[target_region.id]['count'] += 1
-                    if existing:
-                        region_counts[target_region.id]['updated'] += 1
-                    else:
-                        region_counts[target_region.id]['created'] += 1
+                    final_category = student_payload.get('category')
+
+                    if final_category in category_counts:
+                        category_counts[final_category] += 1
+
+                    if final_category in sheet_counts[sheet_name]['categories']:
+                        sheet_counts[sheet_name]['categories'][final_category] += 1
 
                 except Exception as e:
                     add_skip('row_exception')
                     sheet_counts[sheet_name]['skipped'] += 1
                     errors.append(
-                        f"Sheet '{sheet_name}', row {idx + 2}: {e.__class__.__name__}: {str(e)}"
+                        f"Sheet '{sheet_name}', row {idx + 2}: "
+                        f"{e.__class__.__name__}: {str(e)}"
                     )
                     continue
 
-        # Final metadata writes happen after a long row-by-row import.
-        # Refresh the DB connection here so a stale Neon/PostgreSQL connection
-        # does not crash after the student rows were already inserted.
         refresh_db_connection()
 
         for region_id in region_counts.keys():
@@ -2130,7 +2260,10 @@ def upload_excel(request):
                 batch_id=batch.id,
                 students_count=data['count'],
                 status=RegionInbox.Status.PENDING,
-                message=f'התקבלו {data["count"]} סטודנטים חדשים לשיבוץ'
+                message=(
+                    f'התקבל דוח שיבוץ עם {data["count"]} סטודנטים באזור זה. '
+                    f'הדוח כולל נשארים, מעברים, נכנסים חדשים ועוזבים.'
+                )
             )
 
             region_breakdown.append({
@@ -2152,25 +2285,24 @@ def upload_excel(request):
 
         return Response({
             'success': True,
-            'message': 'הקובץ הועלה ועובד בהצלחה',
-            'messageEn': 'File uploaded and processed successfully',
+            'message': 'דוח השיבוץ הועלה ועובד בהצלחה',
+            'messageEn': 'Status report uploaded and processed successfully',
             'batch_id': batch.id,
             'total_students': total_imported,
             'created': created_count,
             'updated': updated_count,
             'skipped': skipped_count,
+            'category_counts': category_counts,
             'region_breakdown': region_breakdown,
             'sheet_counts': sheet_counts,
             'skipped_by_reason': skipped_by_reason,
-            'errors': errors[:100]
+            'warnings': warnings[:100],
+            'errors': errors[:100],
         }, status=status.HTTP_200_OK)
 
     except Exception as e:
         traceback.print_exc()
 
-        # If the import crashes after a long run, the current DB connection may
-        # already be closed. Use a fresh connection and QuerySet.update() so the
-        # error handler itself does not crash while trying to mark the batch.
         try:
             refresh_db_connection()
             ImportBatch.objects.filter(pk=batch.id).update(
@@ -2182,11 +2314,355 @@ def upload_excel(request):
 
         return Response({
             'success': False,
-            'error': f'שגיאה בעיבוד הקובץ: {str(e)}',
-            'errorEn': f'Error processing file: {str(e)}',
+            'error': f'שגיאה בעיבוד דוח השיבוץ: {str(e)}',
+            'errorEn': f'Error processing status report: {str(e)}',
             'traceback': traceback.format_exc(),
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def upload_additions_excel(request):
+    """
+    Upload additions Excel file.
+
+    This function is for the 'מתווספים' file.
+
+    Logic:
+    - Import only positive decisions.
+    - If student already exists:
+        update enrichment fields only.
+        do NOT override category.
+        do NOT override assigned_room.
+        do NOT touch BedAssignment.
+    - If student does not exist:
+        create student as category=NEW.
+    """
+
+    if not request.user.is_central_admin:
+        return Response({
+            'error': 'רק מנהל מרכזי יכול להעלות קבצים',
+            'errorEn': 'Only Central Admin can upload files'
+        }, status=status.HTTP_403_FORBIDDEN)
+
+    if 'file' not in request.FILES:
+        return Response({
+            'error': 'לא נבחר קובץ',
+            'errorEn': 'No file selected'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    uploaded_file = request.FILES['file']
+
+    if not uploaded_file.name.lower().endswith(('.xlsx', '.xls')):
+        return Response({
+            'error': 'סוג קובץ לא נתמך. נא להעלות קובץ Excel (.xlsx או .xls)',
+            'errorEn': 'Unsupported file type. Please upload an Excel file (.xlsx or .xls)'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    batch = ImportBatch.objects.create(
+        uploaded_by=request.user,
+        filename=uploaded_file.name,
+        status=ImportBatch.Status.PROCESSING
+    )
+
+    try:
+        excel_file = pd.ExcelFile(uploaded_file)
+
+        created_count = 0
+        updated_count = 0
+        skipped_count = 0
+
+        errors = []
+        warnings = []
+        region_counts = {}
+        sheet_counts = {}
+        skipped_by_reason = {}
+
+        existing_category_preserved_count = 0
+
+        def add_skip(reason, amount=1):
+            nonlocal skipped_count
+            skipped_count += amount
+            skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + amount
+
+        def add_region_count(region, created=False, updated=False):
+            if not region:
+                return
+
+            if region.id not in region_counts:
+                region_counts[region.id] = {
+                    'region': region,
+                    'count': 0,
+                    'created': 0,
+                    'updated': 0,
+                }
+
+            region_counts[region.id]['count'] += 1
+
+            if created:
+                region_counts[region.id]['created'] += 1
+
+            if updated:
+                region_counts[region.id]['updated'] += 1
+
+        def update_existing_student_from_additions(existing, student_payload):
+            """
+            Update only safe enrichment fields from additions file.
+
+            Do not override fields that represent current status / occupancy.
+            Do not clear existing fields with blank Excel values.
+            """
+
+            protected_fields = {
+                'student_id',
+                'category',
+                'assigned_room',
+                'current_address',
+                'current_dorm_type',
+                'move_in_date',
+                'move_out_date',
+            }
+
+            for key, value in student_payload.items():
+                if key in protected_fields:
+                    continue
+
+                if key == 'accepted_dorm_type':
+                    if value is not None:
+                        setattr(existing, key, value)
+                    continue
+
+                if is_blank(value):
+                    continue
+
+                setattr(existing, key, value)
+
+            existing.batch = batch
+            existing.save()
+
+        for sheet_name in excel_file.sheet_names:
+            df = pd.read_excel(excel_file, sheet_name=sheet_name)
+            df.columns = [safe_str(col) for col in df.columns]
+
+            sheet_counts[sheet_name] = {
+                'rows': len(df),
+                'created': 0,
+                'updated': 0,
+                'skipped': 0,
+                'positive_decisions': 0,
+                'non_positive_decisions': 0,
+                'existing_category_preserved': 0,
+            }
+
+            required_columns = ['ת"ז ישראלית', 'שם פרטי', 'שם משפחה']
+            missing_required = [col for col in required_columns if col not in df.columns]
+
+            if missing_required:
+                add_skip('missing_required_columns', len(df))
+                sheet_counts[sheet_name]['skipped'] += len(df)
+                errors.append(
+                    f"Sheet '{sheet_name}' missing required columns: {', '.join(missing_required)}"
+                )
+                continue
+
+            for idx, row in df.iterrows():
+                try:
+                    student_id = safe_str(get_alias_value(row, 'student_id'))
+
+                    if not student_id:
+                        add_skip('missing_student_id')
+                        sheet_counts[sheet_name]['skipped'] += 1
+                        errors.append(
+                            f"Sheet '{sheet_name}', row {idx + 2}: missing student_id"
+                        )
+                        continue
+
+                    decision_status = get_additions_decision_status(row)
+
+                    if not is_additions_positive_decision(row):
+                        add_skip('non_positive_decision')
+                        sheet_counts[sheet_name]['skipped'] += 1
+                        sheet_counts[sheet_name]['non_positive_decisions'] += 1
+                        continue
+
+                    sheet_counts[sheet_name]['positive_decisions'] += 1
+
+                    existing = Student.objects.filter(student_id=student_id).select_related(
+                        'accepted_dorm_type',
+                        'accepted_dorm_type__region'
+                    ).first()
+
+                    student_payload = build_student_payload_from_row(
+                        row,
+                        existing_student=existing,
+                        sheet_name=sheet_name,
+                    )
+
+                    # In additions file, this sheet does not define continuing/transfer/leaving.
+                    # Therefore:
+                    # - New students become NEW.
+                    # - Existing students keep their current category.
+                    if existing:
+                        original_category = existing.category
+                        student_payload['category'] = original_category
+                    else:
+                        student_payload['category'] = Student.StudentCategory.NEW
+
+                    # Resolve dorm type using the correct additions dorm code.
+                    additions_dorm_code = get_additions_decision_dorm_code(row)
+                    additions_dorm_name = get_decision_dorm_name(row)
+
+                    accepted_dorm_type = get_or_create_dorm_type_from_excel(
+                        dorm_code=additions_dorm_code,
+                        dorm_name=additions_dorm_name
+                    )
+
+                    if accepted_dorm_type is not None:
+                        student_payload['accepted_dorm_type'] = accepted_dorm_type
+                    else:
+                        accepted_dorm_type = student_payload.get('accepted_dorm_type')
+
+                    target_region = accepted_dorm_type.region if accepted_dorm_type else None
+
+                    # For a new student, we need accepted_dorm_type to know where to route them.
+                    if not existing and accepted_dorm_type is None:
+                        add_skip('could_not_resolve_dorm_type')
+                        sheet_counts[sheet_name]['skipped'] += 1
+                        errors.append(
+                            f"Student {student_id}: positive decision but could not resolve dorm type. "
+                            f"decision_status='{decision_status}', "
+                            f"additions_dorm_code='{additions_dorm_code}', "
+                            f"additions_dorm_name='{additions_dorm_name}'"
+                        )
+                        continue
+
+                    if accepted_dorm_type is not None and target_region is None:
+                        add_skip('dorm_type_without_region')
+                        sheet_counts[sheet_name]['skipped'] += 1
+                        errors.append(
+                            f"Student {student_id}: dorm type '{accepted_dorm_type.name}' has no region"
+                        )
+                        continue
+
+                    if existing:
+                        old_category = existing.category
+
+                        update_existing_student_from_additions(existing, student_payload)
+
+                        # Extra safety: category must not change for existing students.
+                        if existing.category != old_category:
+                            existing.category = old_category
+                            existing.save(update_fields=['category'])
+
+                        updated_count += 1
+                        sheet_counts[sheet_name]['updated'] += 1
+                        sheet_counts[sheet_name]['existing_category_preserved'] += 1
+                        existing_category_preserved_count += 1
+
+                        if target_region:
+                            add_region_count(target_region, updated=True)
+
+                    else:
+                        Student.objects.create(
+                            batch=batch,
+                            **student_payload
+                        )
+
+                        created_count += 1
+                        sheet_counts[sheet_name]['created'] += 1
+
+                        if target_region:
+                            add_region_count(target_region, created=True)
+
+                except Exception as e:
+                    add_skip('row_exception')
+                    sheet_counts[sheet_name]['skipped'] += 1
+                    errors.append(
+                        f"Sheet '{sheet_name}', row {idx + 2}: "
+                        f"{e.__class__.__name__}: {str(e)}"
+                    )
+                    continue
+
+        refresh_db_connection()
+
+        for region_id in region_counts.keys():
+            RegionInbox.objects.filter(
+                region_id=region_id,
+                status__in=[
+                    RegionInbox.Status.PENDING,
+                    RegionInbox.Status.VIEWED,
+                ]
+            ).update(status=RegionInbox.Status.SUPERSEDED)
+
+        region_breakdown = []
+
+        for region_id, data in region_counts.items():
+            refresh_db_connection()
+
+            RegionInbox.objects.create(
+                region_id=region_id,
+                batch_id=batch.id,
+                students_count=data['count'],
+                status=RegionInbox.Status.PENDING,
+                message=(
+                    f'התקבל קובץ מתווספים עם {data["count"]} סטודנטים באזור זה. '
+                    f'הקובץ מוסיף סטודנטים עם החלטה חיובית ומשלים מידע לסטודנטים קיימים.'
+                )
+            )
+
+            region_breakdown.append({
+                'region_id': region_id,
+                'region_name': data['region'].name,
+                'count': data['count'],
+                'created': data['created'],
+                'updated': data['updated'],
+            })
+
+        total_imported = created_count + updated_count
+
+        refresh_db_connection()
+        ImportBatch.objects.filter(pk=batch.id).update(
+            total_students=total_imported,
+            status=ImportBatch.Status.COMPLETED,
+            error_message=''
+        )
+
+        return Response({
+            'success': True,
+            'message': 'קובץ המתווספים הועלה ועובד בהצלחה',
+            'messageEn': 'Additions file uploaded and processed successfully',
+            'batch_id': batch.id,
+            'total_students': total_imported,
+            'created': created_count,
+            'updated': updated_count,
+            'skipped': skipped_count,
+            'existing_category_preserved': existing_category_preserved_count,
+            'region_breakdown': region_breakdown,
+            'sheet_counts': sheet_counts,
+            'skipped_by_reason': skipped_by_reason,
+            'warnings': warnings[:100],
+            'errors': errors[:100],
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        traceback.print_exc()
+
+        try:
+            refresh_db_connection()
+            ImportBatch.objects.filter(pk=batch.id).update(
+                status=ImportBatch.Status.FAILED,
+                error_message=str(e)[:2000]
+            )
+        except Exception:
+            traceback.print_exc()
+
+        return Response({
+            'success': False,
+            'error': f'שגיאה בעיבוד קובץ המתווספים: {str(e)}',
+            'errorEn': f'Error processing additions file: {str(e)}',
+            'traceback': traceback.format_exc(),
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
