@@ -43,7 +43,9 @@ const getErrorMessage = (err, fallback = "Request failed") => {
   const status = err?.response?.status;
 
   if (typeof data === "string" && data.trim()) {
-    return data.length > 400 ? `${status || ""} ${data.slice(0, 400)}…` : data;
+    return data.length > 400
+      ? `${status || ""} ${data.slice(0, 400)}…`
+      : data;
   }
 
   if (data?.detail) return data.detail;
@@ -86,7 +88,10 @@ api.interceptors.response.use(
 export const authAPI = {
   login: async (email, password) => {
     try {
-      const { data } = await api.post("/api/auth/login/", { email, password });
+      const { data } = await api.post("/api/auth/login/", {
+        email,
+        password,
+      });
 
       const access = pickAccessToken(data);
       const refresh = pickRefreshToken(data);
@@ -99,6 +104,10 @@ export const authAPI = {
 
       if (refresh) {
         localStorage.setItem(STORAGE_KEYS.refresh, refresh);
+      }
+
+      if (data?.user) {
+        localStorage.setItem(STORAGE_KEYS.user, JSON.stringify(data.user));
       }
 
       return data;
@@ -115,6 +124,7 @@ export const authAPI = {
       if (err?.response?.status === 401) {
         clearStoredAuth();
       }
+
       throw new Error(getErrorMessage(err, "Failed to load current user"));
     }
   },
@@ -156,6 +166,19 @@ export const allocationAPI = {
       throw new Error(getErrorMessage(err, "Failed to load allocation history"));
     }
   },
+
+  results: async (regionId = null) => {
+    try {
+      const url = regionId
+        ? `/api/allocation/results/?region=${regionId}`
+        : "/api/allocation/results/";
+
+      const { data } = await api.get(url);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load allocation results"));
+    }
+  },
 };
 
 export const inboxAPI = {
@@ -190,6 +213,7 @@ export const inboxAPI = {
         `markProcessed failed for inbox item ${id}:`,
         err?.response?.data || err.message
       );
+
       throw new Error(
         getErrorMessage(err, "Failed to mark inbox item as processed")
       );
@@ -198,13 +222,17 @@ export const inboxAPI = {
 };
 
 export const uploadAPI = {
+  // Main Excel upload:
+  // עוזבים / מעברים / נכנסים חדשים / נשארים
   uploadExcel: async (file) => {
     try {
       const form = new FormData();
       form.append("file", file);
 
-      const {data} = await api.post("/api/upload/excel/", form, {
-        headers: {"Content-Type": "multipart/form-data"},
+      const { data } = await api.post("/api/upload/excel/", form, {
+        headers: {
+          "Content-Type": "multipart/form-data",
+        },
       });
 
       return data;
@@ -212,7 +240,27 @@ export const uploadAPI = {
       throw new Error(getErrorMessage(err, "Excel upload failed"));
     }
   },
+
+  // Additions Excel upload:
+  // מתווספים
+  uploadAdditionsExcel: async (file) => {
+    try {
+      const form = new FormData();
+      form.append("file", file);
+
+      const { data } = await api.post("/api/upload/additions-excel/", form, {
+        headers: {
+          "Content-Type": "multipart/form-data",
+        },
+      });
+
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Additions Excel upload failed"));
+    }
+  },
 };
+
 export const studentsAPI = {
   getAll: async () => {
     try {
@@ -243,6 +291,7 @@ export const analysisAPI = {
     }
   },
 };
+
 export const transfersAPI = {
   getAll: async () => {
     try {
@@ -262,9 +311,12 @@ export const transfersAPI = {
     }
   },
 
-  reject: async (id) => {
+  reject: async (id, reason = "") => {
     try {
-      const { data } = await api.put(`/api/transfers/${id}/reject/`);
+      const { data } = await api.put(`/api/transfers/${id}/reject/`, {
+        reason,
+      });
+
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to reject transfer"));
