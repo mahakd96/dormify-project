@@ -691,8 +691,6 @@ def _can_student_use_bed(student, bed, room, apartment, hard_same_gender):
         return False
     if not _room_reserved_ok(room, student):
         return False
-    if _needs_accessibility(student) and not _apartment_is_accessible(apartment):
-        return False
     return True
 
 
