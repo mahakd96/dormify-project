@@ -1,0 +1,9 @@
+﻿case_folder,case_name,students,apartments,rooms,main_expected
+case_01_balanced_solvable,Case 01 - Balanced solvable Canada case,20,4,20,Solver status should be OPTIMAL or FEASIBLE.; successful_assignments should be 20.
+case_02_soft_tradeoff_one_sided_bad_roommate,"Case 02 - Soft tradeoff, bad one-sided roommate request",20,4,20,successful_assignments should still be 20.; S02 and S16 should probably NOT be placed in the same apartment.
+case_03_capacity_shortage_18_beds,"Case 03 - Capacity shortage, 20 students but 18 beds",20,4,20,successful_assignments should be 18.; conflicts should be 2.
+case_04_accessibility_shortage,Case 04 - Accessibility shortage,20,4,20,successful_assignments should be 19.; conflicts should be 1.
+case_05_gender_conflict_female_building,Case 05 - Gender conflict in female Canada building,20,4,20,successful_assignments should be 17.; conflicts should be 3.
+case_06_hard_religious_together_5_groups_4_apartments,Case 06 - Hard ReligiousTogether conflict,20,4,20,Full 20/20 assignment should not be possible.; Expected successful_assignments should be around 16 if each excluded group has 4 students.
+case_07_mutual_positive_roommate_vs_hard_religion,Case 07 - Mutual positive roommate request conflicts with hard religion,20,4,20,"The solver should not place S01 and S16 in the same apartment because it would violate hard ReligiousTogether.; Because roommatePositiveOnly is hard, it may assign at most one of S01/S16, or leave one unassigned."
+case_08_reserved_apartment_priority_only,Case 08 - Reserved apartment only priority students can use it,20,4,20,successful_assignments should be 18: 15 regular beds plus 3 priority students in the reserved apartment.; conflicts should be 2.
