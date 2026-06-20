@@ -824,5 +824,21 @@
     "Check conflicts == 3.",
     "Check S18/S19/S20 are unassigned.",
     "Check no gender hard violation."
-  ]
+  ],
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL",
+      "FEASIBLE"
+    ],
+    "successful_assignments": 17,
+    "conflicts": 3
+  },
+  "allocation_expectations": {
+    "must_be_unassigned": [
+      "S18",
+      "S19",
+      "S20"
+    ],
+    "unassigned_count": 3
+  }
 }

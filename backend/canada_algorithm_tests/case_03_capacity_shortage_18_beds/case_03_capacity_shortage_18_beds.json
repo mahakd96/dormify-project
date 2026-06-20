@@ -824,5 +824,40 @@
     "Check conflicts == 2.",
     "Check all priority students are assigned.",
     "Check inactive rooms CAN-A4-R4 and CAN-A4-R5 are not used."
-  ]
+  ],
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL",
+      "FEASIBLE"
+    ],
+    "successful_assignments": 18,
+    "conflicts": 2
+  },
+  "allocation_expectations": {
+    "must_be_assigned": [
+      "S01",
+      "S02",
+      "S11",
+      "S16"
+    ],
+    "unassigned_count": 2,
+    "unassigned_must_be_subset_of": [
+      "S03",
+      "S04",
+      "S05",
+      "S06",
+      "S07",
+      "S08",
+      "S09",
+      "S10",
+      "S12",
+      "S13",
+      "S14",
+      "S15",
+      "S17",
+      "S18",
+      "S19",
+      "S20"
+    ]
+  }
 }
