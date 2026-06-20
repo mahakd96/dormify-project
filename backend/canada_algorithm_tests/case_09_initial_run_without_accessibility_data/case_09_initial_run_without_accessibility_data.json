@@ -1,6 +1,6 @@
 {
-  "case_name": "Case 08 - Reserved apartment only priority students can use it",
-  "description": "CAN-A1 is reserved. Only 3 students are priority, so only 3 of the 5 reserved rooms should be usable. Other students should not be placed there.",
+  "case_name": "Case 09 - Initial allocation without accessibility data",
+  "description": "Current operational workflow: the uploaded student files do not include accessibility information at the start of the semester. All student accessibility flags therefore remain at their empty/default-false state, while the accessibility logic stays in the solver for future use.",
   "constraints_config": {
     "priorityFirst": {
       "enabled": true,
@@ -57,7 +57,7 @@
       "building_code": "CANADA_TEST",
       "category": "female",
       "is_accessible": true,
-      "is_reserved": true,
+      "is_reserved": false,
       "is_active": true,
       "inactive_reason": ""
     },
@@ -238,8 +238,8 @@
       "last_name": "A",
       "gender": "female",
       "is_priority": true,
-      "priority_reason": "priority test",
-      "needs_accessibility": true,
+      "priority_reason": "general priority test",
+      "needs_accessibility": false,
       "placement_sector": "arab",
       "religion": "muslim",
       "requested_religion": "muslim",
@@ -267,7 +267,7 @@
       "last_name": "A",
       "gender": "female",
       "is_priority": true,
-      "priority_reason": "priority test",
+      "priority_reason": "",
       "needs_accessibility": false,
       "placement_sector": "arab",
       "religion": "muslim",
@@ -295,8 +295,8 @@
       "first_name": "Lina",
       "last_name": "A",
       "gender": "female",
-      "is_priority": true,
-      "priority_reason": "priority test",
+      "is_priority": false,
+      "priority_reason": "",
       "needs_accessibility": false,
       "placement_sector": "arab",
       "religion": "muslim",
@@ -814,33 +814,34 @@
     }
   ],
   "expected_result": [
-    "successful_assignments should be 18: 15 regular beds plus 3 priority students in the reserved apartment.",
-    "conflicts should be 2.",
-    "Only priority students should be assigned to CAN-A1.",
-    "Non-priority students must not use reserved rooms."
+    "Solver status should be OPTIMAL or FEASIBLE.",
+    "successful_assignments should be 20.",
+    "conflicts should be 0.",
+    "No student should be restricted to an accessible apartment because no student has an accessibility requirement at initial-run time.",
+    "The solver may place any student in CAN-A1 or in the non-accessible apartments according to the other constraints.",
+    "This test confirms that keeping accessibility code in place does not affect allocation when the imported accessibility fields are empty/default-false."
   ],
   "checklist": [
-    "Check successful_assignments == 18.",
-    "Check conflicts == 2.",
-    "Check CAN-A1 contains only S01/S02/S03 or other priority students.",
-    "Check no non-priority student is assigned to reserved CAN-A1."
+    "Check successful_assignments == 20.",
+    "Check conflicts == 0.",
+    "Check S01 apartment has is_accessible=True.",
+    "Check apartment grouping by religion/sector/religious_pref/year_group.",
+    "Check mutual_roommate_matches and one_sided_roommate_matches."
   ],
   "expected_metrics": {
     "allowed_solver_status": [
       "OPTIMAL",
       "FEASIBLE"
     ],
-    "successful_assignments": 18,
-    "conflicts": 2
+    "successful_assignments": 20,
+    "conflicts": 0
   },
+  "operational_note": "Accessibility is intentionally not used as an initial allocation input. If an urgent accessibility need is reported later, staff may handle the change manually until the supervisor decides whether and how accessibility should be integrated into reruns.",
   "allocation_expectations": {
     "must_be_assigned": [
       "S01",
       "S02",
-      "S03"
-    ],
-    "unassigned_count": 2,
-    "unassigned_must_be_subset_of": [
+      "S03",
       "S04",
       "S05",
       "S06",
@@ -859,15 +860,37 @@
       "S19",
       "S20"
     ],
-    "apartment_allowed_students": {
-      "CAN-A1": [
+    "groups_must_share_apartment": [
+      [
         "S01",
         "S02",
-        "S03"
+        "S03",
+        "S04",
+        "S05"
+      ],
+      [
+        "S06",
+        "S07",
+        "S08",
+        "S09",
+        "S10"
+      ],
+      [
+        "S11",
+        "S12",
+        "S13",
+        "S14",
+        "S15"
+      ],
+      [
+        "S16",
+        "S17",
+        "S18",
+        "S19",
+        "S20"
       ]
-    },
-    "apartment_assigned_count": {
-      "CAN-A1": 3
-    }
+    ],
+    "minimum_mutual_roommate_matches": 8,
+    "expected_accessibility_requirement_count": 0
   }
 }

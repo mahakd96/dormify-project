@@ -827,5 +827,73 @@
     "Check S01 apartment has is_accessible=True.",
     "Check apartment grouping by religion/sector/religious_pref/year_group.",
     "Check mutual_roommate_matches and one_sided_roommate_matches."
-  ]
+  ],
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL",
+      "FEASIBLE"
+    ],
+    "successful_assignments": 20,
+    "conflicts": 0
+  },
+  "allocation_expectations": {
+    "must_be_assigned": [
+      "S01",
+      "S02",
+      "S03",
+      "S04",
+      "S05",
+      "S06",
+      "S07",
+      "S08",
+      "S09",
+      "S10",
+      "S11",
+      "S12",
+      "S13",
+      "S14",
+      "S15",
+      "S16",
+      "S17",
+      "S18",
+      "S19",
+      "S20"
+    ],
+    "groups_must_share_apartment": [
+      [
+        "S01",
+        "S02",
+        "S03",
+        "S04",
+        "S05"
+      ],
+      [
+        "S06",
+        "S07",
+        "S08",
+        "S09",
+        "S10"
+      ],
+      [
+        "S11",
+        "S12",
+        "S13",
+        "S14",
+        "S15"
+      ],
+      [
+        "S16",
+        "S17",
+        "S18",
+        "S19",
+        "S20"
+      ]
+    ],
+    "student_allowed_apartments": {
+      "S01": [
+        "CAN-A1"
+      ]
+    },
+    "minimum_mutual_roommate_matches": 8
+  }
 }

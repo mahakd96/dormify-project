@@ -1,6 +1,6 @@
 {
   "case_name": "Case 04 - Accessibility shortage",
-  "description": "Only one apartment is accessible and it has 5 one-bed rooms, but 6 students need accessibility.",
+  "description": "Future accessibility regression case: one apartment is accessible and has 5 one-bed rooms, while 6 students explicitly require accessibility. This case is not the current initial-import workflow.",
   "constraints_config": {
     "priorityFirst": {
       "enabled": true,
@@ -814,16 +814,59 @@
     }
   ],
   "expected_result": [
+    "Solver status should be OPTIMAL or FEASIBLE.",
     "successful_assignments should be 19.",
     "conflicts should be 1.",
     "Exactly 5 accessibility-needing students should be placed in CAN-A1.",
-    "One accessibility-needing student should appear in students_with_no_feasible_beds or remain unassigned.",
-    "No accessibility-needing student should be assigned to a non-accessible apartment."
+    "One of the 6 accessibility-needing students should remain unassigned.",
+    "No accessibility-needing student should be assigned to a non-accessible apartment.",
+    "students_with_no_feasible_beds is expected to remain empty because every accessibility-needing student individually has the same 5 feasible beds; the shortage is collective, not individual."
   ],
   "checklist": [
     "Check successful_assignments == 19.",
     "Check conflicts == 1.",
     "Check every assigned student with needs_accessibility=True is in is_accessible=True apartment.",
     "Check warning/no feasible list."
-  ]
+  ],
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL",
+      "FEASIBLE"
+    ],
+    "successful_assignments": 19,
+    "conflicts": 1
+  },
+  "operational_note": "Retained for future use. During the current initial allocation, accessibility data is not imported and students should normally have needs_accessibility=False/default. Use Case 09 for the current workflow.",
+  "allocation_expectations": {
+    "unassigned_count": 1,
+    "group_assignment_count": [
+      {
+        "label": "Exactly five of six accessibility-needing students are assigned",
+        "students": [
+          "S01",
+          "S02",
+          "S03",
+          "S04",
+          "S05",
+          "S06"
+        ],
+        "assigned": 5,
+        "unassigned": 1
+      }
+    ],
+    "apartment_allowed_students": {
+      "CAN-A1": [
+        "S01",
+        "S02",
+        "S03",
+        "S04",
+        "S05",
+        "S06"
+      ]
+    },
+    "apartment_assigned_count": {
+      "CAN-A1": 5
+    },
+    "expected_accessibility_requirement_count": 6
+  }
 }

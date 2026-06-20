@@ -824,5 +824,75 @@
     "Check S02 apartment != S16 apartment.",
     "Check S02 remains with the Arab/Muslim/religious group if possible.",
     "Check S16 remains with Jewish/non-religious/Year3-4 group if possible."
-  ]
+  ],
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL",
+      "FEASIBLE"
+    ],
+    "successful_assignments": 20,
+    "conflicts": 0
+  },
+  "allocation_expectations": {
+    "must_be_assigned": [
+      "S01",
+      "S02",
+      "S03",
+      "S04",
+      "S05",
+      "S06",
+      "S07",
+      "S08",
+      "S09",
+      "S10",
+      "S11",
+      "S12",
+      "S13",
+      "S14",
+      "S15",
+      "S16",
+      "S17",
+      "S18",
+      "S19",
+      "S20"
+    ],
+    "groups_must_share_apartment": [
+      [
+        "S01",
+        "S02",
+        "S03",
+        "S04",
+        "S05"
+      ],
+      [
+        "S06",
+        "S07",
+        "S08",
+        "S09",
+        "S10"
+      ],
+      [
+        "S11",
+        "S12",
+        "S13",
+        "S14",
+        "S15"
+      ],
+      [
+        "S16",
+        "S17",
+        "S18",
+        "S19",
+        "S20"
+      ]
+    ],
+    "must_not_share_apartment": [
+      [
+        "S02",
+        "S16"
+      ]
+    ],
+    "minimum_mutual_roommate_matches": 7,
+    "maximum_one_sided_roommate_matches": 0
+  }
 }
