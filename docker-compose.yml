@@ -1,4 +1,17 @@
 services:
+  test_db:
+    image: postgres:16
+    container_name: dormify_test_db
+    restart: always
+    environment:
+      POSTGRES_DB: dormify_test
+      POSTGRES_USER: dormify_user
+      POSTGRES_PASSWORD: dormify_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - dormify_test_pgdata:/var/lib/postgresql/data
+
   backend:
     build: ./backend
     container_name: dormify_backend
@@ -15,6 +28,8 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
+    depends_on:
+      - test_db
 
   frontend:
     build:
@@ -31,3 +46,6 @@ services:
       - "3000:3000"
     environment:
       CHOKIDAR_USEPOLLING: "true"
+
+volumes:
+  dormify_test_pgdata:
