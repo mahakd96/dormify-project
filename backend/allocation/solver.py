@@ -16,7 +16,7 @@ except ImportError:
 BASE_ASSIGNMENT_SCORE = 1000
 PRIORITY_SCORE = 300
 WEIGHT_UNIT = 10
-MAX_SOLVER_TIME_SECONDS = 250
+MAX_SOLVER_TIME_SECONDS = 500
 NUM_SEARCH_WORKERS = 2
 def _is_constraint_hard(config, key):
     """Return True when a constraint must be enforced as a hard rule."""
@@ -1079,16 +1079,72 @@ def _add_soft_mix_penalty(model, objective_terms, students, apartments, a, stude
     return created
 
 
-def run_improved_ortools_allocation(students, rooms, constraints_config):
+def run_improved_ortools_allocation(
+    students,
+    rooms,
+    constraints_config,
+    *,
+    max_seconds=None,
+    solve_mode="best-effort",
+    max_relative_gap=0.0,
+    persist_feasible_on_timeout=False,
+    log_search_progress=False,
+):
     """
-    Scalable OR-Tools dorm allocation.
+    Run the apartment-first OR-Tools dorm allocation model.
 
-    Key change: the model assigns students to rooms, not directly to every possible bed,
-    and it only creates same-apartment pair variables for explicit roommate-request pairs.
-    This avoids the student-pair explosion that made 718-student regional allocation unsafe.
+    Args:
+        max_seconds:
+            CP-SAT wall-time limit. ``None`` uses MAX_SOLVER_TIME_SECONDS.
+        solve_mode:
+            ``best-effort`` persists the best feasible solution found.
+            ``optimal-required`` persists only when exact optimality is proven,
+            unless ``persist_feasible_on_timeout`` is explicitly enabled.
+        max_relative_gap:
+            Optional operational gap tolerance for best-effort mode. Exact
+            optimal-required runs must use 0.0.
+        persist_feasible_on_timeout:
+            Explicit override allowing a FEASIBLE preview to be persisted in
+            optimal-required mode. It defaults to False.
+        log_search_progress:
+            Enable verbose CP-SAT search logs for diagnostics.
+
+    The existing room-level formulation and all business constraints are kept
+    unchanged in this version. The function only adds solving controls,
+    proof metadata, and explicit persistence behavior.
     """
     if not ORTOOLS_AVAILABLE:
         raise ImportError("OR-Tools is not installed.")
+
+    if max_seconds is None:
+        max_seconds = MAX_SOLVER_TIME_SECONDS
+
+    try:
+        max_seconds = float(max_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_seconds must be a positive number.") from exc
+
+    if max_seconds <= 0:
+        raise ValueError("max_seconds must be greater than zero.")
+
+    if solve_mode not in {"best-effort", "optimal-required"}:
+        raise ValueError(
+            "solve_mode must be either 'best-effort' or 'optimal-required'."
+        )
+
+    try:
+        max_relative_gap = float(max_relative_gap or 0.0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_relative_gap must be a non-negative number.") from exc
+
+    if max_relative_gap < 0:
+        raise ValueError("max_relative_gap cannot be negative.")
+
+    if solve_mode == "optimal-required" and max_relative_gap > 0:
+        raise ValueError(
+            "optimal-required mode requires max_relative_gap=0.0. "
+            "A positive gap is near-optimal, not exact optimality."
+        )
 
     students = _normalize_students_input(students)
     rooms = _normalize_rooms_input(rooms)
@@ -1097,12 +1153,22 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
     results = {
         "students_processed": len(students),
         "successful_assignments": 0,
+        "persisted_assignments": 0,
         "mutual_roommate_matches": 0,
         "one_sided_roommate_matches": 0,
         "conflicts": 0,
         "solver_status": None,
         "objective_value": None,
+        "best_objective_bound": None,
+        "absolute_gap": None,
+        "relative_gap": None,
+        "optimality_proven": False,
+        "solve_mode": solve_mode,
+        "time_limit_seconds": max_seconds,
         "wall_time": None,
+        "stopped_by_time_limit": False,
+        "solution_persisted": False,
+        "proposed_assignments": [],
         "warnings": [],
         "students_with_no_feasible_beds": [],
     }
@@ -1152,12 +1218,32 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
         hard_same_gender,
     )
 
-    feasible_y_keys = []
+    # Only rooms that are feasible for at least one student contribute usable
+    # apartment capacity. This excludes inactive rooms while preserving all
+    # existing gender, reservation, and accessibility rules.
+    usable_room_ids = {
+        room_id
+        for room_ids in student_candidate_rooms.values()
+        for room_id in room_ids
+    }
+
+    room_by_id = {room.id: room for room in candidate_rooms}
+    free_capacity_by_apartment = defaultdict(int)
+    free_beds_by_apartment = defaultdict(list)
+
+    for room_id in usable_room_ids:
+        room = room_by_id.get(room_id)
+        if room is None:
+            continue
+        free_capacity_by_apartment[room.apartment_id] += free_capacity_by_room.get(room_id, 0)
+        free_beds_by_apartment[room.apartment_id].extend(beds_by_room.get(room_id, []))
+
+    feasible_apartment_keys = []
     for student in students:
-        if not student_candidate_rooms[student.id]:
+        if not student_candidate_apartments[student.id]:
             results["students_with_no_feasible_beds"].append(student.id)
-        for room_id in student_candidate_rooms[student.id]:
-            feasible_y_keys.append((student.id, room_id))
+        for apt_id in student_candidate_apartments[student.id]:
+            feasible_apartment_keys.append((student.id, apt_id))
 
     roommate_pairs = _build_relevant_roommate_pairs(students)
     pair_apartment_keys = []
@@ -1168,21 +1254,21 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
 
     _allocation_solver_log(
         "model_size_before_build",
-        feasible_assignment_vars=len(feasible_y_keys),
+        feasible_apartment_assignment_vars=len(feasible_apartment_keys),
         roommate_pairs=len(roommate_pairs),
         pair_apartment_keys=len(pair_apartment_keys),
         no_feasible=len(results["students_with_no_feasible_beds"]),
     )
     model = cp_model.CpModel()
 
-    y = {}
-    for s_id, room_id in feasible_y_keys:
-        y[(s_id, room_id)] = model.NewBoolVar(f"y_s{s_id}_room{room_id}")
-
+    # Primary decision: assign a student to an apartment, not to one of many
+    # interchangeable rooms. Actual rooms/beds are selected deterministically
+    # after the apartment-level optimum is found.
     a = {}
-    for student in students:
-        for apt_id in student_candidate_apartments[student.id]:
-            a[(student.id, apt_id)] = model.NewBoolVar(f"a_s{student.id}_apt{apt_id}")
+    for student_id, apt_id in feasible_apartment_keys:
+        a[(student_id, apt_id)] = model.NewBoolVar(
+            f"a_s{student_id}_apt{apt_id}"
+        )
 
     same_apartment = {}
     for s1_id, s2_id, apt_id in pair_apartment_keys:
@@ -1190,34 +1276,33 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
             f"same_apt_s{s1_id}_s{s2_id}_a{apt_id}"
         )
 
-    # Each student can be assigned to at most one room.
+    # Each student can be assigned to at most one apartment.
     for student in students:
-        vars_for_student = [y[(student.id, room_id)] for room_id in student_candidate_rooms[student.id]]
+        vars_for_student = [
+            a[(student.id, apt_id)]
+            for apt_id in student_candidate_apartments[student.id]
+            if (student.id, apt_id) in a
+        ]
         if vars_for_student:
             model.Add(sum(vars_for_student) <= 1)
 
-    # Room capacity is based on actual currently free beds.
-    students_by_room = defaultdict(list)
-    for student in students:
-        for room_id in student_candidate_rooms[student.id]:
-            students_by_room[room_id].append(y[(student.id, room_id)])
-
-    for room in candidate_rooms:
-        room_vars = students_by_room.get(room.id, [])
-        if room_vars:
-            model.Add(sum(room_vars) <= free_capacity_by_room[room.id])
-
-    # Link room assignment to apartment assignment.
+    # Aggregate capacity across the currently free, usable rooms in each
+    # apartment. The current hard feasibility rules are apartment-level, so
+    # individual room permutations do not belong in the CP-SAT search.
+    students_by_apartment = defaultdict(list)
     for student in students:
         for apt_id in student_candidate_apartments[student.id]:
-            candidate_room_ids = [
-                room_id for room_id in candidate_room_ids_by_apartment.get(apt_id, [])
-                if (student.id, room_id) in y
-            ]
-            if candidate_room_ids:
-                model.Add(sum(y[(student.id, room_id)] for room_id in candidate_room_ids) == a[(student.id, apt_id)])
-            else:
-                model.Add(a[(student.id, apt_id)] == 0)
+            key = (student.id, apt_id)
+            if key in a:
+                students_by_apartment[apt_id].append(a[key])
+
+    for apartment in apartments:
+        apartment_vars = students_by_apartment.get(apartment.id, [])
+        if apartment_vars:
+            model.Add(
+                sum(apartment_vars)
+                <= free_capacity_by_apartment.get(apartment.id, 0)
+            )
 
     # Same-apartment variables only for explicit roommate-request pairs.
     for s1_id, s2_id, apt_id in pair_apartment_keys:
@@ -1262,14 +1347,21 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
     if hard_priority_first:
         priority_students = [student for student in students if _get_student_priority(student)]
         if priority_students:
-            priority_room_ids = set()
+            priority_apartment_ids = set()
             for student in priority_students:
-                priority_room_ids.update(student_candidate_rooms[student.id])
-            priority_supply = sum(free_capacity_by_room.get(room_id, 0) for room_id in priority_room_ids)
+                priority_apartment_ids.update(student_candidate_apartments[student.id])
+            priority_supply = sum(
+                free_capacity_by_apartment.get(apt_id, 0)
+                for apt_id in priority_apartment_ids
+            )
 
             if priority_supply >= len(priority_students):
                 for student in priority_students:
-                    feasible_vars = [y[(student.id, room_id)] for room_id in student_candidate_rooms[student.id]]
+                    feasible_vars = [
+                        a[(student.id, apt_id)]
+                        for apt_id in student_candidate_apartments[student.id]
+                        if (student.id, apt_id) in a
+                    ]
                     if feasible_vars:
                         model.Add(sum(feasible_vars) == 1)
             else:
@@ -1280,13 +1372,17 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
     objective_terms = []
 
     for student in students:
-        for room_id in student_candidate_rooms[student.id]:
-            objective_terms.append(y[(student.id, room_id)] * BASE_ASSIGNMENT_SCORE)
+        for apt_id in student_candidate_apartments[student.id]:
+            key = (student.id, apt_id)
+            if key in a:
+                objective_terms.append(a[key] * BASE_ASSIGNMENT_SCORE)
 
     for student in students:
         if _get_student_priority(student):
-            for room_id in student_candidate_rooms[student.id]:
-                objective_terms.append(y[(student.id, room_id)] * PRIORITY_SCORE)
+            for apt_id in student_candidate_apartments[student.id]:
+                key = (student.id, apt_id)
+                if key in a:
+                    objective_terms.append(a[key] * PRIORITY_SCORE)
 
     use_same_religion = _is_constraint_soft(constraints_config, "sameReligion")
     # Roommate matching must still influence the objective even if the frontend sends strict=True.
@@ -1365,8 +1461,7 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
 
     _allocation_solver_log(
         "model_features",
-        y_vars=len(y),
-        apartment_vars=len(a),
+        apartment_assignment_vars=len(a),
         same_apartment_vars=len(same_apartment),
         soft_group_vars=soft_group_vars,
         soft_mix_vars=soft_mix_vars,
@@ -1374,17 +1469,66 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
     )
 
     if objective_terms:
-        model.Maximize(sum(objective_terms))
+        objective_expression = sum(objective_terms)
+
+        # Safe redundant upper bound for this objective structure. Assignment,
+        # priority, and roommate rewards are the only positive terms; grouping
+        # and mixing terms are penalties. This helps CP-SAT prove optimality
+        # instead of starting from the sum of all variable coefficients.
+        objective_upper_bound = 0
+        objective_upper_bound += sum(
+            BASE_ASSIGNMENT_SCORE
+            for student in students
+            if student_candidate_apartments[student.id]
+        )
+        objective_upper_bound += sum(
+            PRIORITY_SCORE
+            for student in students
+            if _get_student_priority(student)
+            and student_candidate_apartments[student.id]
+        )
+
+        if use_roommate_match:
+            for s1, s2 in roommate_pairs:
+                if _students_have_mutual_positive_roommate_request(s1, s2):
+                    reward = roommate_match_w * WEIGHT_UNIT
+                elif _students_mutually_requested_each_other(s1, s2):
+                    reward = max(1, roommate_match_w // 2) * WEIGHT_UNIT
+                elif _students_have_any_positive_roommate_request(s1, s2):
+                    reward = max(1, roommate_match_w // 2) * WEIGHT_UNIT
+                elif _students_one_sided_roommate_request(s1, s2):
+                    reward = max(1, roommate_match_w // 3) * WEIGHT_UNIT
+                else:
+                    reward = 0
+                objective_upper_bound += max(0, reward)
+
+        model.Add(objective_expression <= objective_upper_bound)
+        model.Maximize(objective_expression)
+        _allocation_solver_log(
+            "objective_upper_bound_added",
+            upper_bound=objective_upper_bound,
+        )
     else:
         model.Maximize(0)
 
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = MAX_SOLVER_TIME_SECONDS
+    solver.parameters.max_time_in_seconds = max_seconds
     solver.parameters.num_search_workers = NUM_SEARCH_WORKERS
+    solver.parameters.log_search_progress = bool(log_search_progress)
 
-    _allocation_solver_log("cp_sat_solve_start", max_seconds=MAX_SOLVER_TIME_SECONDS, workers=NUM_SEARCH_WORKERS)
+    if max_relative_gap > 0:
+        solver.parameters.relative_gap_limit = max_relative_gap
+
+    _allocation_solver_log(
+        "cp_sat_solve_start",
+        max_seconds=max_seconds,
+        workers=NUM_SEARCH_WORKERS,
+        solve_mode=solve_mode,
+        max_relative_gap=max_relative_gap,
+    )
+
     status = solver.Solve(model)
-    _allocation_solver_log("cp_sat_solve_end", raw_status=status, wall_time=solver.WallTime())
+    wall_time = float(solver.WallTime())
 
     status_map = {
         cp_model.OPTIMAL: "OPTIMAL",
@@ -1394,10 +1538,26 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
         cp_model.UNKNOWN: "UNKNOWN",
     }
 
-    results["solver_status"] = status_map.get(status, str(status))
-    results["wall_time"] = solver.WallTime()
+    try:
+        status_name = solver.StatusName(status)
+    except Exception:
+        status_name = status_map.get(status, str(status))
 
-    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    results["solver_status"] = status_name
+    results["wall_time"] = wall_time
+    results["stopped_by_time_limit"] = (
+        status in (cp_model.FEASIBLE, cp_model.UNKNOWN)
+        and wall_time >= max_seconds * 0.99
+    )
+
+    _allocation_solver_log(
+        "cp_sat_solve_end",
+        status=status_name,
+        wall_time=wall_time,
+    )
+
+    has_solution = status in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+    if not has_solution:
         results["conflicts"] = len(students)
         if results["students_with_no_feasible_beds"]:
             results["warnings"].append(
@@ -1405,34 +1565,57 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
             )
         return results
 
-    try:
-        results["objective_value"] = solver.ObjectiveValue()
-    except Exception:
-        results["objective_value"] = None
+    objective_value = float(solver.ObjectiveValue())
+    best_objective_bound = float(solver.BestObjectiveBound())
 
-    candidate_bed_by_id = {b.id: b for b in candidate_beds}
+    # This is a maximization model. The incumbent objective is a proven lower
+    # value and BestObjectiveBound() is the remaining upper bound. max(0, ...)
+    # protects the report against negligible floating-point noise.
+    absolute_gap = max(0.0, best_objective_bound - objective_value)
+    relative_gap = absolute_gap / max(1.0, abs(objective_value))
+
+    results.update({
+        "objective_value": objective_value,
+        "best_objective_bound": best_objective_bound,
+        "absolute_gap": absolute_gap,
+        "relative_gap": relative_gap,
+        "optimality_proven": (
+            status == cp_model.OPTIMAL and absolute_gap <= 1e-9
+        ),
+    })
+
+    _allocation_solver_log(
+        "cp_sat_proof_summary",
+        status=status_name,
+        objective=objective_value,
+        best_bound=best_objective_bound,
+        absolute_gap=absolute_gap,
+        relative_gap=relative_gap,
+        optimality_proven=results["optimality_proven"],
+    )
     assigned_students = set()
+    selected_apartment_by_student_id = {}
     selected_room_by_student_id = {}
 
     _allocation_solver_log(
         "extract_selected_assignments_start",
         students=len(students),
-        candidate_assignment_vars=len(y),
+        candidate_assignment_vars=len(a),
     )
 
     for student in students:
-        for room_id in student_candidate_rooms[student.id]:
-            if solver.Value(y[(student.id, room_id)]) == 1:
-                selected_room_by_student_id[student.id] = room_id
+        for apt_id in student_candidate_apartments[student.id]:
+            key = (student.id, apt_id)
+            if key in a and solver.Value(a[key]) == 1:
+                selected_apartment_by_student_id[student.id] = apt_id
                 assigned_students.add(student.id)
                 break
 
     _allocation_solver_log(
         "extract_selected_assignments_end",
-        selected_students=len(selected_room_by_student_id),
+        selected_students=len(selected_apartment_by_student_id),
     )
 
-    used_free_bed_index_by_room = defaultdict(int)
     assignments_to_create = []
     students_to_update = []
     selected_student_ids = []
@@ -1441,44 +1624,74 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
 
     now = timezone.now()
     has_student_updated_at = hasattr(Student, "updated_at")
+    students_by_id = {student.id: student for student in students}
+    selected_student_ids_by_apartment = defaultdict(list)
 
-    for student in students:
-        room_id = selected_room_by_student_id.get(student.id)
-        if room_id is None:
-            continue
+    for student_id, apt_id in selected_apartment_by_student_id.items():
+        selected_student_ids_by_apartment[apt_id].append(student_id)
 
-        free_beds = beds_by_room.get(room_id, [])
-        next_index = used_free_bed_index_by_room[room_id]
-
-        if next_index >= len(free_beds):
-            # Defensive guard; should not happen because of room capacity constraints.
-            results["warnings"].append(f"No free bed left while persisting room {room_id}.")
-            assigned_students.discard(student.id)
-            continue
-
-        bed = free_beds[next_index]
-        used_free_bed_index_by_room[room_id] += 1
-
-        assignments_to_create.append(
-            BedAssignment(
-                student=student,
-                bed=bed,
-                status=BedAssignment.Status.ACTIVE,
-                assignment_type=BedAssignment.AssignmentType.INITIAL,
-            )
+    # Deterministic post-processing: once the apartment composition is fixed,
+    # map students to sorted free beds. This removes equivalent room/bed
+    # permutations from the optimization model while preserving the allocation.
+    for apt_id in sorted(selected_student_ids_by_apartment):
+        apartment_student_ids = sorted(
+            selected_student_ids_by_apartment[apt_id],
+            key=lambda student_id: (
+                _get_student_identifier(students_by_id[student_id]),
+                student_id,
+            ),
+        )
+        available_beds = sorted(
+            free_beds_by_apartment.get(apt_id, []),
+            key=lambda bed: (
+                _safe_str(bed.room.name),
+                _safe_str(bed.label),
+                bed.id,
+            ),
         )
 
-        if hasattr(student, "assigned_room_id"):
-            student.assigned_room_id = room_id
-        elif hasattr(student, "assigned_room"):
-            # Fallback for unusual model variants.
-            student.assigned_room = next((room for room in candidate_rooms if room.id == room_id), None)
+        if len(available_beds) < len(apartment_student_ids):
+            raise RuntimeError(
+                f"Apartment {apt_id} has {len(apartment_student_ids)} selected "
+                f"students but only {len(available_beds)} usable free beds."
+            )
 
-        if has_student_updated_at:
-            student.updated_at = now
+        for student_id, bed in zip(apartment_student_ids, available_beds):
+            student = students_by_id[student_id]
+            room_id = bed.room_id
+            selected_room_by_student_id[student.id] = room_id
 
-        students_to_update.append(student)
-        selected_student_ids.append(student.id)
+            assignments_to_create.append(
+                BedAssignment(
+                    student=student,
+                    bed=bed,
+                    status=BedAssignment.Status.ACTIVE,
+                    assignment_type=BedAssignment.AssignmentType.INITIAL,
+                )
+            )
+
+            results["proposed_assignments"].append({
+                "student_db_id": student.id,
+                "student_id": _get_student_identifier(student),
+                "student_name": _get_student_full_name(student),
+                "apartment_id": bed.room.apartment_id,
+                "apartment_code": _safe_str(bed.room.apartment.number),
+                "room_id": room_id,
+                "room_code": _safe_str(bed.room.name),
+                "bed_id": bed.id,
+                "bed_label": _safe_str(bed.label),
+            })
+
+            if hasattr(student, "assigned_room_id"):
+                student.assigned_room_id = room_id
+            elif hasattr(student, "assigned_room"):
+                student.assigned_room = bed.room
+
+            if has_student_updated_at:
+                student.updated_at = now
+
+            students_to_update.append(student)
+            selected_student_ids.append(student.id)
 
     _allocation_solver_log(
         "prepare_bulk_persist_end",
@@ -1486,46 +1699,67 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
         students_to_update=len(students_to_update),
     )
 
-    # Important: refresh any stale DB connection before the persistence phase.
-    close_old_connections()
-
-    _allocation_solver_log("db_bulk_persist_start")
-
-    student_update_fields = ["assigned_room"]
-    if has_student_updated_at:
-        student_update_fields.append("updated_at")
-
-    # Persist assignments in one short database transaction. This avoids the slow
-    # per-student update/create/save loop that can hang with remote Neon/Postgres.
-    with transaction.atomic():
-        if selected_student_ids:
-            BedAssignment.objects.filter(
-                student_id__in=selected_student_ids,
-                status=BedAssignment.Status.ACTIVE,
-            ).update(
-                status=BedAssignment.Status.ENDED,
-                ended_at=now,
-            )
-
-        if assignments_to_create:
-            BedAssignment.objects.bulk_create(
-                assignments_to_create,
-                batch_size=500,
-            )
-
-        if students_to_update:
-            Student.objects.bulk_update(
-                students_to_update,
-                student_update_fields,
-                batch_size=500,
-            )
-
     results["successful_assignments"] = len(assignments_to_create)
 
-    _allocation_solver_log(
-        "db_bulk_persist_end",
-        successful_assignments=results["successful_assignments"],
-    )
+    if solve_mode == "optimal-required":
+        should_persist = bool(results["optimality_proven"])
+        if status == cp_model.FEASIBLE and persist_feasible_on_timeout:
+            should_persist = True
+    else:
+        should_persist = True
+
+    if should_persist:
+        # Important: refresh any stale DB connection before the persistence phase.
+        close_old_connections()
+
+        _allocation_solver_log("db_bulk_persist_start")
+
+        student_update_fields = ["assigned_room"]
+        if has_student_updated_at:
+            student_update_fields.append("updated_at")
+
+        # Persist assignments in one short database transaction. This avoids the slow
+        # per-student update/create/save loop that can hang with remote Neon/Postgres.
+        with transaction.atomic():
+            if selected_student_ids:
+                BedAssignment.objects.filter(
+                    student_id__in=selected_student_ids,
+                    status=BedAssignment.Status.ACTIVE,
+                ).update(
+                    status=BedAssignment.Status.ENDED,
+                    ended_at=now,
+                )
+
+            if assignments_to_create:
+                BedAssignment.objects.bulk_create(
+                    assignments_to_create,
+                    batch_size=500,
+                )
+
+            if students_to_update:
+                Student.objects.bulk_update(
+                    students_to_update,
+                    student_update_fields,
+                    batch_size=500,
+                )
+
+        results["solution_persisted"] = True
+        results["persisted_assignments"] = len(assignments_to_create)
+
+        _allocation_solver_log(
+            "db_bulk_persist_end",
+            persisted_assignments=results["persisted_assignments"],
+        )
+    else:
+        results["warnings"].append(
+            "A feasible solution was found but was kept as a preview because "
+            "exact optimality was not proven."
+        )
+        _allocation_solver_log(
+            "db_bulk_persist_skipped",
+            reason="optimality_not_proven",
+            proposed_assignments=len(assignments_to_create),
+        )
 
     mutual_roommate_matches = 0
     one_sided_roommate_matches = 0
@@ -1534,14 +1768,9 @@ def run_improved_ortools_allocation(students, rooms, constraints_config):
         if s1.id not in assigned_students or s2.id not in assigned_students:
             continue
 
-        room1_id = selected_room_by_student_id.get(s1.id)
-        room2_id = selected_room_by_student_id.get(s2.id)
-        if room1_id is None or room2_id is None:
-            continue
-
-        room1 = next((room for room in candidate_rooms if room.id == room1_id), None)
-        room2 = next((room for room in candidate_rooms if room.id == room2_id), None)
-        if not room1 or not room2 or room1.apartment_id != room2.apartment_id:
+        apartment1_id = selected_apartment_by_student_id.get(s1.id)
+        apartment2_id = selected_apartment_by_student_id.get(s2.id)
+        if apartment1_id is None or apartment1_id != apartment2_id:
             continue
 
         if _students_have_mutual_positive_roommate_request(s1, s2):
