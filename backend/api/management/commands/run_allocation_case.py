@@ -521,6 +521,11 @@ class Command(BaseCommand):
                 "first_name": row.get("first_name", "").strip(),
                 "last_name": row.get("last_name", "").strip(),
                 "gender": gender,
+                "housing_type": (
+                    Student.HousingType.SINGLE_FEMALE
+                    if gender == Student.Gender.FEMALE
+                    else Student.HousingType.SINGLE_MALE
+                ),
                 "is_priority": self.parse_bool(row.get("is_priority", "False")),
                 "priority_reason": row.get("priority_reason", "").strip(),
                 "placement_sector": placement_sector,
