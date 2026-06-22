@@ -17,6 +17,8 @@ import {
   Loader,
   XCircle,
   BarChart3,
+  ShieldCheck,
+  SlidersHorizontal,
 } from 'lucide-react';
 
 function AllocationPage({ language = 'he' }) {
@@ -36,13 +38,13 @@ function AllocationPage({ language = 'he' }) {
   const [result, setResult] = useState(null);
 
   const [constraints, setConstraints] = useState({
-    sameGender: { enabled: true, strict: true, critical: true, weight: 10 },
+    sameGender: { enabled: true, strict: true, critical: true, weight: 0 },
     sameReligion: { enabled: true, strict: false, critical: false, weight: 6 },
-    roommateMatch: { enabled: true, strict: true, critical: false, weight: 8 },
-    priorityFirst: { enabled: true, strict: true, critical: true, weight: 10 },
-    roommatePositiveOnly: { enabled: true, strict: true, critical: true, weight: 10 },
-    ReligiousTogether: { enabled: true, strict: true, critical: true, weight: 9 },
-    sectorMatching: { enabled: true, strict: true, critical: false, weight: 7 },
+    roommateMatch: { enabled: true, strict: false, critical: false, weight: 8 },
+    priorityFirst: { enabled: true, strict: true, critical: true, weight: 0 },
+    roommatePositiveOnly: { enabled: true, strict: true, critical: true, weight: 0 },
+    ReligiousTogether: { enabled: true, strict: true, critical: true, weight: 0 },
+    sectorMatching: { enabled: true, strict: false, critical: false, weight: 7 },
     avoidYearMix_1_with_3_4: { enabled: true, strict: false, critical: false, weight: 4 },
     avoidAtudaimWithHasmaha: { enabled: true, strict: false, critical: false, weight: 4 },
   });
@@ -55,12 +57,18 @@ function AllocationPage({ language = 'he' }) {
           subtitle: 'הפעלת אלגוריתם השיבוץ החכם',
           runAllocation: 'הפעל שיבוץ',
           running: 'מריץ שיבוץ...',
-          constraints: 'אילוצי שיבוץ',
-          strict: 'חובה',
-          flexible: 'גמיש',
-          critical: 'קריטי',
-          weight: 'משקל',
-          weightHint: 'כמה חשוב האילוץ באופטימיזציה (0–10)',
+          constraints: 'כללי והעדפות השיבוץ',
+          constraintsIntro: '',
+          hardConstraints: 'אילוצים קשיחים',
+          hardConstraintsHint: 'כללים קבועים של האלגוריתם. הם מופעלים תמיד, אינם ניתנים לשינוי ואינם מקבלים משקל.',
+          hardConstraint: 'אילוץ קשיח',
+          alwaysApplied: 'מופעל תמיד',
+          noWeight: 'ללא משקל',
+          optimizationPreferences: 'העדפות לאופטימיזציה',
+          preferencesHint: 'אפשר לבחור אילו העדפות יילקחו בחשבון ולקבוע את רמת החשיבות שלהן.',
+          importance: 'רמת חשיבות',
+          included: 'נכלל בשיבוץ',
+          excluded: 'לא נכלל בשיבוץ',
           studentsToAssign: 'סטודנטים לשיבוץ',
           availableBeds: 'מיטות פנויות',
           results: 'תוצאות השיבוץ',
@@ -76,7 +84,22 @@ function AllocationPage({ language = 'he' }) {
           receivedStudents: 'התקבלו סטודנטים לשיבוץ',
           batchId: 'מספר קובץ',
           receivedAt: 'התקבל בתאריך',
-          studentsBreakdown: 'פירוט סטודנטים',
+          studentsBreakdown: 'פירוט סטודנטים לפי סטטוס',
+          housingDemand: 'סטודנטים לשיבוץ לפי סוג דיור',
+          inventoryBreakdown: 'מלאי דיור פנוי לפי סוג',
+          singleHousing: 'דירות רווקים/ות',
+          coupleHousing: 'דירות זוגות',
+          familyHousing: 'דירות משפחה',
+          singleMaleStudents: 'רווקים',
+          singleFemaleStudents: 'רווקות',
+          singleMixedStudents: 'רווקים/ות בדירת זוגות',
+          coupleStudents: 'זוגות',
+          familyStudents: 'משפחות',
+          unknownHousing: 'סוג דיור לא ידוע',
+          apartmentsLabel: 'דירות',
+          roomsLabel: 'חדרים/יחידות',
+          freeBedsLabel: 'מיטות פנויות',
+          totalBedsLabel: 'סה״כ מיטות',
           newStudents: 'חדשים',
           continuing: 'ממשיכים',
           transfers: 'מעברים',
@@ -106,12 +129,18 @@ function AllocationPage({ language = 'he' }) {
           subtitle: 'Run the smart allocation algorithm',
           runAllocation: 'Run Allocation',
           running: 'Running allocation...',
-          constraints: 'Allocation Constraints',
-          strict: 'Strict',
-          flexible: 'Flexible',
-          critical: 'Critical',
-          weight: 'Weight',
-          weightHint: 'How important in optimization (0–10)',
+          constraints: 'Allocation Rules and Preferences',
+          constraintsIntro: 'Review the fixed rules and configure the optimization preferences before running the allocation.',
+          hardConstraints: 'Hard Constraints',
+          hardConstraintsHint: 'Fixed algorithm rules. They are always applied, cannot be changed, and do not receive a weight.',
+          hardConstraint: 'Hard constraint',
+          alwaysApplied: 'Always applied',
+          noWeight: 'No weight',
+          optimizationPreferences: 'Optimization Preferences',
+          preferencesHint: 'Choose which preferences should be considered and set their importance level.',
+          importance: 'Importance level',
+          included: 'Included in allocation',
+          excluded: 'Not included in allocation',
           studentsToAssign: 'Students to assign',
           availableBeds: 'Available beds',
           results: 'Allocation Results',
@@ -127,7 +156,22 @@ function AllocationPage({ language = 'he' }) {
           receivedStudents: 'Students received for allocation',
           batchId: 'Batch ID',
           receivedAt: 'Received on',
-          studentsBreakdown: 'Students breakdown',
+          studentsBreakdown: 'Students by status',
+          housingDemand: 'Students to allocate by housing type',
+          inventoryBreakdown: 'Available inventory by housing type',
+          singleHousing: 'Single housing',
+          coupleHousing: 'Couple housing',
+          familyHousing: 'Family housing',
+          singleMaleStudents: 'Single men',
+          singleFemaleStudents: 'Single women',
+          singleMixedStudents: 'Singles in couple apartments',
+          coupleStudents: 'Couples',
+          familyStudents: 'Families',
+          unknownHousing: 'Unknown housing type',
+          apartmentsLabel: 'Apartments',
+          roomsLabel: 'Rooms/units',
+          freeBedsLabel: 'Available beds',
+          totalBedsLabel: 'Total beds',
           newStudents: 'New',
           continuing: 'Continuing',
           transfers: 'Transfers',
@@ -157,12 +201,18 @@ function AllocationPage({ language = 'he' }) {
         subtitle: 'Run the smart allocation algorithm',
         runAllocation: 'Run Allocation',
         running: 'Running allocation...',
-        constraints: 'Allocation Constraints',
-        strict: 'Strict',
-        flexible: 'Flexible',
-        critical: 'Critical',
-        weight: 'Weight',
-        weightHint: 'How important in optimization (0–10)',
+        constraints: 'Allocation Rules and Preferences',
+        constraintsIntro: 'Review the fixed rules and configure the optimization preferences before running the allocation.',
+        hardConstraints: 'Hard Constraints',
+        hardConstraintsHint: 'Fixed algorithm rules. They are always applied, cannot be changed, and do not receive a weight.',
+        hardConstraint: 'Hard constraint',
+        alwaysApplied: 'Always applied',
+        noWeight: 'No weight',
+        optimizationPreferences: 'Optimization Preferences',
+        preferencesHint: 'Choose which preferences should be considered and set their importance level.',
+        importance: 'Importance level',
+        included: 'Included in allocation',
+        excluded: 'Not included in allocation',
         studentsToAssign: 'Students to assign',
         availableBeds: 'Available beds',
         results: 'Allocation Results',
@@ -178,7 +228,22 @@ function AllocationPage({ language = 'he' }) {
         receivedStudents: 'Students received for allocation',
         batchId: 'Batch ID',
         receivedAt: 'Received on',
-        studentsBreakdown: 'Students breakdown',
+        studentsBreakdown: 'Students by status',
+        housingDemand: 'Students to allocate by housing type',
+        inventoryBreakdown: 'Available inventory by housing type',
+        singleHousing: 'Single housing',
+        coupleHousing: 'Couple housing',
+        familyHousing: 'Family housing',
+        singleMaleStudents: 'Single men',
+        singleFemaleStudents: 'Single women',
+        singleMixedStudents: 'Singles in couple apartments',
+        coupleStudents: 'Couples',
+        familyStudents: 'Families',
+        unknownHousing: 'Unknown housing type',
+        apartmentsLabel: 'Apartments',
+        roomsLabel: 'Rooms/units',
+        freeBedsLabel: 'Available beds',
+        totalBedsLabel: 'Total beds',
         newStudents: 'New',
         continuing: 'Continuing',
         transfers: 'Transfers',
@@ -260,6 +325,35 @@ function AllocationPage({ language = 'he' }) {
                 transfer: Number(data.students_by_category.transfer) || 0,
                 leaving: Number(data.students_by_category.leaving) || 0,
               }
+            : null,
+        students_by_housing_type:
+          data.students_by_housing_type && typeof data.students_by_housing_type === 'object'
+            ? {
+                single_male: Number(data.students_by_housing_type.single_male) || 0,
+                single_female: Number(data.students_by_housing_type.single_female) || 0,
+                single_mixed: Number(data.students_by_housing_type.single_mixed) || 0,
+                couple: Number(data.students_by_housing_type.couple) || 0,
+                family: Number(data.students_by_housing_type.family) || 0,
+                unknown: Number(data.students_by_housing_type.unknown) || 0,
+              }
+            : null,
+        inventory_by_type:
+          data.inventory_by_type && typeof data.inventory_by_type === 'object'
+            ? Object.fromEntries(
+                ['single', 'couple', 'family'].map((key) => {
+                  const item = data.inventory_by_type[key] || {};
+                  return [
+                    key,
+                    {
+                      apartments: Number(item.apartments) || 0,
+                      rooms: Number(item.rooms) || 0,
+                      total_beds: Number(item.total_beds) || 0,
+                      occupied_beds: Number(item.occupied_beds) || 0,
+                      available_beds: Number(item.available_beds) || 0,
+                    },
+                  ];
+                })
+              )
             : null,
         region: data.region && typeof data.region === 'object' ? data.region : null,
         ...data,
@@ -358,19 +452,32 @@ function AllocationPage({ language = 'he' }) {
 
     setConstraints((prev) => {
       const current = prev[key];
-      if (!current) return prev;
+      if (!current || current.critical) return prev;
       return { ...prev, [key]: { ...current, weight: w } };
     });
   };
 
+  const hardConstraints = useMemo(
+    () => Object.entries(constraints).filter(([, value]) => value.critical),
+    [constraints]
+  );
+
+  const optimizationPreferences = useMemo(
+    () => Object.entries(constraints).filter(([, value]) => !value.critical),
+    [constraints]
+  );
+
   const effectiveConfig = useMemo(() => {
     const out = {};
     Object.entries(constraints).forEach(([k, v]) => {
+      const isHardConstraint = !!v.critical;
+
       out[k] = {
-        enabled: !!v.enabled,
+        // Hard constraints are always active and never participate in weighting.
+        enabled: isHardConstraint ? true : !!v.enabled,
         strict: !!v.strict,
-        critical: !!v.critical,
-        weight: Number(v.weight) || 0,
+        critical: isHardConstraint,
+        weight: isHardConstraint ? 0 : Number(v.weight) || 0,
       };
     });
     return out;
@@ -574,58 +681,118 @@ function AllocationPage({ language = 'he' }) {
         <div className="grid">
           <div className="leftCol">
             <div className="card">
-              <div className="cardHeader">
-                <div className="cardTitle">
-                  <Settings size={16} />
-                  <span>{t.constraints}</span>
+              <div className="cardHeader constraintsHeader">
+                <div>
+                  <div className="cardTitle">
+                    <Settings size={17} />
+                    <span>{t.constraints}</span>
+                  </div>
+                  <p className="cardDescription">{t.constraintsIntro}</p>
                 </div>
-                <span className="hint">{t.weightHint}</span>
               </div>
 
-              <div className="constraintsTable">
-                {Object.entries(constraints).map(([key, value]) => (
-                  <div
-                    key={key}
-                    className={`row ${value.critical ? 'critical' : ''} ${!value.enabled ? 'disabled' : ''}`}
-                  >
-                    <div className="rowMain">
-                      <label className={`toggle ${value.critical ? 'locked' : ''}`}>
-                        <input
-                          type="checkbox"
-                          checked={value.enabled}
-                          disabled={value.critical}
-                          onChange={() => toggleConstraintEnabled(key)}
-                        />
-                        <span className="labelText">
-                          {t[key] || key}
-                          {value.critical && (
-                            <span className="miniChip">
-                              <Lock size={12} /> {t.critical}
-                            </span>
-                          )}
-                        </span>
-                      </label>
-
-                      <div className="weight">
-                        <span className="wLabel">{t.weight}</span>
-                        <input
-                          type="range"
-                          min="0"
-                          max="10"
-                          step="1"
-                          value={value.weight}
-                          disabled={!value.enabled}
-                          onChange={(e) => setConstraintWeight(key, e.target.value)}
-                        />
-                        <span className="wValue">{value.weight}</span>
+              <div className="constraintSections">
+                <section className="constraintSection hardSection">
+                  <div className="sectionHeader">
+                    <div className="sectionTitleWrap">
+                      <span className="sectionIcon hard">
+                        <ShieldCheck size={17} />
+                      </span>
+                      <div>
+                        <div className="sectionTitleLine">
+                          <h3>{t.hardConstraints}</h3>
+                          <span className="countBadge">{hardConstraints.length}</span>
+                        </div>
+                        <p>{t.hardConstraintsHint}</p>
                       </div>
                     </div>
-
-                    <span className={`pill ${value.strict ? 'strict' : 'flex'}`}>
-                      {value.strict ? t.strict : t.flexible}
-                    </span>
                   </div>
-                ))}
+
+                  <div className="hardRulesGrid">
+                    {hardConstraints.map(([key]) => (
+                      <div key={key} className="hardRuleCard">
+                        <span className="hardRuleIcon">
+                          <Lock size={15} />
+                        </span>
+                        <div className="hardRuleContent">
+                          <div className="hardRuleName">{t[key] || key}</div>
+                          <div className="hardRuleMeta">
+                            <span className="hardBadge">
+                              <ShieldCheck size={12} /> {t.hardConstraint}
+                            </span>
+                            <span>{t.alwaysApplied}</span>
+                            <span className="metaDivider" aria-hidden="true">•</span>
+                            <span>{t.noWeight}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="constraintSection preferencesSection">
+                  <div className="sectionHeader">
+                    <div className="sectionTitleWrap">
+                      <span className="sectionIcon preferences">
+                        <SlidersHorizontal size={17} />
+                      </span>
+                      <div>
+                        <div className="sectionTitleLine">
+                          <h3>{t.optimizationPreferences}</h3>
+                          <span className="countBadge">{optimizationPreferences.length}</span>
+                        </div>
+                        <p>{t.preferencesHint}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="preferencesList">
+                    {optimizationPreferences.map(([key, value]) => (
+                      <div key={key} className={`preferenceCard ${!value.enabled ? 'disabled' : ''}`}>
+                        <div className="preferenceTop">
+                          <div className="preferenceIdentity">
+                            <div className="preferenceName">{t[key] || key}</div>
+                            <div className={`preferenceStatus ${value.enabled ? 'active' : ''}`}>
+                              {value.enabled ? t.included : t.excluded}
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            className={`switchControl ${value.enabled ? 'on' : ''}`}
+                            role="switch"
+                            aria-checked={value.enabled}
+                            aria-label={`${t[key] || key}: ${value.enabled ? t.included : t.excluded}`}
+                            onClick={() => toggleConstraintEnabled(key)}
+                          >
+                            <span className="switchThumb" />
+                          </button>
+                        </div>
+
+                        <div className="importanceControl">
+                          <div className="importanceHeader">
+                            <span>{t.importance}</span>
+                            <strong>{value.weight}/10</strong>
+                          </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="10"
+                            step="1"
+                            value={value.weight}
+                            disabled={!value.enabled}
+                            aria-label={`${t.importance}: ${t[key] || key}`}
+                            onChange={(e) => setConstraintWeight(key, e.target.value)}
+                          />
+                          <div className="rangeScale" aria-hidden="true">
+                            <span>0</span>
+                            <span>10</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
               </div>
 
               {!canRun && (
@@ -660,6 +827,77 @@ function AllocationPage({ language = 'he' }) {
               </div>
             </div>
 
+            {summary?.inventory_by_type && (
+              <div className="card">
+                <div className="cardHeader compact">
+                  <div className="cardTitle">
+                    <Home size={16} />
+                    <span>{t.inventoryBreakdown}</span>
+                  </div>
+                </div>
+
+                <div className="inventoryGrid">
+                  {[
+                    ['single', t.singleHousing],
+                    ['couple', t.coupleHousing],
+                    ['family', t.familyHousing],
+                  ].map(([key, label]) => {
+                    const item = summary.inventory_by_type[key] || {};
+                    return (
+                      <div className="inventoryItem" key={key}>
+                        <div className="inventoryTitle">{label}</div>
+                        <div className="inventoryMetrics">
+                          <div className="metricRow">
+                            <span>{t.apartmentsLabel}</span>
+                            <strong>{item.apartments || 0}</strong>
+                          </div>
+                          <div className="metricRow">
+                            <span>{t.roomsLabel}</span>
+                            <strong>{item.rooms || 0}</strong>
+                          </div>
+                          <div className="metricRow highlight">
+                            <span>{t.freeBedsLabel}</span>
+                            <strong>{item.available_beds || 0}</strong>
+                          </div>
+                          <div className="metricRow">
+                            <span>{t.totalBedsLabel}</span>
+                            <strong>{item.total_beds || 0}</strong>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {summary?.students_by_housing_type && (
+              <div className="card">
+                <div className="cardHeader compact">
+                  <div className="cardTitle">
+                    <Users size={16} />
+                    <span>{t.housingDemand}</span>
+                  </div>
+                </div>
+
+                <div className="housingBreakdown">
+                  {[
+                    ['single_male', t.singleMaleStudents],
+                    ['single_female', t.singleFemaleStudents],
+                    ['single_mixed', t.singleMixedStudents],
+                    ['couple', t.coupleStudents],
+                    ['family', t.familyStudents],
+                    ['unknown', t.unknownHousing],
+                  ].map(([key, label]) => (
+                    <div className={`housingItem ${key === 'unknown' ? 'unknown' : ''}`} key={key}>
+                      <div className="housingNum">{summary.students_by_housing_type[key] || 0}</div>
+                      <div className="housingLbl">{label}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {summary?.students_by_category && (
               <div className="card">
                 <div className="cardHeader compact">
@@ -681,6 +919,10 @@ function AllocationPage({ language = 'he' }) {
                   <div className="bItem">
                     <div className="bNum">{summary.students_by_category.transfer || 0}</div>
                     <div className="bLbl">{t.transfers}</div>
+                  </div>
+                  <div className="bItem">
+                    <div className="bNum">{summary.students_by_category.leaving || 0}</div>
+                    <div className="bLbl">{t.leaving}</div>
                   </div>
                   <div className="bItem priority">
                     <div className="bNum">{summary.priority_students || 0}</div>
@@ -1053,132 +1295,316 @@ const styles = `
     text-align: right;
   }
 
-  .constraintsTable{
+  .constraintsHeader{
+    align-items: flex-start;
+  }
+
+  .cardDescription{
+    margin: 7px 0 0;
+    max-width: 650px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 750;
+    line-height: 1.55;
+  }
+
+  .constraintSections{
     display:flex;
     flex-direction:column;
-    gap: 10px;
+    gap: 16px;
   }
 
-  .row{
+  .constraintSection{
+    border-radius: 16px;
+    padding: 14px;
+    border: 1px solid var(--border);
+  }
+
+  .hardSection{
+    background: linear-gradient(145deg, rgba(15,118,110,0.07), rgba(37,99,235,0.04));
+    border-color: rgba(15,118,110,0.18);
+  }
+
+  .preferencesSection{
+    background: rgba(15,23,42,0.018);
+  }
+
+  .sectionHeader{
+    margin-bottom: 12px;
+  }
+
+  .sectionTitleWrap{
     display:flex;
-    align-items: stretch;
-    justify-content: space-between;
+    align-items:flex-start;
     gap: 10px;
-    padding: 12px;
-    border-radius: var(--radius2);
-    background: rgba(15,23,42,0.02);
-    border: 1px solid rgba(15,23,42,0.06);
   }
 
-  .row.critical{
-    background: rgba(185,28,28,0.06);
-    border-color: rgba(185,28,28,0.14);
-  }
-
-  .row.disabled{
-    opacity: 0.75;
-  }
-
-  .rowMain{
-    display:flex;
-    flex-direction:column;
-    gap: 10px;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .toggle{
+  .sectionIcon{
+    width: 36px;
+    height: 36px;
+    border-radius: 12px;
     display:flex;
     align-items:center;
-    gap: 10px;
-    cursor: pointer;
-    min-width: 0;
+    justify-content:center;
+    flex-shrink: 0;
   }
 
-  .toggle.locked{
-    cursor: not-allowed;
+  .sectionIcon.hard{
+    color: #0f766e;
+    background: rgba(15,118,110,0.10);
+    border: 1px solid rgba(15,118,110,0.18);
   }
 
-  .toggle input{
-    width: 18px;
-    height: 18px;
+  .sectionIcon.preferences{
+    color: #1d4ed8;
+    background: var(--primarySoft);
+    border: 1px solid rgba(37,99,235,0.16);
   }
 
-  .labelText{
-    display:inline-flex;
+  .sectionTitleLine{
+    display:flex;
     align-items:center;
-    gap: 10px;
-    font-weight: 900;
-    color: var(--text);
-    min-width: 0;
+    gap: 8px;
     flex-wrap: wrap;
   }
 
-  .miniChip{
-    display:inline-flex;
-    align-items:center;
-    gap: 6px;
-    font-size: 12px;
-    font-weight: 950;
-    padding: 4px 10px;
-    border-radius: 999px;
-    background: var(--dangerSoft);
-    border: 1px solid rgba(185,28,28,0.18);
-    color: var(--danger);
-    white-space: nowrap;
-  }
-
-  .weight{
-    display:grid;
-    grid-template-columns: 64px 1fr 40px;
-    align-items:center;
-    gap: 10px;
-  }
-
-  .wLabel{
-    font-size: 12px;
-    font-weight: 900;
-    color: var(--muted);
-  }
-
-  .weight input[type="range"]{
-    width: 100%;
-    accent-color: var(--primary);
-  }
-
-  .wValue{
-    font-size: 12px;
+  .sectionTitleLine h3{
+    margin: 0;
+    font-size: 14px;
     font-weight: 950;
     color: var(--text);
-    padding: 6px 8px;
-    border-radius: 12px;
-    background: #fff;
-    border: 1px solid var(--border);
-    text-align:center;
   }
 
-  .pill{
-    height: fit-content;
-    align-self: center;
-    padding: 8px 10px;
-    border-radius: 999px;
-    font-weight: 950;
+  .sectionHeader p{
+    margin: 5px 0 0;
+    color: var(--muted);
     font-size: 12px;
+    font-weight: 750;
+    line-height: 1.5;
+  }
+
+  .countBadge{
+    min-width: 24px;
+    height: 24px;
+    padding: 0 7px;
+    border-radius: 999px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    background: rgba(255,255,255,0.82);
     border: 1px solid var(--border);
-    background: rgba(15,23,42,0.03);
-    white-space: nowrap;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 950;
   }
 
-  .pill.strict{
-    background: var(--dangerSoft);
-    border-color: rgba(185,28,28,0.18);
-    color: var(--danger);
+  .hardRulesGrid{
+    display:grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
   }
 
-  .pill.flex{
+  .hardRuleCard{
+    display:flex;
+    align-items:flex-start;
+    gap: 10px;
+    min-width: 0;
+    padding: 11px;
+    border-radius: 14px;
+    background: rgba(255,255,255,0.82);
+    border: 1px solid rgba(15,118,110,0.13);
+  }
+
+  .hardRuleIcon{
+    width: 30px;
+    height: 30px;
+    border-radius: 10px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    flex-shrink: 0;
+    color: #0f766e;
+    background: rgba(15,118,110,0.09);
+  }
+
+  .hardRuleContent{
+    min-width: 0;
+  }
+
+  .hardRuleName{
+    color: var(--text);
+    font-size: 12.5px;
+    font-weight: 900;
+    line-height: 1.45;
+  }
+
+  .hardRuleMeta{
+    display:flex;
+    align-items:center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 7px;
+    color: var(--muted);
+    font-size: 10.5px;
+    font-weight: 800;
+  }
+
+  .hardBadge{
+    display:inline-flex;
+    align-items:center;
+    gap: 5px;
+    padding: 4px 7px;
+    border-radius: 999px;
+    color: #0f766e;
+    background: rgba(15,118,110,0.10);
+    border: 1px solid rgba(15,118,110,0.14);
+    font-weight: 950;
+  }
+
+  .metaDivider{
+    opacity: 0.55;
+  }
+
+  .preferencesList{
+    display:flex;
+    flex-direction:column;
+    gap: 9px;
+  }
+
+  .preferenceCard{
+    padding: 12px;
+    border-radius: 14px;
+    background: #fff;
+    border: 1px solid rgba(15,23,42,0.08);
+    transition: border-color 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
+  }
+
+  .preferenceCard:hover{
+    border-color: rgba(37,99,235,0.20);
+    box-shadow: 0 6px 16px rgba(15,23,42,0.05);
+  }
+
+  .preferenceCard.disabled{
+    opacity: 0.62;
+    background: rgba(15,23,42,0.025);
+  }
+
+  .preferenceTop{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap: 12px;
+  }
+
+  .preferenceIdentity{
+    min-width: 0;
+  }
+
+  .preferenceName{
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 900;
+    line-height: 1.4;
+  }
+
+  .preferenceStatus{
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 10.5px;
+    font-weight: 800;
+  }
+
+  .preferenceStatus.active{
+    color: var(--ok);
+  }
+
+  .switchControl{
+    position: relative;
+    width: 44px;
+    height: 25px;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: rgba(100,116,139,0.28);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.18s ease;
+  }
+
+  .switchControl.on{
+    background: var(--primary);
+  }
+
+  .switchControl:focus-visible{
+    outline: 3px solid rgba(37,99,235,0.22);
+    outline-offset: 2px;
+  }
+
+  .switchThumb{
+    position:absolute;
+    top: 3px;
+    left: 3px;
+    width: 19px;
+    height: 19px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 2px 6px rgba(15,23,42,0.22);
+    transition: transform 0.18s ease;
+  }
+
+  .switchControl.on .switchThumb{
+    transform: translateX(19px);
+  }
+
+  [dir="rtl"] .switchControl.on .switchThumb{
+    transform: translateX(19px);
+  }
+
+  .importanceControl{
+    margin-top: 11px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(15,23,42,0.07);
+  }
+
+  .importanceHeader{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap: 10px;
+    margin-bottom: 7px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 850;
+  }
+
+  .importanceHeader strong{
+    color: var(--text);
+    font-size: 11.5px;
+    font-weight: 950;
+    padding: 4px 8px;
+    border-radius: 9px;
     background: var(--primarySoft);
-    border-color: rgba(37,99,235,0.18);
-    color: #1d4ed8;
+    border: 1px solid rgba(37,99,235,0.12);
+  }
+
+  .importanceControl input[type="range"]{
+    width: 100%;
+    accent-color: var(--primary);
+    cursor: pointer;
+  }
+
+  .importanceControl input[type="range"]:disabled{
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  .rangeScale{
+    display:flex;
+    justify-content:space-between;
+    margin-top: 2px;
+    color: var(--muted);
+    font-size: 9.5px;
+    font-weight: 800;
   }
 
   .lockNote{
@@ -1240,8 +1666,97 @@ const styles = `
 
   .breakdown{
     display:grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 10px;
+  }
+
+  .inventoryGrid{
+    display:grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .inventoryItem{
+    border-radius: var(--radius2);
+    border: 1px solid rgba(37,99,235,0.14);
+    background: linear-gradient(145deg, rgba(37,99,235,0.06), rgba(255,255,255,0.95));
+    padding: 12px;
+    min-width: 0;
+  }
+
+  .inventoryTitle{
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 950;
+    margin-bottom: 10px;
+  }
+
+  .inventoryMetrics{
+    display:flex;
+    flex-direction:column;
+    gap: 7px;
+  }
+
+  .metricRow{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 850;
+  }
+
+  .metricRow strong{
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 950;
+  }
+
+  .metricRow.highlight{
+    padding: 6px 8px;
+    margin: 1px -2px;
+    border-radius: 9px;
+    color: var(--ok);
+    background: var(--okSoft);
+  }
+
+  .metricRow.highlight strong{
+    color: var(--ok);
+  }
+
+  .housingBreakdown{
+    display:grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 9px;
+  }
+
+  .housingItem{
+    border-radius: var(--radius2);
+    border: 1px solid var(--border);
+    background: rgba(15,23,42,0.02);
+    padding: 11px;
+    text-align:center;
+    min-width: 0;
+  }
+
+  .housingItem.unknown{
+    border-style: dashed;
+    opacity: 0.78;
+  }
+
+  .housingNum{
+    font-size: 19px;
+    font-weight: 950;
+    color: #1d4ed8;
+  }
+
+  .housingLbl{
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 10.5px;
+    line-height: 1.35;
+    font-weight: 850;
   }
 
   .bItem{
@@ -1453,16 +1968,29 @@ const styles = `
     }
 
     .breakdown{
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .inventoryGrid{
+      grid-template-columns: 1fr;
     }
   }
 
   @media (max-width: 640px){
+    .hardRulesGrid{
+      grid-template-columns: 1fr;
+    }
+
+    .constraintSection{
+      padding: 12px;
+    }
+
     .statsRow{
       grid-template-columns: 1fr;
     }
 
-    .breakdown{
+    .breakdown,
+    .housingBreakdown{
       grid-template-columns: 1fr 1fr;
     }
   }
