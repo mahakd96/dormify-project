@@ -14,7 +14,7 @@ from django.utils import timezone
 from django.db import transaction
 from django.db.models import Q, Count
 from django.core.exceptions import ValidationError
-from django.db import close_old_connections, connection
+from django.db import connection
 
 from .models import (
     User, Region, Office, StaffProfile, DormType, Building, Apartment, Room, Bed,
@@ -166,6 +166,63 @@ def _resolve_region(region_value):
     return None
 
 
+HARD_ALLOCATION_CONSTRAINTS = {
+    'sameGender',
+    'priorityFirst',
+    'roommatePositiveOnly',
+    'ReligiousTogether',
+}
+
+SOFT_ALLOCATION_CONSTRAINTS = {
+    'sameReligion': 6,
+    'roommateMatch': 8,
+    'sectorMatching': 7,
+    'avoidYearMix_1_with_3_4': 4,
+    'avoidAtudaimWithHasmaha': 4,
+}
+
+
+def normalize_allocation_constraints(raw_config):
+    """
+    Normalize the frontend allocation configuration before passing it to
+    the solver. Hard constraints are always active and weightless, while
+    optimization preferences remain optional and weighted.
+    """
+    if not isinstance(raw_config, dict):
+        raw_config = {}
+
+    normalized = {}
+
+    for key in HARD_ALLOCATION_CONSTRAINTS:
+        normalized[key] = {
+            'enabled': True,
+            'strict': True,
+            'critical': True,
+            'weight': 0,
+        }
+
+    for key, default_weight in SOFT_ALLOCATION_CONSTRAINTS.items():
+        raw_value = raw_config.get(key, {})
+        if not isinstance(raw_value, dict):
+            raw_value = {}
+
+        enabled = bool(raw_value.get('enabled', True))
+
+        try:
+            weight = int(raw_value.get('weight', default_weight))
+        except (TypeError, ValueError):
+            weight = default_weight
+
+        normalized[key] = {
+            'enabled': enabled,
+            'strict': False,
+            'critical': False,
+            'weight': max(0, min(weight, 10)),
+        }
+
+    return normalized
+
+
 def ensure_room_beds(room: Room):
     existing = room.beds.count()
     if existing >= room.capacity:
@@ -203,17 +260,115 @@ def end_active_bed_assignments(student: Student):
     )
 
 
+def _active_apartment_assignments(apartment, exclude_student_id=None):
+    queryset = BedAssignment.objects.filter(
+        status=BedAssignment.Status.ACTIVE,
+        bed__room__apartment=apartment,
+    ).select_related('student')
+
+    if exclude_student_id is not None:
+        queryset = queryset.exclude(student_id=exclude_student_id)
+
+    return queryset
+
+
 def validate_apartment_assignment(student: Student, room: Room):
+    """
+    Validate Z1/Z2/Z3/Z4/Z6 compatibility.
+
+    Z1 -> single apartment + male category
+    Z2 -> single apartment + female category
+    Z3 -> couple apartment + mixed category
+    Z4 -> family apartment + mixed category
+    Z6 -> any active couple-layout apartment, independent of gender/category,
+          but the complete apartment is reserved exclusively for that student.
+    """
     apartment = room.apartment
 
+    if not room.is_active:
+        raise ValueError('The selected room is inactive.')
+
     if not apartment.is_active:
-        raise ValueError(f'Apartment is inactive: {apartment.get_inactive_reason_display()}')
+        reason = (
+            apartment.get_inactive_reason_display()
+            if apartment.inactive_reason
+            else 'inactive'
+        )
+        raise ValueError(f'Apartment is inactive: {reason}')
 
-    if apartment.category == Apartment.Category.MALE and student.gender != Student.Gender.MALE:
-        raise ValueError('This apartment is for male students only.')
+    if not apartment.building.is_active:
+        raise ValueError('The selected building is inactive.')
 
-    if apartment.category == Apartment.Category.FEMALE and student.gender != Student.Gender.FEMALE:
-        raise ValueError('This apartment is for female students only.')
+    other_active_assignments = _active_apartment_assignments(
+        apartment,
+        exclude_student_id=student.id,
+    )
+
+    if student.housing_type == Student.HousingType.SINGLE_IN_APARTMENT:
+        if apartment.apartment_type != Apartment.ApartmentType.COUPLE:
+            raise ValueError(
+                'Z6 requires a couple-layout apartment.'
+            )
+
+        if other_active_assignments.exists():
+            raise ValueError(
+                'Z6 requires exclusive use of the complete apartment.'
+            )
+
+        # Z6 apartments are neutral before placement. Their stored male/female/
+        # mixed category does not restrict which Z6 student may receive them.
+        return
+
+    # Nobody else may enter an apartment already reserved by an active Z6
+    # resident, even when another room/bed in that apartment appears empty.
+    if other_active_assignments.filter(
+        student__housing_type=Student.HousingType.SINGLE_IN_APARTMENT
+    ).exists():
+        raise ValueError(
+            'This apartment is reserved exclusively for a Z6 resident.'
+        )
+
+    compatibility = {
+        Student.HousingType.SINGLE_MALE: (
+            Apartment.ApartmentType.SINGLE,
+            Apartment.Category.MALE,
+        ),
+        Student.HousingType.SINGLE_FEMALE: (
+            Apartment.ApartmentType.SINGLE,
+            Apartment.Category.FEMALE,
+        ),
+        Student.HousingType.COUPLE: (
+            Apartment.ApartmentType.COUPLE,
+            Apartment.Category.MIXED,
+        ),
+        Student.HousingType.FAMILY: (
+            Apartment.ApartmentType.FAMILY,
+            Apartment.Category.MIXED,
+        ),
+    }
+
+    expected = compatibility.get(student.housing_type)
+    if expected is None:
+        raise ValueError(
+            'The student has no supported housing type '
+            '(expected Z1, Z2, Z3, Z4, or Z6).'
+        )
+
+    expected_type, expected_category = expected
+
+    if apartment.apartment_type != expected_type:
+        raise ValueError(
+            'Housing type mismatch: '
+            f'student requires apartment_type={expected_type}, '
+            f'but apartment has apartment_type={apartment.apartment_type}.'
+        )
+
+    if apartment.category != expected_category:
+        raise ValueError(
+            'Housing category mismatch: '
+            f'student requires category={expected_category}, '
+            f'but apartment has category={apartment.category}.'
+        )
 
 
 def assign_student_to_room(
@@ -222,12 +377,24 @@ def assign_student_to_room(
     assigned_by: User,
     assignment_type=BedAssignment.AssignmentType.MANUAL
 ):
-    validate_apartment_assignment(student, room)
-    free_bed = get_free_bed(room)
-    if not free_bed:
-        raise ValueError('No available bed in selected room.')
-
+    # Lock the apartment while validating and assigning so two concurrent
+    # requests cannot violate Z6 apartment exclusivity.
     with transaction.atomic():
+        locked_apartment = Apartment.objects.select_for_update().get(
+            pk=room.apartment_id
+        )
+        locked_room = Room.objects.select_related(
+            'apartment',
+            'apartment__building',
+        ).get(pk=room.pk)
+        locked_room.apartment = locked_apartment
+
+        validate_apartment_assignment(student, locked_room)
+
+        free_bed = get_free_bed(locked_room)
+        if not free_bed:
+            raise ValueError('No available bed in selected room.')
+
         end_active_bed_assignments(student)
 
         assignment = BedAssignment(
@@ -240,7 +407,7 @@ def assign_student_to_room(
         assignment.full_clean()
         assignment.save()
 
-        student.assigned_room = room
+        student.assigned_room = locked_room
         student_fields = _get_model_field_names(Student)
         update_fields = ['assigned_room']
         if 'updated_at' in student_fields:
@@ -248,7 +415,6 @@ def assign_student_to_room(
         student.save(update_fields=update_fields)
 
     return assignment
-
 
 def infer_movement_type(from_room: Room, to_room: Room):
     if not from_room or not to_room:
@@ -310,10 +476,10 @@ class RegionViewSet(viewsets.ModelViewSet):
         queryset = Region.objects.all()
         user = self.request.user
 
-        if user.is_central_admin or user.is_boss:
+        if user.is_central_admin:
             return queryset
 
-        if not user.region:
+        if not user.region_id:
             return queryset.none()
 
         return queryset.filter(pk=user.region_id)
@@ -326,15 +492,13 @@ class DormTypeViewSet(viewsets.ModelViewSet):
         queryset = DormType.objects.select_related('region').all()
         user = self.request.user
 
-        # Central admin and region boss can browse the selectors.
-        if user.is_central_admin or user.is_boss:
+        if user.is_central_admin:
             return queryset
 
-        # Employees only see their own region.
-        if not user.region:
+        if not user.region_id:
             return queryset.none()
 
-        return queryset.filter(region=user.region)
+        return queryset.filter(region_id=user.region_id)
 
 class BuildingViewSet(viewsets.ModelViewSet):
     serializer_class = BuildingSerializer
@@ -347,13 +511,13 @@ class BuildingViewSet(viewsets.ModelViewSet):
         )
         user = self.request.user
 
-        if user.is_central_admin or user.is_boss:
+        if user.is_central_admin:
             return queryset
 
-        if not user.region:
+        if not user.region_id:
             return queryset.none()
 
-        return queryset.filter(dorm_type__region=user.region)
+        return queryset.filter(dorm_type__region_id=user.region_id)
 
     @action(detail=True, methods=['get'])
     def apartments(self, request, pk=None):
@@ -409,11 +573,11 @@ class StudentViewSet(viewsets.ModelViewSet):
             'assigned_room',
         ).all()
 
-        if not (self.request.user.is_central_admin or self.request.user.is_boss):
-            if not self.request.user.region:
+        if not self.request.user.is_central_admin:
+            if not self.request.user.region_id:
                 return queryset.none()
             queryset = queryset.filter(
-                accepted_dorm_type__region=self.request.user.region
+                accepted_dorm_type__region_id=self.request.user.region_id
             )
         search = self.request.query_params.get('search')
         if search:
@@ -488,35 +652,35 @@ class TransferViewSet(viewsets.ModelViewSet):
         validate_apartment_assignment(student, to_room)
         movement_type = infer_movement_type(from_room, to_room)
 
-        transfer = serializer.save(
-            requested_by=self.request.user,
-            from_room=from_room,
-            movement_type=movement_type
-        )
+        with transaction.atomic():
+            target_bed = get_free_bed(to_room)
+            if not target_bed:
+                raise DRFValidationError('אין מיטה פנויה בחדר היעד')
 
-        current_assignment = student.current_assignment
-        target_bed = get_free_bed(to_room)
-        if not target_bed:
-            raise DRFValidationError('אין מיטה פנויה בחדר היעד')
+            transfer = serializer.save(
+                requested_by=self.request.user,
+                from_room=from_room,
+                movement_type=movement_type
+            )
 
-        movement_request = MovementRequest(
-            student=student,
-            from_assignment=current_assignment,
-            to_bed=target_bed,
-            movement_type=movement_type,
-            status=MovementRequest.Status.PENDING,
-            reason=transfer.reason,
-            requested_by=self.request.user
-        )
-        movement_request.full_clean()
-        movement_request.save()
+            movement_request = MovementRequest(
+                student=student,
+                from_assignment=student.current_assignment,
+                to_bed=target_bed,
+                movement_type=movement_type,
+                status=MovementRequest.Status.PENDING,
+                reason=transfer.reason,
+                requested_by=self.request.user
+            )
+            movement_request.full_clean()
+            movement_request.save()
 
-        transfer.movement_request = movement_request
-        transfer_fields = _get_model_field_names(Transfer)
-        update_fields = ['movement_request']
-        if 'updated_at' in transfer_fields:
-            update_fields.append('updated_at')
-        transfer.save(update_fields=update_fields)
+            transfer.movement_request = movement_request
+            transfer_fields = _get_model_field_names(Transfer)
+            update_fields = ['movement_request']
+            if 'updated_at' in transfer_fields:
+                update_fields.append('updated_at')
+            transfer.save(update_fields=update_fields)
 
     @action(detail=True, methods=['put'])
     def approve(self, request, pk=None):
@@ -629,9 +793,7 @@ class TransferViewSet(viewsets.ModelViewSet):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def run_allocation(request):
-    connection.close()
-    close_old_connections()
-    connection.ensure_connection()
+    refresh_db_connection()
 
     print(">>> ENTERED run_allocation", request.data, flush=True)
 
@@ -671,7 +833,9 @@ def run_allocation(request):
                 'error': 'אין הרשאה להריץ שיבוץ עבור אזור זה'
             }, status=status.HTTP_403_FORBIDDEN)
 
-    constraints_config = request.data.get('constraints') or {}
+    constraints_config = normalize_allocation_constraints(
+        request.data.get('constraints')
+    )
     allocation_run = None
 
     try:
@@ -759,6 +923,11 @@ def run_allocation(request):
         students_count = students.count()
         rooms_count = rooms.count()
 
+        # Capture the selected population before the solver updates assignments.
+        # The response table must describe this run, not every historical
+        # active assignment in the region.
+        run_student_ids = list(students.values_list('id', flat=True))
+
         print(
             ">>> ALLOCATION_INPUT "
             f"run_id={allocation_run.id} "
@@ -780,9 +949,7 @@ def run_allocation(request):
             allocation_run.completed_at = timezone.now()
             allocation_run.error_message = ''
 
-            connection.close()
-            close_old_connections()
-            connection.ensure_connection()
+            refresh_db_connection()
             allocation_run.save()
 
             return Response({
@@ -812,9 +979,7 @@ def run_allocation(request):
             allocation_run.error_message = 'לא נמצאו חדרים פעילים באזור זה'
             allocation_run.completed_at = timezone.now()
 
-            connection.close()
-            close_old_connections()
-            connection.ensure_connection()
+            refresh_db_connection()
             allocation_run.save()
 
             return Response({
@@ -891,11 +1056,9 @@ def run_allocation(request):
         allocation_run.conflicts = result.get('conflicts', 0)
         allocation_run.completed_at = timezone.now()
 
-        # Important after a long solver run with Neon:
-        # force Django to drop the stale SSL connection and open a fresh one.
-        connection.close()
-        close_old_connections()
-        connection.ensure_connection()
+        # After a long solver run, reuse a healthy Neon connection and
+        # reconnect only if Django reports that the connection is unusable.
+        refresh_db_connection()
         allocation_run.save()
 
         # ============================================================
@@ -903,13 +1066,12 @@ def run_allocation(request):
         # ============================================================
         assignment_rows = []
 
-        connection.close()
-        close_old_connections()
-        connection.ensure_connection()
+        refresh_db_connection()
 
         active_assignments = BedAssignment.objects.filter(
             status=BedAssignment.Status.ACTIVE,
-            bed__room__apartment__building__dorm_type__region=region
+            student_id__in=run_student_ids,
+            bed__room__apartment__building__dorm_type__region=region,
         ).select_related(
             'student',
             'student__accepted_dorm_type',
@@ -1000,9 +1162,7 @@ def run_allocation(request):
                 allocation_run.error_message = str(e)
                 allocation_run.completed_at = timezone.now()
 
-                connection.close()
-                close_old_connections()
-                connection.ensure_connection()
+                refresh_db_connection()
                 allocation_run.save()
             except Exception:
                 traceback.print_exc()
@@ -1133,6 +1293,37 @@ def allocation_summary(request):
                     'transfer': 0,
                     'leaving': 0,
                 },
+                'students_by_housing_type': {
+                    'single_male': 0,
+                    'single_female': 0,
+                    'single_mixed': 0,
+                    'couple': 0,
+                    'family': 0,
+                    'unknown': 0,
+                },
+                'inventory_by_type': {
+                    'single': {
+                        'apartments': 0,
+                        'rooms': 0,
+                        'total_beds': 0,
+                        'occupied_beds': 0,
+                        'available_beds': 0,
+                    },
+                    'couple': {
+                        'apartments': 0,
+                        'rooms': 0,
+                        'total_beds': 0,
+                        'occupied_beds': 0,
+                        'available_beds': 0,
+                    },
+                    'family': {
+                        'apartments': 0,
+                        'rooms': 0,
+                        'total_beds': 0,
+                        'occupied_beds': 0,
+                        'available_beds': 0,
+                    },
+                },
                 'latest_inbox': None,
                 'latest_run': None,
             }, status=status.HTTP_200_OK)
@@ -1143,21 +1334,80 @@ def allocation_summary(request):
             }, status=status.HTTP_400_BAD_REQUEST)
         region = user.region
 
-    students_qs = Student.objects.filter(
+    all_students_qs = Student.objects.filter(
         accepted_dorm_type__region=region
     )
 
-    total_students = students_qs.count()
-    assigned_students = students_qs.filter(assigned_room__isnull=False).count()
-    unassigned_students = students_qs.filter(assigned_room__isnull=True).count()
-    priority_students = students_qs.filter(is_priority=True).count()
+    # Keep the summary's actionable counts aligned with run_allocation:
+    # students who are leaving are reported in the breakdown but are never
+    # offered to the solver.
+    allocatable_students_qs = all_students_qs.exclude(
+        category=Student.StudentCategory.LEAVING
+    )
+
+    total_students = allocatable_students_qs.count()
+    assigned_students = allocatable_students_qs.filter(
+        assigned_room__isnull=False
+    ).count()
+    students_for_allocation_qs = allocatable_students_qs.filter(
+        assigned_room__isnull=True
+    )
+    unassigned_students = students_for_allocation_qs.count()
+    priority_students = allocatable_students_qs.filter(
+        is_priority=True
+    ).count()
+
+    known_housing_types = [
+        Student.HousingType.SINGLE_MALE,
+        Student.HousingType.SINGLE_FEMALE,
+        Student.HousingType.SINGLE_IN_APARTMENT,
+        Student.HousingType.COUPLE,
+        Student.HousingType.FAMILY,
+    ]
+
+    students_by_housing_type = {
+        'single_male': students_for_allocation_qs.filter(
+            housing_type=Student.HousingType.SINGLE_MALE
+        ).count(),
+        'single_female': students_for_allocation_qs.filter(
+            housing_type=Student.HousingType.SINGLE_FEMALE
+        ).count(),
+        'single_mixed': students_for_allocation_qs.filter(
+            housing_type=Student.HousingType.SINGLE_IN_APARTMENT
+        ).count(),
+        'couple': students_for_allocation_qs.filter(
+            housing_type=Student.HousingType.COUPLE
+        ).count(),
+        'family': students_for_allocation_qs.filter(
+            housing_type=Student.HousingType.FAMILY
+        ).count(),
+        'unknown': students_for_allocation_qs.filter(
+            Q(housing_type__isnull=True)
+            | Q(housing_type='')
+            | ~Q(housing_type__in=known_housing_types)
+        ).count(),
+    }
 
     students_by_category = {
-        'new': students_qs.filter(category=Student.StudentCategory.NEW).count(),
-        'continuing': students_qs.filter(category=Student.StudentCategory.CONTINUING).count(),
-        'transfer': students_qs.filter(category=Student.StudentCategory.TRANSFER).count(),
-        'leaving': students_qs.filter(category=Student.StudentCategory.LEAVING).count(),
+        'new': all_students_qs.filter(
+            category=Student.StudentCategory.NEW
+        ).count(),
+        'continuing': all_students_qs.filter(
+            category=Student.StudentCategory.CONTINUING
+        ).count(),
+        'transfer': all_students_qs.filter(
+            category=Student.StudentCategory.TRANSFER
+        ).count(),
+        'leaving': all_students_qs.filter(
+            category=Student.StudentCategory.LEAVING
+        ).count(),
     }
+
+    apartments_qs = Apartment.objects.filter(
+        building__dorm_type__region=region,
+        is_active=True,
+        building__is_active=True,
+    )
 
     rooms_qs = Room.objects.filter(
         apartment__building__dorm_type__region=region,
@@ -1168,20 +1418,67 @@ def allocation_summary(request):
 
     total_capacity = sum(rooms_qs.values_list('capacity', flat=True))
 
-    total_beds = Bed.objects.filter(
+    active_beds_qs = Bed.objects.filter(
         room__apartment__building__dorm_type__region=region,
         room__is_active=True,
         room__apartment__is_active=True,
         room__apartment__building__is_active=True,
-    ).count()
+    )
 
-    occupied_beds = BedAssignment.objects.filter(
+    active_assignments_qs = BedAssignment.objects.filter(
         status=BedAssignment.Status.ACTIVE,
         bed__room__apartment__building__dorm_type__region=region,
         bed__room__is_active=True,
         bed__room__apartment__is_active=True,
         bed__room__apartment__building__is_active=True,
-    ).values('bed_id').distinct().count()
+    )
+
+    total_beds = active_beds_qs.count()
+    occupied_beds = active_assignments_qs.values(
+        'bed_id'
+    ).distinct().count()
+
+    def inventory_bucket(apartment_type):
+        type_apartments = apartments_qs.filter(
+            apartment_type=apartment_type
+        )
+        type_rooms = rooms_qs.filter(
+            apartment__apartment_type=apartment_type
+        )
+        type_beds = active_beds_qs.filter(
+            room__apartment__apartment_type=apartment_type
+        )
+        type_assignments = active_assignments_qs.filter(
+            bed__room__apartment__apartment_type=apartment_type
+        )
+
+        type_total_beds = type_beds.count()
+        type_occupied_beds = type_assignments.values(
+            'bed_id'
+        ).distinct().count()
+
+        return {
+            'apartments': type_apartments.count(),
+            'rooms': type_rooms.count(),
+            'total_beds': type_total_beds,
+            'occupied_beds': type_occupied_beds,
+            'available_beds': max(
+                type_total_beds - type_occupied_beds,
+                0,
+            ),
+        }
+
+    inventory_by_type = {
+        'single': inventory_bucket(
+            Apartment.ApartmentType.SINGLE
+        ),
+        'couple': inventory_bucket(
+            Apartment.ApartmentType.COUPLE
+        ),
+        'family': inventory_bucket(
+            Apartment.ApartmentType.FAMILY
+        ),
+    }
 
     if total_beds > 0:
         available_beds = max(total_beds - occupied_beds, 0)
@@ -1221,6 +1518,8 @@ def allocation_summary(request):
         'total_capacity': total_capacity,
         'occupancy_rate': occupancy_rate,
         'students_by_category': students_by_category,
+        'students_by_housing_type': students_by_housing_type,
+        'inventory_by_type': inventory_by_type,
         'latest_inbox': latest_inbox,
         'latest_run': latest_run,
     }, status=status.HTTP_200_OK)
@@ -2032,13 +2331,28 @@ def statistics(request):
 # Excel Upload Helpers
 # =========================
 
-# Legacy/demo-file text mapping. Kept as fallback.
-EXCEL_DORM_TYPE_TO_REGION = {
-    'קנדה': 'canada',
-    'מעונות קנדה': 'canada',
-    'ברושים': 'broshim',
-    'מזרח': 'mizrah',
-    'מגדל המזרח': 'mizrah',
+# Legacy/demo-file name aliases. Every alias resolves to the official
+# DormType.code, never to a database primary key and never to an arbitrary
+# "first dorm in region" row.
+EXCEL_DORM_NAME_TO_OFFICIAL_CODE = {
+    'ריפקין': 1,
+    'קנדה': 2,
+    'מעונותקנדה': 2,
+    'קסל': 3,
+    'זוגות': 4,
+    'מזרחישן': 5,
+    'נווהאמריקה': 6,
+    'סנט': 7,
+    'משפחות': 8,
+    'יחידבחדר': 10,
+    'עליוןעמים': 11,
+    'מזרחחדש': 12,
+    'סגלזוטר': 13,
+    'כפרמשתלמים': 14,
+    'כפרהסמכה': 15,
+    'רותהכהן': 16,
+    'ברושים': 17,
+    'סנטחדש': 18,
 }
 
 # Real dorm-office sheets that should not enter allocation.
@@ -2068,8 +2382,10 @@ COLUMN_ALIASES = {
     ],
     'decision_dorm_code': [
         'אזור החלטה לאביב',
-        'גריעה/תוספת-תוכן החלטה מעונות-קוד חברה',
-        'החלטה-תוכן החלטה מעונות-קוד חברה',
+        'החלטה-תוכן החלטה – מעונות',
+        'החלטה-תוכן החלטה - מעונות',
+        'החלטה-תוכן החלטה מעונות',
+        'גריעה/תוספת-תוכן ההחלטה',
     ],
     'decision_dorm_name': [
         'גריעה/תוספת-תוכן ההחלטה-תיאור',
@@ -2208,49 +2524,142 @@ def extract_roommate_flag(value):
     return parse_yes_no_code(value)
 
 
-def parse_gender_from_housing_type(housing_type, tenant_type='', existing_student=None):
-    housing_type = safe_str(housing_type)
-    tenant_type = safe_str(tenant_type)
+STUDENT_HOUSING_CODE_MAP = {
+    'z1': Student.HousingType.SINGLE_MALE,
+    'z2': Student.HousingType.SINGLE_FEMALE,
+    'z3': Student.HousingType.COUPLE,
+    'z4': Student.HousingType.FAMILY,
+    'z6': Student.HousingType.SINGLE_IN_APARTMENT,
+}
 
-    if existing_student and getattr(existing_student, 'gender', None):
+
+def normalize_student_housing_type(housing_type='', tenant_type=''):
+    """Return only values supported by Student.HousingType."""
+    housing_description = safe_str(housing_type)
+    tenant_type_code = normalize_compact(tenant_type)
+
+    mapped_value = STUDENT_HOUSING_CODE_MAP.get(tenant_type_code)
+    if mapped_value:
+        return mapped_value
+
+    normalized_description = normalize_compact(housing_description)
+    if not normalized_description:
+        return ''
+
+    # Check the mixed-single value before the male/female single values.
+    if (
+        'רווקים/ות' in normalized_description
+        or 'רווקיםות' in normalized_description
+        or 'singlemixed' in normalized_description
+    ):
+        return Student.HousingType.SINGLE_IN_APARTMENT
+
+    if 'משפח' in normalized_description or 'family' in normalized_description:
+        return Student.HousingType.FAMILY
+
+    if 'זוג' in normalized_description or 'couple' in normalized_description:
+        return Student.HousingType.COUPLE
+
+    if 'רווקות' in normalized_description or 'בנות' in normalized_description:
+        return Student.HousingType.SINGLE_FEMALE
+
+    if 'רווקים' in normalized_description or 'בנים' in normalized_description:
+        return Student.HousingType.SINGLE_MALE
+
+    # Do not store values outside Student.HousingType.choices.
+    return ''
+
+
+def parse_explicit_gender(value):
+    """Parse a real male/female value when the Excel explicitly provides one."""
+    value_norm = normalize_compact(value)
+
+    if value_norm in {'זכר', 'בנים', 'בן', 'male', 'man', 'men', 'm'}:
+        return Student.Gender.MALE
+
+    if value_norm in {'נקבה', 'בנות', 'בת', 'female', 'woman', 'women', 'f'}:
+        return Student.Gender.FEMALE
+
+    return None
+
+
+def _housing_type_does_not_require_gender(housing_type):
+    """Z3, Z4 and Z6 are allocated by housing type, not resident gender."""
+    return housing_type in {
+        Student.HousingType.COUPLE,
+        Student.HousingType.FAMILY,
+        Student.HousingType.SINGLE_IN_APARTMENT,
+    }
+
+
+def _gender_field_supports_empty_value():
+    """Return True only after the nullable-gender model migration is applied."""
+    gender_field = Student._meta.get_field('gender')
+    return bool(gender_field.null or gender_field.blank)
+
+
+def validate_gender_model_for_housing_import():
+    """
+    Fail early instead of silently importing only Z1/Z2.
+
+    Z3/Z4/Z6 may legitimately have no gender value in the additions workbook,
+    so the deployed Student.gender field must accept NULL/blank.
+    """
+    if not _gender_field_supports_empty_value():
+        raise RuntimeError(
+            'Student.gender is still NOT NULL. Update the model to null=True, '
+            'blank=True and apply the migration before importing Z3/Z4/Z6.'
+        )
+
+
+def gender_value_is_valid_for_import(value, housing_type):
+    """Validate only what the housing business rules actually require."""
+    if value not in (None, ''):
+        return True
+
+    if _housing_type_does_not_require_gender(housing_type):
+        return _gender_field_supports_empty_value()
+
+    return False
+
+
+def parse_gender_from_housing_type(
+    housing_type,
+    tenant_type='',
+    explicit_gender='',
+    existing_student=None,
+):
+    """
+    Resolve Student.gender without confusing resident gender with apartment type.
+
+    - Preserve an explicit Excel gender when present.
+    - Preserve an existing student's real gender.
+    - Z1 implies male and Z2 implies female.
+    - Z3, Z4 and Z6 do not need gender for allocation, so NULL is valid.
+    """
+    parsed_explicit_gender = parse_explicit_gender(explicit_gender)
+    if parsed_explicit_gender is not None:
+        return parsed_explicit_gender
+
+    if existing_student and getattr(existing_student, 'gender', None) not in (None, ''):
         return existing_student.gender
 
-    male_values = {
-        'רווקים', 'בנים', 'זכר', 'male', 'men', 'man', 'z1',
-    }
-
-    female_values = {
-        'רווקות', 'בנות', 'נקבה', 'female', 'women', 'woman', 'z2',
-    }
-
-    housing_norm = normalize_compact(housing_type)
-    tenant_norm = normalize_compact(tenant_type)
-
-    if housing_norm in male_values or tenant_norm in male_values:
-        return Student.Gender.MALE
-
-    if housing_norm in female_values or tenant_norm in female_values:
-        return Student.Gender.FEMALE
-
-    if 'רווקות' in housing_type or 'בנות' in housing_type or 'נקבה' in housing_type:
-        return Student.Gender.FEMALE
-
-    if 'רווקים' in housing_type or 'בנים' in housing_type or 'זכר' in housing_type:
-        return Student.Gender.MALE
-
-    # Model requires male/female. Keep deterministic fallback instead of crashing import.
-    return Student.Gender.MALE
-
-def get_decision_status(row):
-    return safe_str(
-        get_row_value(
-            row,
-            'החלטה-החלטת מעונות - תאור',
-            'גריעה/תוספת-תיאור קוד החלטה',
-            'גריעה/תוספת-סוג החלטה',
-            default=''
-        )
+    normalized_housing_type = normalize_student_housing_type(
+        housing_type,
+        tenant_type,
     )
+
+    if normalized_housing_type == Student.HousingType.SINGLE_MALE:
+        return Student.Gender.MALE
+
+    if normalized_housing_type == Student.HousingType.SINGLE_FEMALE:
+        return Student.Gender.FEMALE
+
+    if _housing_type_does_not_require_gender(normalized_housing_type):
+        return None
+
+    return None
+
 
 def parse_requested_religion(value):
     value = safe_str(value)
@@ -2341,7 +2750,7 @@ def is_positive_decision(decision_status):
 
 
 def get_decision_dorm_code(row):
-    """Return the real dorm/area code from the dorm-office Excel, with legacy fallback."""
+    """Return the authoritative dorm/area code from the dorm-office Excel."""
     return safe_str(get_alias_value(row, 'decision_dorm_code', default=''))
 
 
@@ -2350,56 +2759,9 @@ def get_decision_dorm_name(row):
     return safe_str(get_alias_value(row, 'decision_dorm_name', default=''))
 
 
-def resolve_region_from_dorm_name(dorm_name):
-    dorm_name = safe_str(dorm_name)
 
-    if not dorm_name:
-        return None
-
-    for key, region_id in EXCEL_DORM_TYPE_TO_REGION.items():
-        if key in dorm_name:
-            try:
-                return Region.objects.get(pk=region_id)
-            except Region.DoesNotExist:
-                continue
-
-    return None
-
-
-def _first_dorm_type_for_region(region):
-    if not region:
-        return None
-    return DormType.objects.filter(region=region).select_related('region').order_by('id').first()
-
-
-# Official dorm-office Excel mapping.
-#
-# IMPORTANT:
-# The real Excel column 'אזור החלטה לאביב' is NOT the same thing as
-# our Django DormType.id and is NOT DormType.code.
-# It is the dorm-office area code. Therefore every real Excel area code
-# must be mapped explicitly to the matching DormType primary key in our DB.
-#
-# This explicit mapping prevents bugs like:
-# Excel code 2 -> DormType id 2 -> יחיד תחתון
-# while the office meaning of Excel code 2 is actually קנדה.
-EXCEL_AREA_TO_DORM_TYPE_ID = {
-    '1': 1,     # ריפקין -> תחתון שניים בחדר
-    '2': 3,     # קנדה -> קנדה רווקים / רווקות
-    '4': 4,     # זוגות / משפחות related to קנדה
-    '5': 7,     # מזרח ישן
-    '6': 12,    # נווה אמריקה
-    '7': 13,    # סנאט / סנט
-    '8': 6,     # משפחות -> זוגות / משפחות
-    '10': 2,    # יחיד בחדר -> יחיד תחתון
-    '11': 11,   # עליון עמים
-    '12': 9,    # מזרח חדש
-    '13': 16,   # סגל זוטר
-    '14': 14,   # כפר משתלמים / כפר הסמכה רווקים
-    '15': 14,   # כפר הסמכה
-    '17': 5,    # ברושים
-    '18': 13,   # סנט חדש
-}
+# The dorm-office area number is the official DormType.code.
+# It must never be translated through Django primary keys.
 
 
 def _normalize_excel_area_code(code_value):
@@ -2416,74 +2778,48 @@ def _normalize_excel_area_code(code_value):
 
 
 def _find_dorm_type_by_code(code_value):
-    code_text = safe_str(code_value)
-    if not code_text:
+    """Resolve a dorm strictly by its stable official DormType.code."""
+    normalized_code = _normalize_excel_area_code(code_value)
+    code_int = safe_int(normalized_code, default=None)
+
+    if code_int is None:
         return None
 
-    normalized_code = _normalize_excel_area_code(code_text)
-    code_int = safe_int(code_text, default=None)
-
-    # 1) Real dorm-office file path:
-    #    'אזור החלטה לאביב' -> explicit office-code-to-DormType-id mapping.
-    mapped_pk = (
-        EXCEL_AREA_TO_DORM_TYPE_ID.get(normalized_code)
-        or EXCEL_AREA_TO_DORM_TYPE_ID.get(code_text)
-    )
-
-    if mapped_pk is not None:
-        dorm_type = DormType.objects.filter(pk=mapped_pk).select_related('region').first()
-        if dorm_type:
-            return dorm_type
-
-    # 2) Legacy/demo/import-buildings path:
-    #    In older/demo files the value may be the 5-digit DormType.code,
-    #    such as 19417 / 88119. Keep this fallback for compatibility.
-    candidates = []
-    if code_int is not None:
-        candidates.append(code_int)
-    candidates.append(code_text)
-
-    for candidate in candidates:
-        try:
-            dorm_type = DormType.objects.filter(code=candidate).select_related('region').first()
-            if dorm_type:
-                return dorm_type
-        except Exception:
-            continue
-
-    # 3) Deliberately DO NOT fallback to DormType.pk for small numeric values.
-    #    That was the bug that mapped Excel code 2 to DormType id 2 instead of Canada.
-    return None
+    return DormType.objects.filter(
+        code=code_int
+    ).select_related('region').first()
 
 
 def get_or_create_dorm_type_from_excel(dorm_code=None, dorm_name=None):
     """
-    Resolve DormType for imported students.
+    Resolve DormType without creating rows.
 
-    Real dorm-office file: 'אזור החלטה לאביב' is the important numeric dorm/area code.
-    Legacy/demo file: dorm name text such as קנדה/ברושים/מזרח is used as fallback.
+    A supplied dorm decision code is authoritative. When that field is present,
+    resolution is performed only through DormType.code. It never falls back to
+    a name, a region, or DormType.pk.
 
-    This function intentionally does NOT create DormType rows.
-    DormTypes should already exist from import_buildings.
+    Name/legacy-alias resolution is retained only for old files in which the
+    dorm-code field itself is blank.
     """
-    dorm_type = _find_dorm_type_by_code(dorm_code)
+    dorm_code_text = safe_str(dorm_code)
+    if dorm_code_text:
+        return _find_dorm_type_by_code(dorm_code_text)
+
+    dorm_name = safe_str(dorm_name)
+    if not dorm_name:
+        return None
+
+    dorm_type = DormType.objects.filter(
+        name__iexact=dorm_name
+    ).select_related('region').first()
     if dorm_type:
         return dorm_type
 
-    dorm_name = safe_str(dorm_name)
-    if dorm_name:
-        dorm_type = _find_dorm_type_by_code(dorm_name)
-        if dorm_type:
-            return dorm_type
-
-        region = resolve_region_from_dorm_name(dorm_name)
-        if region:
-            return _first_dorm_type_for_region(region)
-
-    # Last fallback: maybe the code itself is a Region primary key/name.
-    region = _resolve_region(dorm_code)
-    if region:
-        return _first_dorm_type_for_region(region)
+    alias_code = EXCEL_DORM_NAME_TO_OFFICIAL_CODE.get(
+        normalize_compact(dorm_name)
+    )
+    if alias_code is not None:
+        return _find_dorm_type_by_code(alias_code)
 
     return None
 
@@ -2506,6 +2842,10 @@ def build_student_payload_from_row(row, existing_student=None, sheet_name=''):
     housing_type = safe_str(get_alias_value(row, 'housing_type', default=''))
     tenant_type = safe_str(get_alias_value(row, 'tenant_type', default=''))
     gender_text = safe_str(get_alias_value(row, 'gender', default=''))
+    normalized_housing_type = normalize_student_housing_type(
+        housing_type,
+        tenant_type,
+    )
 
     decision_dorm_code = get_decision_dorm_code(row)
     decision_dorm_name = get_decision_dorm_name(row)
@@ -2522,7 +2862,7 @@ def build_student_payload_from_row(row, existing_student=None, sheet_name=''):
     current_dorm_type_value = (
         accepted_dorm_type.name
         if accepted_dorm_type
-        else (decision_dorm_name or decision_dorm_code)
+        else (decision_dorm_code or decision_dorm_name)
     )
 
     payload = {
@@ -2535,9 +2875,10 @@ def build_student_payload_from_row(row, existing_student=None, sheet_name=''):
         'city': safe_str(get_alias_value(row, 'city')),
 
         'gender': parse_gender_from_housing_type(
-            housing_type,
-            tenant_type=tenant_type or gender_text,
-            existing_student=existing_student
+            normalized_housing_type,
+            tenant_type=tenant_type,
+            explicit_gender=gender_text,
+            existing_student=existing_student,
         ),
 
         'requested_religion': parse_requested_religion(get_alias_value(row, 'religion', default='')),
@@ -2545,7 +2886,7 @@ def build_student_payload_from_row(row, existing_student=None, sheet_name=''):
         'religious': parse_religious(get_alias_value(row, 'religious', default='')),
         'category': parse_category(allocation_group_value, sheet_name=sheet_name),
 
-        'housing_type': housing_type,
+        'housing_type': normalized_housing_type,
         'allocation_group': safe_str(allocation_group_value),
         'accepted_dorm_type': accepted_dorm_type,
 
@@ -2635,21 +2976,19 @@ def is_additions_positive_decision(row):
 
 
 def refresh_db_connection():
-    """Force Django to use a usable DB connection after long imports.
+    """Reuse a healthy connection; reconnect only when it is actually stale."""
+    if connection.connection is None:
+        connection.ensure_connection()
+        return
 
-    Neon/PostgreSQL can close an idle/stale SSL connection during a long Excel
-    import. Calling this before final metadata writes prevents the import from
-    inserting students successfully but crashing before returning the response.
-    """
     try:
-        close_old_connections()
-        if connection.connection is None or not connection.is_usable():
-            connection.close()
-        connection.ensure_connection()
+        if connection.is_usable():
+            return
     except Exception:
-        connection.close()
-        close_old_connections()
-        connection.ensure_connection()
+        pass
+
+    connection.close()
+    connection.ensure_connection()
 
 
 @api_view(['POST'])
@@ -2693,6 +3032,8 @@ def upload_excel(request):
             'errorEn': 'Unsupported file type. Please upload an Excel file (.xlsx or .xls)'
         }, status=status.HTTP_400_BAD_REQUEST)
 
+    validate_gender_model_for_housing_import()
+
     batch = ImportBatch.objects.create(
         uploaded_by=request.user,
         filename=uploaded_file.name,
@@ -2728,6 +3069,16 @@ def upload_excel(request):
         }
 
         imported_student_category_priority = {}
+        dorm_inventory_cache = {}
+
+        def dorm_has_active_inventory(dorm_type):
+            if dorm_type is None:
+                return False
+            if dorm_type.pk not in dorm_inventory_cache:
+                dorm_inventory_cache[dorm_type.pk] = dorm_type.buildings.filter(
+                    is_active=True
+                ).exists()
+            return dorm_inventory_cache[dorm_type.pk]
 
         def add_skip(reason, amount=1):
             nonlocal skipped_count
@@ -2834,6 +3185,29 @@ def upload_excel(request):
                         sheet_name=sheet_name,
                     )
 
+                    normalized_housing_type = student_payload.get('housing_type')
+                    if not existing and not gender_value_is_valid_for_import(
+                        student_payload.get('gender'),
+                        normalized_housing_type,
+                    ):
+                        if normalized_housing_type in {
+                            Student.HousingType.COUPLE,
+                            Student.HousingType.FAMILY,
+                            Student.HousingType.SINGLE_IN_APARTMENT,
+                        }:
+                            raise ValueError(
+                                'Student.gender must allow NULL/blank for Z3/Z4/Z6. '
+                                'Apply the nullable-gender migration before importing.'
+                            )
+
+                        add_skip('missing_gender_for_unknown_housing_type')
+                        sheet_counts[sheet_name]['skipped'] += 1
+                        errors.append(
+                            f"Sheet '{sheet_name}', row {idx + 2}, student {student_id}: "
+                            "gender and housing type could not be resolved."
+                        )
+                        continue
+
                     student_category = student_payload.get('category') or parse_category('', sheet_name=sheet_name)
                     student_payload['category'] = student_category
 
@@ -2868,6 +3242,13 @@ def upload_excel(request):
                         warnings.append(
                             f"Student {student_id}: dorm type '{accepted_dorm_type.name}' has no region. "
                             f"Student was imported anyway."
+                        )
+
+                    if accepted_dorm_type is not None and not dorm_has_active_inventory(accepted_dorm_type):
+                        warnings.append(
+                            f"Student {student_id}: official dorm code {accepted_dorm_type.code} "
+                            "currently has no active building inventory. The decision was preserved, "
+                            "but allocation may have no feasible room for this student."
                         )
 
                     if existing:
@@ -2990,6 +3371,39 @@ def upload_excel(request):
 
 
 
+# ============================================================
+# Additions-file-specific housing normalization
+# ============================================================
+# These wrappers are used by upload_additions_excel(); the shared canonical
+# housing normalization is also used by the general student import.
+
+ADDITIONS_HOUSING_CODE_MAP = STUDENT_HOUSING_CODE_MAP
+
+
+def normalize_additions_housing_type(row):
+    """Return one of the five canonical Student.HousingType values."""
+    return normalize_student_housing_type(
+        get_alias_value(row, 'housing_type', default=''),
+        get_alias_value(row, 'tenant_type', default=''),
+    )
+
+
+def additions_housing_bucket(housing_type):
+    """Return a stable import-summary bucket for a canonical housing value."""
+    if housing_type == Student.HousingType.FAMILY:
+        return 'family'
+    if housing_type == Student.HousingType.COUPLE:
+        return 'couple'
+    if housing_type == Student.HousingType.SINGLE_IN_APARTMENT:
+        return 'single_mixed'
+    if housing_type == Student.HousingType.SINGLE_FEMALE:
+        return 'single_female'
+    if housing_type == Student.HousingType.SINGLE_MALE:
+        return 'single_male'
+
+    return 'unknown'
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def upload_additions_excel(request):
@@ -3000,6 +3414,8 @@ def upload_additions_excel(request):
 
     Logic:
     - Import only positive decisions.
+    - Import all supported Z1/Z2/Z3/Z4/Z6 housing types.
+    - Route each student by the authoritative numeric DormType.code.
     - If student already exists:
         update enrichment fields only.
         do NOT override category.
@@ -3029,6 +3445,8 @@ def upload_additions_excel(request):
             'errorEn': 'Unsupported file type. Please upload an Excel file (.xlsx or .xls)'
         }, status=status.HTTP_400_BAD_REQUEST)
 
+    validate_gender_model_for_housing_import()
+
     batch = ImportBatch.objects.create(
         uploaded_by=request.user,
         filename=uploaded_file.name,
@@ -3049,6 +3467,25 @@ def upload_additions_excel(request):
         skipped_by_reason = {}
 
         existing_category_preserved_count = 0
+        dorm_inventory_cache = {}
+
+        def dorm_has_active_inventory(dorm_type):
+            if dorm_type is None:
+                return False
+            if dorm_type.pk not in dorm_inventory_cache:
+                dorm_inventory_cache[dorm_type.pk] = dorm_type.buildings.filter(
+                    is_active=True
+                ).exists()
+            return dorm_inventory_cache[dorm_type.pk]
+
+        housing_type_counts = {
+            'single_male': 0,
+            'single_female': 0,
+            'single_mixed': 0,
+            'couple': 0,
+            'family': 0,
+            'unknown': 0,
+        }
 
         def add_skip(reason, amount=1):
             nonlocal skipped_count
@@ -3122,6 +3559,14 @@ def upload_additions_excel(request):
                 'positive_decisions': 0,
                 'non_positive_decisions': 0,
                 'existing_category_preserved': 0,
+                'housing_type_counts': {
+                    'single_male': 0,
+                    'single_female': 0,
+                    'single_mixed': 0,
+                    'couple': 0,
+                    'family': 0,
+                    'unknown': 0,
+                },
             }
 
             required_columns = ['ת"ז ישראלית', 'שם פרטי', 'שם משפחה']
@@ -3168,6 +3613,52 @@ def upload_additions_excel(request):
                         sheet_name=sheet_name,
                     )
 
+                    # The additions file is imported through this SECOND upload
+                    # function. Normalize its official Z1/Z2/Z3/Z4/Z6 housing
+                    # values here using the same canonical model choices.
+                    normalized_housing_type = normalize_additions_housing_type(row)
+                    housing_bucket = additions_housing_bucket(normalized_housing_type)
+
+                    student_payload['housing_type'] = normalized_housing_type
+                    resolved_gender = parse_gender_from_housing_type(
+                        normalized_housing_type,
+                        tenant_type=get_alias_value(row, 'tenant_type', default=''),
+                        explicit_gender=get_alias_value(row, 'gender', default=''),
+                        existing_student=existing,
+                    )
+                    student_payload['gender'] = resolved_gender
+
+                    if not existing and not gender_value_is_valid_for_import(
+                        resolved_gender,
+                        normalized_housing_type,
+                    ):
+                        if normalized_housing_type in {
+                            Student.HousingType.COUPLE,
+                            Student.HousingType.FAMILY,
+                            Student.HousingType.SINGLE_IN_APARTMENT,
+                        }:
+                            raise ValueError(
+                                'Student.gender must allow NULL/blank for Z3/Z4/Z6. '
+                                'Apply the nullable-gender migration before importing.'
+                            )
+
+                        add_skip('missing_gender_for_unknown_housing_type')
+                        sheet_counts[sheet_name]['skipped'] += 1
+                        errors.append(
+                            f"Sheet '{sheet_name}', row {idx + 2}, student {student_id}: "
+                            "gender and housing type could not be resolved."
+                        )
+                        continue
+
+                    if housing_bucket == 'unknown':
+                        warnings.append(
+                            f"Sheet '{sheet_name}', row {idx + 2}, student {student_id}: "
+                            f"unknown housing type. description='"
+                            f"{safe_str(get_alias_value(row, 'housing_type', default=''))}', "
+                            f"tenant_code='"
+                            f"{safe_str(get_alias_value(row, 'tenant_type', default=''))}'"
+                        )
+
                     # In additions file, this sheet does not define continuing/transfer/leaving.
                     # Therefore:
                     # - New students become NEW.
@@ -3190,7 +3681,17 @@ def upload_additions_excel(request):
                     if accepted_dorm_type is not None:
                         student_payload['accepted_dorm_type'] = accepted_dorm_type
                     else:
-                        accepted_dorm_type = student_payload.get('accepted_dorm_type')
+                        # The numeric decision code is authoritative. Never replace
+                        # it with the descriptive/name column (for example קנדה).
+                        student_payload.pop('accepted_dorm_type', None)
+
+                        if existing:
+                            warnings.append(
+                                f"Student {student_id}: official dorm decision code "
+                                f"'{additions_dorm_code}' could not be resolved. "
+                                "The existing accepted_dorm_type was preserved and "
+                                "no name fallback was used."
+                            )
 
                     target_region = accepted_dorm_type.region if accepted_dorm_type else None
 
@@ -3213,6 +3714,13 @@ def upload_additions_excel(request):
                             f"Student {student_id}: dorm type '{accepted_dorm_type.name}' has no region"
                         )
                         continue
+
+                    if accepted_dorm_type is not None and not dorm_has_active_inventory(accepted_dorm_type):
+                        warnings.append(
+                            f"Student {student_id}: official dorm code {accepted_dorm_type.code} "
+                            "currently has no active building inventory. The decision was preserved, "
+                            "but allocation may have no feasible room for this student."
+                        )
 
                     if existing:
                         old_category = existing.category
@@ -3243,6 +3751,11 @@ def upload_additions_excel(request):
 
                         if target_region:
                             add_region_count(target_region, created=True)
+
+                    # Count only rows that were actually persisted. This keeps
+                    # the upload report aligned with the database.
+                    housing_type_counts[housing_bucket] += 1
+                    sheet_counts[sheet_name]['housing_type_counts'][housing_bucket] += 1
 
                 except Exception as e:
                     add_skip('row_exception')
@@ -3307,6 +3820,7 @@ def upload_additions_excel(request):
             'updated': updated_count,
             'skipped': skipped_count,
             'existing_category_preserved': existing_category_preserved_count,
+            'housing_type_counts': housing_type_counts,
             'region_breakdown': region_breakdown,
             'sheet_counts': sheet_counts,
             'skipped_by_reason': skipped_by_reason,
@@ -3445,260 +3959,6 @@ def mark_inbox_processed(request, inbox_id):
 
     serializer = RegionInboxSerializer(inbox_item)
     return Response({'inbox': serializer.data})
-
-def _room_region(room):
-    try:
-        return room.apartment.building.dorm_type.region
-    except AttributeError:
-        return None
-
-
-def _user_can_edit_room(user, room):
-    if not user or not user.is_authenticated:
-        return False
-
-    if user.is_central_admin:
-        return True
-
-    if not user.region_id:
-        return False
-
-    room_region = _room_region(room)
-    if not room_region:
-        return False
-
-    return room_region.id == user.region_id
-
-
-def _get_student_from_request(request, key='student_id'):
-    value = request.data.get(key) or request.data.get('student')
-    if not value:
-        raise ValueError('Missing student_id')
-
-    # Prefer database PK. Fallback to university/student number.
-    try:
-        return Student.objects.get(pk=value)
-    except (Student.DoesNotExist, ValueError, TypeError):
-        return Student.objects.get(student_id=value)
-
-
-def _get_room_from_request(request, key='room_id'):
-    value = request.data.get(key) or request.data.get('room')
-    if not value:
-        raise ValueError('Missing room_id')
-
-    return Room.objects.select_related(
-        'apartment',
-        'apartment__building',
-        'apartment__building__dorm_type',
-        'apartment__building__dorm_type__region',
-    ).get(pk=value)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def assign_student_room(request):
-    """Assign a student to a room. Backend chooses the first free bed."""
-    try:
-        student = _get_student_from_request(request)
-        room = _get_room_from_request(request)
-
-        if not _user_can_edit_room(request.user, room):
-            return Response({'error': 'אין הרשאה לערוך חדר באזור זה'}, status=status.HTTP_403_FORBIDDEN)
-
-        assignment = assign_student_to_room(
-            student=student,
-            room=room,
-            assigned_by=request.user,
-            assignment_type=BedAssignment.AssignmentType.MANUAL,
-        )
-
-        return Response({
-            'success': True,
-            'message': 'Student assigned successfully',
-            'assignment_id': assignment.id,
-            'student_id': student.id,
-            'room_id': room.id,
-            'bed_id': assignment.bed_id,
-        }, status=status.HTTP_200_OK)
-
-    except (Student.DoesNotExist, Room.DoesNotExist):
-        return Response({'error': 'Student or room not found'}, status=status.HTTP_404_NOT_FOUND)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def move_student_room(request):
-    """Move a student to another room. Ends old active assignment and creates a new one."""
-    try:
-        student = _get_student_from_request(request)
-        room = _get_room_from_request(request)
-
-        if not _user_can_edit_room(request.user, room):
-            return Response({'error': 'אין הרשאה לערוך חדר באזור זה'}, status=status.HTTP_403_FORBIDDEN)
-
-        current_room = student.assigned_room
-        if current_room and not request.user.is_central_admin:
-            current_room = Room.objects.select_related(
-                'apartment__building__dorm_type__region'
-            ).get(pk=current_room.pk)
-
-            if not _user_can_edit_room(request.user, current_room):
-                return Response({'error': 'אין הרשאה להעביר סטודנט מאזור זה'}, status=status.HTTP_403_FORBIDDEN)
-
-        assignment = assign_student_to_room(
-            student=student,
-            room=room,
-            assigned_by=request.user,
-            assignment_type=BedAssignment.AssignmentType.MANUAL,
-        )
-
-        return Response({
-            'success': True,
-            'message': 'Student moved successfully',
-            'assignment_id': assignment.id,
-            'student_id': student.id,
-            'room_id': room.id,
-            'bed_id': assignment.bed_id,
-        }, status=status.HTTP_200_OK)
-
-    except (Student.DoesNotExist, Room.DoesNotExist):
-        return Response({'error': 'Student or room not found'}, status=status.HTTP_404_NOT_FOUND)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def unassign_student_room(request):
-    """Remove a student's active room/bed assignment."""
-    try:
-        student = _get_student_from_request(request)
-
-        current_assignment = BedAssignment.objects.select_related(
-            'bed__room__apartment__building__dorm_type__region'
-        ).filter(
-            student=student,
-            status=BedAssignment.Status.ACTIVE,
-        ).first()
-
-        if not current_assignment:
-            student.assigned_room = None
-            student.save(update_fields=['assigned_room'])
-            return Response({
-                'success': True,
-                'message': 'Student was already unassigned',
-                'student_id': student.id,
-            }, status=status.HTTP_200_OK)
-
-        room = current_assignment.bed.room
-
-        if not _user_can_edit_room(request.user, room):
-            return Response({'error': 'אין הרשאה לערוך חדר באזור זה'}, status=status.HTTP_403_FORBIDDEN)
-
-        with transaction.atomic():
-            current_assignment.status = BedAssignment.Status.ENDED
-            current_assignment.ended_at = timezone.now()
-            current_assignment.save(update_fields=['status', 'ended_at'])
-
-            student.assigned_room = None
-            student.save(update_fields=['assigned_room'])
-
-        return Response({
-            'success': True,
-            'message': 'Student unassigned successfully',
-            'student_id': student.id,
-        }, status=status.HTTP_200_OK)
-
-    except Student.DoesNotExist:
-        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def swap_students_rooms(request):
-    """Swap the current rooms of two already-assigned students."""
-    try:
-        student_a_value = request.data.get('student_a_id') or request.data.get('studentAId')
-        student_b_value = request.data.get('student_b_id') or request.data.get('studentBId')
-
-        if not student_a_value or not student_b_value:
-            return Response({'error': 'Missing student_a_id or student_b_id'}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            student_a = Student.objects.get(pk=student_a_value)
-        except (Student.DoesNotExist, ValueError, TypeError):
-            student_a = Student.objects.get(student_id=student_a_value)
-
-        try:
-            student_b = Student.objects.get(pk=student_b_value)
-        except (Student.DoesNotExist, ValueError, TypeError):
-            student_b = Student.objects.get(student_id=student_b_value)
-
-        with transaction.atomic():
-            assignment_a = BedAssignment.objects.select_for_update().select_related(
-                'bed__room__apartment__building__dorm_type__region'
-            ).get(student=student_a, status=BedAssignment.Status.ACTIVE)
-
-            assignment_b = BedAssignment.objects.select_for_update().select_related(
-                'bed__room__apartment__building__dorm_type__region'
-            ).get(student=student_b, status=BedAssignment.Status.ACTIVE)
-
-            room_a = assignment_a.bed.room
-            room_b = assignment_b.bed.room
-
-            if not _user_can_edit_room(request.user, room_a) or not _user_can_edit_room(request.user, room_b):
-                return Response({'error': 'אין הרשאה לערוך אחד מהחדרים'}, status=status.HTTP_403_FORBIDDEN)
-
-            validate_apartment_assignment(student_a, room_b)
-            validate_apartment_assignment(student_b, room_a)
-
-            now = timezone.now()
-
-            assignment_a.status = BedAssignment.Status.ENDED
-            assignment_a.ended_at = now
-            assignment_a.save(update_fields=['status', 'ended_at'])
-
-            assignment_b.status = BedAssignment.Status.ENDED
-            assignment_b.ended_at = now
-            assignment_b.save(update_fields=['status', 'ended_at'])
-
-            new_a = assign_student_to_room(
-                student=student_a,
-                room=room_b,
-                assigned_by=request.user,
-                assignment_type=BedAssignment.AssignmentType.MANUAL,
-            )
-
-            new_b = assign_student_to_room(
-                student=student_b,
-                room=room_a,
-                assigned_by=request.user,
-                assignment_type=BedAssignment.AssignmentType.MANUAL,
-            )
-
-        return Response({
-            'success': True,
-            'message': 'Students swapped successfully',
-            'student_a_id': student_a.id,
-            'student_b_id': student_b.id,
-            'student_a_room_id': room_b.id,
-            'student_b_room_id': room_a.id,
-            'assignment_a_id': new_a.id,
-            'assignment_b_id': new_b.id,
-        }, status=status.HTTP_200_OK)
-
-    except Student.DoesNotExist:
-        return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
-    except BedAssignment.DoesNotExist:
-        return Response({'error': 'Both students must have active assignments'}, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
 
 def _room_region(room):
     try:

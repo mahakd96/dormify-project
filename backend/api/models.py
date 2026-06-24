@@ -361,6 +361,7 @@ class Student(models.Model):
         MALE = 'male', _('זכר')
         FEMALE = 'female', _('נקבה')
 
+
     class HousingType(models.TextChoices):
         # Values match the descriptions received in the student Excel file.
         SINGLE_MALE = 'רווקים', _('רווקים')                 # Z1
@@ -406,9 +407,14 @@ class Student(models.Model):
     phone_secondary = models.CharField(max_length=20, blank=True)
     city = models.CharField(max_length=100, blank=True)
     business_partner_id = models.CharField(max_length=20, blank=True)
-    gender = models.CharField(max_length=10, choices=Gender.choices)
-    requested_religion = models.CharField(max_length=20, choices=Religion.choices, default=Religion.NOT_SPECIFIED)
 
+    gender = models.CharField(
+        max_length=10,
+        choices=Gender.choices,
+        null=True,
+        blank=True,
+    )
+    requested_religion = models.CharField(max_length=20, choices=Religion.choices, default=Religion.NOT_SPECIFIED)
     placement_sector = models.CharField(
         max_length=20,
         choices=PlacementSector.choices,
@@ -509,17 +515,34 @@ class Student(models.Model):
 
     @property
     def housing_gender(self):
-        mapping = {
-            self.HousingType.SINGLE_MALE: self.Gender.MALE,
-            self.HousingType.SINGLE_FEMALE: self.Gender.FEMALE,
+        """
+        Return the gender restriction imposed by the housing type.
+
+        Z1 requires a male single apartment.
+        Z2 requires a female single apartment.
+
+        Z3 couples, Z4 families and Z6 single occupancy do not impose
+        a male/female apartment-category restriction.
+        """
+        if self.housing_type == self.HousingType.SINGLE_MALE:
+            return self.Gender.MALE
+
+        if self.housing_type == self.HousingType.SINGLE_FEMALE:
+            return self.Gender.FEMALE
+
+        return None
+
+    @property
+    def requires_gender_restricted_apartment(self):
+        """
+        True only when housing eligibility depends on a male/female
+        apartment category.
+        """
+        return self.housing_type in {
+            self.HousingType.SINGLE_MALE,
+            self.HousingType.SINGLE_FEMALE,
         }
 
-        # Z6 means a single resident in a couple-layout apartment. Its gender
-        # comes from Student.gender, not from the generic Z6 description.
-        if self.housing_type == self.HousingType.SINGLE_IN_APARTMENT:
-            return self.gender
-
-        return mapping.get(self.housing_type)
 
     @property
     def is_assigned(self):
