@@ -17,7 +17,7 @@ function Dashboard({ language }) {
       try {
         const [statsRes, transfersRes, batchesRes] = await Promise.all([
           api.get('/api/statistics/'),
-          api.get('/api/transfers/?status=pending'),
+          api.get('/api/transfers/'),
           api.get('/api/batches/'),
         ]);
         setStats(statsRes.data);
@@ -41,12 +41,14 @@ function Dashboard({ language }) {
       unassignedStudents: 'ממתינים לשיבוץ',
       priorityStudents: 'סטודנטים בעדיפות',
       totalBuildings: 'בניינים',
+      activeBuildings: 'בניינים פעילים',
+      inactiveBuildings: 'בניינים לא פעילים',
       totalRooms: 'חדרים',
       pendingTransfers: 'בקשות העברה ממתינות',
       occupancyRate: 'אחוז תפוסה',
       regionOverview: 'סקירת אזורים',
       recentTransfers: 'בקשות העברה אחרונות',
-      recentActivity: 'פעילות אחרונה',
+      recentActivity: 'עדכונים אחרונים',
       noData: 'אין נתונים להצגה',
       studentAssigned: 'סטודנט שובץ',
       transferCreated: 'בקשת מעבר נוצרה',
@@ -63,12 +65,14 @@ function Dashboard({ language }) {
       unassignedStudents: 'Pending Assignment',
       priorityStudents: 'Priority Students',
       totalBuildings: 'Buildings',
+      activeBuildings: 'Active Buildings',
+inactiveBuildings: 'Inactive Buildings',
       totalRooms: 'Rooms',
       pendingTransfers: 'Pending Transfers',
       occupancyRate: 'Occupancy Rate',
       regionOverview: 'Region Overview',
       recentTransfers: 'Recent Transfer Requests',
-      recentActivity: 'Recent Activity',
+      recentActivity: 'Latest Updates',
       noData: 'No data to display',
       studentAssigned: 'Student assigned',
       transferCreated: 'Transfer request created',
@@ -142,12 +146,21 @@ function Dashboard({ language }) {
 
   return (
     <div className="dashboard">
-      <div className="page-header">
-        <div>
-          <h1>{t.title}</h1>
-          <p>{t.welcome}</p>
-        </div>
-      </div>
+     <div className="page-header">
+  <div>
+    <h1>{t.title}</h1>
+    <p>{t.welcome}</p>
+    <p className="page-subtitle">
+      {isCentralAdmin()
+        ? (language === 'he'
+            ? 'סקירה מערכתית של תפוסה, בקשות ועדכונים אחרונים'
+            : 'System-wide overview of occupancy, requests, and recent updates')
+        : (language === 'he'
+            ? 'סקירה של האזור שלך: תפוסה, בקשות ועדכונים אחרונים'
+            : 'Overview of your region: occupancy, requests, and recent updates')}
+    </p>
+  </div>
+</div>
 
       {/* Stats */}
       <div className="stats-grid">
@@ -184,12 +197,28 @@ function Dashboard({ language }) {
         </div>
 
         <div className="stat-card">
-          <div className="stat-icon purple"><Building2 size={24} /></div>
-          <div className="stat-content">
-            <span className="stat-value">{stats?.total_buildings ?? 0}</span>
-            <span className="stat-label">{t.totalBuildings}</span>
-          </div>
-        </div>
+  <div className="stat-icon purple"><Building2 size={24} /></div>
+  <div className="stat-content">
+    <span className="stat-value">{stats?.total_buildings ?? 0}</span>
+    <span className="stat-label">{t.totalBuildings}</span>
+  </div>
+</div>
+
+<div className="stat-card">
+  <div className="stat-icon green"><Building2 size={24} /></div>
+  <div className="stat-content">
+    <span className="stat-value">{stats?.active_buildings ?? 0}</span>
+    <span className="stat-label">{t.activeBuildings}</span>
+  </div>
+</div>
+
+<div className="stat-card">
+  <div className="stat-icon orange"><Building2 size={24} /></div>
+  <div className="stat-content">
+    <span className="stat-value">{stats?.inactive_buildings ?? 0}</span>
+    <span className="stat-label">{t.inactiveBuildings}</span>
+  </div>
+</div>
 
         <div className="stat-card">
           <div className="stat-icon teal"><Home size={24} /></div>
@@ -234,7 +263,15 @@ function Dashboard({ language }) {
                     </span>
                     <span className="transfer-details">{transfer.reason}</span>
                   </div>
-                  <span className="transfer-status pending">{t.pending}</span>
+                  <span
+                    className="transfer-status"
+                    style={{
+                        background: getStatusColor(transfer.status).bg,
+                        color: getStatusColor(transfer.status).color,
+                                }}
+                        >
+                    {getStatusLabel(transfer.status)}
+                    </span>
                 </div>
               ))}
             </div>
@@ -283,7 +320,8 @@ function Dashboard({ language }) {
         .dashboard { padding: 24px; }
         .page-header { margin-bottom: 24px; }
         .page-header h1 { font-size: 24px; font-weight: 700; margin-bottom: 4px; }
-        .page-header p { color: #64748b; }
+        .page-header p { color: #64748b; margin: 0; }
+        .page-subtitle { margin-top: 6px !important; font-size: 14px; color: #94a3b8 !important; }
 
         .stats-grid {
           display: grid;

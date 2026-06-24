@@ -111,9 +111,18 @@ export default function AnalysisPage({ language }) {
         </div>
     );
 
-    const { summary, students_by_gender, students_by_religion, students_by_religious,
-            students_by_category, students_by_housing, occupancy_data,
-            transfers_by_status, transfers_by_type, students_by_region } = data;
+    const {
+    summary = {},
+    students_by_gender = [],
+    students_by_religion = [],
+    students_by_religious = [],
+    students_by_category = [],
+    students_by_housing = [],
+    occupancy_data = [],
+    transfers_by_status = [],
+    transfers_by_type = [],
+    students_by_region = [],
+                    } = data || {};
 
     const genderData = students_by_gender.map(d => ({
         name: GENDER_LABELS[d.gender] || d.gender, value: d.count
@@ -148,14 +157,34 @@ export default function AnalysisPage({ language }) {
         name: d['accepted_dorm_type__region__name'] || 'לא ידוע', value: d.count
     }));
 
-    const bedOccupancyRate = summary.total_beds > 0
-        ? Math.round((summary.assigned_beds / summary.total_beds) * 100) : 0;
+    const totalBeds = Number(summary.total_beds || summary.total_capacity || 0);
+const assignedBeds = Number(summary.assigned_beds || summary.occupied_beds || 0);
 
-    // Occupancy filter by region
-    const availableRegions = [...new Set(occupancy_data.map(d => d.region).filter(Boolean))];
-    const filteredOccupancy = selectedRegion === 'all'
-        ? occupancy_data
-        : occupancy_data.filter(d => d.region === selectedRegion);
+const bedOccupancyRate = totalBeds > 0
+    ? Math.round((assignedBeds / totalBeds) * 100)
+    : 0;
+
+const availableRegions = [...new Set(occupancy_data.map(d => d.region).filter(Boolean))];
+
+const filteredOccupancyRaw = selectedRegion === 'all'
+    ? occupancy_data
+    : occupancy_data.filter(d => d.region === selectedRegion);
+
+// Sort buildings so occupied buildings appear first,
+// but keep empty buildings too.
+const sortedOccupancy = [...filteredOccupancyRaw].sort((a, b) => {
+    const assignedDiff = Number(b.assigned || 0) - Number(a.assigned || 0);
+
+    if (assignedDiff !== 0) {
+        return assignedDiff;
+    }
+
+    return String(a.building || '').localeCompare(String(b.building || ''));
+});
+
+// Show more buildings, including empty ones.
+// You can change 50 to 113 if you want all buildings at once.
+const visibleOccupancy = sortedOccupancy.slice(0, 50);
 
     return (
         <div style={{ padding: '32px', direction: 'rtl', maxWidth: '1400px' }}>
@@ -287,14 +316,21 @@ export default function AnalysisPage({ language }) {
                             ))}
                         </select>
                         <span style={{ fontSize: '13px', color: '#64748b' }}>
-                            {filteredOccupancy.length} בניינים
+                            {visibleOccupancy.length} מתוך {filteredOccupancyRaw.length} בניינים
+
                         </span>
                     </div>
 
-                    <ChartCard title={`מיטות לפי בניין - ${selectedRegion === 'all' ? 'כל האזורים' : selectedRegion}`} height={350}>
-                        <BarChart data={filteredOccupancy}>
+                    <ChartCard title={`מיטות לפי בניין - ${selectedRegion === 'all' ? 'כל האזורים' : selectedRegion}`} height={Math.max(350, visibleOccupancy.length * 28)}>
+                        <BarChart data={visibleOccupancy} layout="vertical" margin={{ top: 10, right: 30, left: 260, bottom: 10 }}>
                             <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                            <XAxis dataKey="building" tick={{ fontSize: 10 }} />
+                           <XAxis type="number" />
+                            <YAxis
+    dataKey="building"
+    type="category"
+    tick={{ fontSize: 10 }}
+    width={260}
+/>
                             <YAxis />
                             <Tooltip formatter={(value, name) => [
                                 value,
@@ -307,14 +343,20 @@ export default function AnalysisPage({ language }) {
                     </ChartCard>
 
                     <div style={{ marginTop: '12px' }}>
-                        <ChartCard title={`אחוז תפוסה - ${selectedRegion === 'all' ? 'כל האזורים' : selectedRegion}`} height={300}>
-                            <BarChart data={filteredOccupancy}>
+                        <ChartCard title={`אחוז תפוסה - ${selectedRegion === 'all' ? 'כל האזורים' : selectedRegion}`} height={Math.max(350, visibleOccupancy.length * 28)}>
+                           <BarChart data={visibleOccupancy} layout="vertical" margin={{ top: 10, right: 30, left: 260, bottom: 10 }}>
                                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                                <XAxis dataKey="building" tick={{ fontSize: 10 }} />
-                                <YAxis domain={[0, 100]} tickFormatter={v => `${v}%`} />
+                               <XAxis type="number" domain={[0, 100]} tickFormatter={v => `${v}%`} />
+                                <YAxis
+    dataKey="building"
+    type="category"
+    tick={{ fontSize: 10 }}
+    width={260}
+/>
+
                                 <Tooltip formatter={(v) => [`${v}%`, 'תפוסה']} />
                                 <Bar dataKey="occupancy_rate" name="אחוז תפוסה" radius={[6, 6, 0, 0]}>
-                                    {filteredOccupancy.map((entry, i) => (
+                                    {visibleOccupancy.map((entry, i) => (
                                         <Cell key={i} fill={
                                             entry.occupancy_rate >= 80 ? '#10b981' :
                                             entry.occupancy_rate >= 50 ? '#f59e0b' : '#ef4444'
