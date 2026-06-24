@@ -281,6 +281,7 @@ export const studentsAPI = {
   },
 };
 
+
 export const analysisAPI = {
   getData: async () => {
     try {
@@ -323,7 +324,46 @@ export const transfersAPI = {
     }
   },
 };
+export const whatIfAPI = {
+  simulateBuildingInactivation: async (buildingIds) => {
+    try {
+      const { data } = await api.post(
+        "/api/what-if/building-inactivation/simulate/",
+        {
+          building_ids: buildingIds,
+        }
+      );
 
+      return data;
+    } catch (err) {
+      throw new Error(
+        getErrorMessage(err, "Failed to simulate building inactivation")
+      );
+    }
+  },
+
+  confirmBuildingInactivation: async (
+    buildingIds,
+    reason = "Building inactivated"
+  ) => {
+    try {
+      const { data } = await api.post(
+        "/api/what-if/building-inactivation/confirm/",
+        {
+          building_ids: buildingIds,
+          reason,
+          inactivate_buildings: true,
+        }
+      );
+
+      return data;
+    } catch (err) {
+      throw new Error(
+        getErrorMessage(err, "Failed to confirm building inactivation")
+      );
+    }
+  },
+};
 export const debugAuthAPI = {
   getAccessToken,
   getRefreshToken,

@@ -157,8 +157,8 @@ class DormType(models.Model):
         ordering = ['code']
 
     def __str__(self):
-        return f"{self.code} - {self.name} ({self.region.name})"
-
+        region_name = self.region.name if self.region else "No Region"
+        return f"{self.code} - {self.name} ({region_name})"
 
 class Building(models.Model):
     number = models.PositiveIntegerField(null=True, blank=True)
@@ -173,7 +173,13 @@ class Building(models.Model):
     class Meta:
         verbose_name = _('בניין')
         verbose_name_plural = _('בניינים')
-        ordering = ['number']
+        ordering = ['dorm_type', 'number']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['dorm_type', 'number'],
+                name='unique_building_per_dorm_type',
+            ),
+        ]
 
     def __str__(self):
         dorm_type_name = self.dorm_type.name if self.dorm_type else "No Dorm Type"
@@ -184,9 +190,12 @@ class Apartment(models.Model):
     class Category(models.TextChoices):
         MALE = 'male', _('זכר')
         FEMALE = 'female', _('נקבה')
+        MIXED = 'mixed', _('מעורב / לא רלוונטי')
 
     class ApartmentType(models.TextChoices):
-        SINGLE = 'single', _('רווקים')
+        # ApartmentType describes the physical/administrative apartment class.
+        # Gender is represented separately by Category.
+        SINGLE = 'single', _('רווקים/ות')
         COUPLE = 'couple', _('זוגות')
         FAMILY = 'family', _('משפחה')
 
@@ -238,15 +247,20 @@ class Apartment(models.Model):
 
 class Room(models.Model):
     """
-    Keep field 'name' because frontend likely uses it.
-    Add property 'number' for your ER idea.
+    Keep field 'name' for frontend compatibility.
+    Expose room number and building information through properties.
     """
+
     apartment = models.ForeignKey(
         Apartment,
         on_delete=models.CASCADE,
         related_name='rooms'
     )
-    name = models.CharField(max_length=50)  # keeps old frontend working
+
+    name = models.CharField(
+        max_length=50
+    )
+
     capacity = models.PositiveIntegerField()
     is_active = models.BooleanField(default=True)
 
@@ -257,7 +271,11 @@ class Room(models.Model):
         unique_together = ['apartment', 'name']
 
     def __str__(self):
-        return f"{self.name} - {self.apartment}"
+        return (
+            f"Room {self.name} - "
+            f"Apartment {self.apartment.number} - "
+            f"Building {self.apartment.building.number}"
+        )
 
     @property
     def number(self):
@@ -266,6 +284,22 @@ class Room(models.Model):
     @property
     def building(self):
         return self.apartment.building
+
+    @property
+    def building_number(self):
+        return self.apartment.building.number
+
+    @property
+    def apartment_number(self):
+        return self.apartment.number
+
+    @property
+    def dorm_type(self):
+        return self.apartment.building.dorm_type
+
+    @property
+    def dorm_code(self):
+        return self.apartment.building.dorm_type.code
 
     @property
     def region(self):
@@ -282,6 +316,7 @@ class Room(models.Model):
     def is_full(self):
         if not self.is_active:
             return True
+
         return self.available_beds <= 0
 
     @property
@@ -292,7 +327,9 @@ class Room(models.Model):
         used = BedAssignment.objects.filter(
             bed__room=self,
             status=BedAssignment.Status.ACTIVE
-        ).values('bed_id').distinct().count()
+        ).values(
+            'bed_id'
+        ).distinct().count()
 
         return max(self.beds.count() - used, 0)
 
@@ -323,6 +360,14 @@ class Student(models.Model):
     class Gender(models.TextChoices):
         MALE = 'male', _('זכר')
         FEMALE = 'female', _('נקבה')
+
+    class HousingType(models.TextChoices):
+        # Values match the descriptions received in the student Excel file.
+        SINGLE_MALE = 'רווקים', _('רווקים')                 # Z1
+        SINGLE_FEMALE = 'רווקות', _('רווקות')               # Z2
+        COUPLE = 'זוגות', _('זוגות')                         # Z3
+        FAMILY = 'משפחות עד 2 ילדים (כולל)', _('משפחות עד 2 ילדים (כולל)')  # Z4
+        SINGLE_IN_APARTMENT = 'רווקים/ות בדירה', _('רווקים/ות בדירה')       # Z6
 
     class Religion(models.TextChoices):
         Muslim = 'Muslims', _('מוסלמי')
@@ -371,7 +416,11 @@ class Student(models.Model):
     )
 
     category = models.CharField(max_length=20, choices=StudentCategory.choices, default=StudentCategory.NEW)
-    housing_type = models.CharField(max_length=100, blank=True)
+    housing_type = models.CharField(
+        max_length=100,
+        choices=HousingType.choices,
+        blank=True,
+    )
     allocation_group = models.CharField(max_length=50, blank=True)
     accepted_dorm_type = models.ForeignKey(
         DormType,
@@ -407,11 +456,7 @@ class Student(models.Model):
     roommate_request_student_id_4 = models.CharField(max_length=20, blank=True)
     roommate_request_student_id_5 = models.CharField(max_length=20, blank=True)
 
-    roommate_request_flag_1 = models.BooleanField(default=False)
-    roommate_request_flag_2 = models.BooleanField(default=False)
-    roommate_request_flag_3 = models.BooleanField(default=False)
-    roommate_request_flag_4 = models.BooleanField(default=False)
-    roommate_request_flag_5 = models.BooleanField(default=False)
+
 
     roommate_request_flag_1 = models.BooleanField(default=False)
     roommate_request_flag_2 = models.BooleanField(default=False)
@@ -465,9 +510,15 @@ class Student(models.Model):
     @property
     def housing_gender(self):
         mapping = {
-            'רווקים': 'male',
-            'רווקות': 'female',
+            self.HousingType.SINGLE_MALE: self.Gender.MALE,
+            self.HousingType.SINGLE_FEMALE: self.Gender.FEMALE,
         }
+
+        # Z6 means a single resident in a couple-layout apartment. Its gender
+        # comes from Student.gender, not from the generic Z6 description.
+        if self.housing_type == self.HousingType.SINGLE_IN_APARTMENT:
+            return self.gender
+
         return mapping.get(self.housing_type)
 
     @property

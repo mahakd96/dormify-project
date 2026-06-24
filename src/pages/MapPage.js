@@ -1,503 +1,689 @@
-import React, { useMemo, useRef, useState, useEffect } from 'react';
-import { Filter, X, ZoomIn, ZoomOut, RotateCcw, Move, Building2, Home, Users } from 'lucide-react';
+import React, { useMemo, useRef, useState, useEffect, useCallback } from "react";
+import {
+  Filter,
+  X,
+  ZoomIn,
+  ZoomOut,
+  RotateCcw,
+  Move,
+  Building2,
+  Home,
+  AlertCircle,
+} from "lucide-react";
+import { api } from "../services/api";
+import { useAuth } from "../context/AuthContext";
 
-const MAP_FILE = 'dormMap.png';
+const MAP_FILE = "dormMap.png";
 const MAP_SRC = `/maps/${MAP_FILE}`;
 
-// -------------------------
-// Mock data structures
-// -------------------------
-const regions = [
-  { id: 'canada', name: 'קנדה', nameEn: 'Canada' },
-  { id: 'mizrach-yashan', name: 'מזרח ישן (הלל קפלן)', nameEn: 'Mizrach Yashan (Hillel Kaplan)' },
-  { id: 'mizrach-hadash', name: 'מזרח חדש', nameEn: 'Mizrach Hadash' },
-  { id: 'rifkin', name: 'ריפקין', nameEn: 'Rifkin' },
-  { id: 'senate', name: 'הסנט', nameEn: 'Senate' },
-  { id: 'kfar-hasmaha', name: 'כפר משתלמים', nameEn: 'Kfar Mishtalmim' },
-  { id: 'senate-renovated', name: 'סנאט משופץ', nameEn: 'Senate Renovated' },
-  { id: 'segal-zutar', name: 'סגל זוטר', nameEn: 'Segal Zutar' },
-  { id: 'broshim', name: 'ברושים', nameEn: 'Broshim' },
-  { id: 'neve-america', name: 'נווה אמריקה', nameEn: 'Neve America' },
-  { id: 'ha-amim', name: 'העמים', nameEn: 'Ha-Amim' },
+const dormPositions = {
+  canada: { top: "7.0%", left: "60.5%" },
+  rifkin: { top: "32.0%", left: "28.5%" },
+  senate: { top: "52.5%", left: "32.5%" },
+  "kfar-hasmaha": { top: "76.5%", left: "10.5%" },
+  "mizrach-yashan": { top: "86.5%", left: "66.0%" },
+  "mizrach-hadash": { top: "89.0%", left: "86.0%" },
+  "senate-renovated": { top: "55.5%", left: "38.0%" },
+  "segal-zutar": { top: "60.0%", left: "74.0%" },
+  broshim: { top: "10.0%", left: "45.0%" },
+  "neve-america": { top: "40.0%", left: "12.0%" },
+  "ha-amim": { top: "72.0%", left: "70.0%" },
+};
+
+const dormLabels = {
+  canada: { he: "קנדה", en: "Canada" },
+  "mizrach-yashan": { he: "מזרח ישן (הלל קפלן)", en: "Mizrach Yashan (Hillel Kaplan)" },
+  "mizrach-hadash": { he: "מזרח חדש", en: "Mizrach Hadash" },
+  rifkin: { he: "ריפקין", en: "Rifkin" },
+  senate: { he: "הסנט", en: "Senate" },
+  "kfar-hasmaha": { he: "כפר משתלמים", en: "Kfar Mishtalmim" },
+  "senate-renovated": { he: "סנאט משופץ", en: "Senate Renovated" },
+  "segal-zutar": { he: "סגל זוטר", en: "Segal Zutar" },
+  broshim: { he: "ברושים", en: "Broshim" },
+  "neve-america": { he: "נווה אמריקה", en: "Neve America" },
+  "ha-amim": { he: "העמים", en: "Ha-Amim" },
+};
+
+const DORM_KEY_ALIASES = [
+  { key: "canada", matches: ["canada", "קנדה"] },
+  { key: "mizrach-yashan", matches: ["mizrach yashan", "mizrah yashan", "מזרח ישן", "הלל קפלן"] },
+  { key: "mizrach-hadash", matches: ["mizrach hadash", "mizrah hadash", "מזרח חדש"] },
+  { key: "rifkin", matches: ["rifkin", "ריפקין"] },
+  { key: "senate", matches: ["senate", "הסנט", "סנט", "senat"] },
+  { key: "kfar-hasmaha", matches: ["kfar mishtalmim", "kfar hasmaha", "כפר משתלמים", "כפר הסמכה"] },
+  { key: "senate-renovated", matches: ["senate renovated", "סנאט משופץ", "סנט חדש"] },
+  { key: "segal-zutar", matches: ["segal zutar", "סגל זוטר"] },
+  { key: "broshim", matches: ["broshim", "ברושים"] },
+  { key: "neve-america", matches: ["neve america", "נווה אמריקה"] },
+  { key: "ha-amim", matches: ["ha-amim", "ha amim", "העמים"] },
 ];
 
-const buildings = [
-  { id: 'b1', regionId: 'canada', name: 'Building 1' },
-  { id: 'b2', regionId: 'canada', name: 'Building 2' },
-  { id: 'b3', regionId: 'mizrach-yashan', name: 'Building 3' },
-  { id: 'b4', regionId: 'rifkin', name: 'Building 4' },
-  { id: 'b5', regionId: 'broshim', name: 'Building 5' }
-];
+const normalizeText = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[()]/g, "")
+    .replace(/[–—]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/\//g, " ");
 
-const rooms = [
-  { id: 'r1', regionId: 'canada', buildingId: 'b1' },
-  { id: 'r2', regionId: 'canada', buildingId: 'b1' },
-  { id: 'r3', regionId: 'canada', buildingId: 'b2' },
-  { id: 'r4', regionId: 'mizrach-yashan', buildingId: 'b3' },
-  { id: 'r5', regionId: 'mizrach-yashan', buildingId: 'b3' },
-  { id: 'r6', regionId: 'rifkin', buildingId: 'b4' },
-  { id: 'r7', regionId: 'broshim', buildingId: 'b5' },
-  { id: 'r8', regionId: 'broshim', buildingId: 'b5' }
-];
-
-const students = [
-  { id: 's1', regionId: 'canada', isAssigned: true },
-  { id: 's2', regionId: 'canada', isAssigned: true },
-  { id: 's3', regionId: 'canada', isAssigned: false },
-  { id: 's4', regionId: 'mizrach-yashan', isAssigned: true },
-  { id: 's5', regionId: 'rifkin', isAssigned: true },
-  { id: 's6', regionId: 'rifkin', isAssigned: true },
-  { id: 's7', regionId: 'broshim', isAssigned: false }
-];
-
-// Mock auth context
-const useAuth = () => ({
-  canAccessRegion: () => true
-});
-
-export default function MapPage({ language = 'en' }) {
-  const { canAccessRegion } = useAuth();
-
-  const [typeFilter, setTypeFilter] = useState('all');
-  const [selectedDormGroup, setSelectedDormGroup] = useState(null);
-
-  const [calibrateMode, setCalibrateMode] = useState(false);
-
-  const canvasRef = useRef(null);
-  const [scale, setScale] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [isDragging, setIsDragging] = useState(false);
-  const dragStart = useRef({ x: 0, y: 0 });
-  const panStart = useRef({ x: 0, y: 0 });
-
-  const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
-  const ZOOM_MIN = 0.85;
-  const ZOOM_MAX = 2.75;
-  const ZOOM_STEP = 0.15;
-
-  const resetView = () => {
-    setScale(1);
-    setPan({ x: 0, y: 0 });
-  };
-
-  const zoomAt = (nextScale, clientX, clientY) => {
-    const el = canvasRef.current;
-    if (!el) {
-      setScale(nextScale);
-      return;
+function resolveDormKey(name) {
+  const raw = normalizeText(name);
+  for (const item of DORM_KEY_ALIASES) {
+    if (item.matches.some((m) => raw.includes(normalizeText(m)))) {
+      return item.key;
     }
+  }
+  return null;
+}
 
-    const rect = el.getBoundingClientRect();
-    const cx = clientX - rect.left;
-    const cy = clientY - rect.top;
+function inferDormTypeVariant(name) {
+  const raw = normalizeText(name);
 
-    const worldX = (cx - pan.x) / scale;
-    const worldY = (cy - pan.y) / scale;
+  if (raw.includes("family") || raw.includes("משפחה") || raw.includes("משפחות")) {
+    return "family";
+  }
 
-    const nextPanX = cx - worldX * nextScale;
-    const nextPanY = cy - worldY * nextScale;
+  if (raw.includes("couple") || raw.includes("couples") || raw.includes("זוג") || raw.includes("זוגות")) {
+    return "couples";
+  }
 
-    setScale(nextScale);
-    setPan({ x: nextPanX, y: nextPanY });
-  };
+  return "base";
+}
 
-  const zoomIn = () => {
-    const next = clamp(Number((scale + ZOOM_STEP).toFixed(2)), ZOOM_MIN, ZOOM_MAX);
-    const el = canvasRef.current;
-    if (!el) return setScale(next);
-    const rect = el.getBoundingClientRect();
-    zoomAt(next, rect.left + rect.width / 2, rect.top + rect.height / 2);
-  };
+function occupancyClass(occ) {
+  if (occ >= 90) return "danger";
+  if (occ >= 70) return "warn";
+  return "good";
+}
 
-  const zoomOut = () => {
-    const next = clamp(Number((scale - ZOOM_STEP).toFixed(2)), ZOOM_MIN, ZOOM_MAX);
-    const el = canvasRef.current;
-    if (!el) return setScale(next);
-    const rect = el.getBoundingClientRect();
-    zoomAt(next, rect.left + rect.width / 2, rect.top + rect.height / 2);
-  };
+export default function MapPage({ language = "en" }) {
+    const {canAccessRegion, isCentralAdmin} = useAuth();
 
-  const onMouseDown = (e) => {
-    if (e.button !== 0) return;
-    setIsDragging(true);
-    dragStart.current = { x: e.clientX, y: e.clientY };
-    panStart.current = { ...pan };
-  };
+    const [typeFilter, setTypeFilter] = useState("all");
+    const [selectedDormKey, setSelectedDormKey] = useState(null);
+    const [calibrateMode, setCalibrateMode] = useState(false);
 
-  const onMouseMove = (e) => {
-    if (!isDragging) return;
-    const dx = e.clientX - dragStart.current.x;
-    const dy = e.clientY - dragStart.current.y;
-    setPan({ x: panStart.current.x + dx, y: panStart.current.y + dy });
-  };
+    const [buildingsData, setBuildingsData] = useState([]);
+    const [roomsByBuilding, setRoomsByBuilding] = useState({});
+    const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState("");
 
-  const onMouseUp = () => setIsDragging(false);
+    const canvasRef = useRef(null);
+    const [scale, setScale] = useState(1);
+    const [pan, setPan] = useState({x: 0, y: 0});
+    const [isDragging, setIsDragging] = useState(false);
+    const dragStart = useRef({x: 0, y: 0});
+    const panStart = useRef({x: 0, y: 0});
 
-  const onWheel = (e) => {
-    e.preventDefault();
-    const delta = e.deltaY < 0 ? +ZOOM_STEP : -ZOOM_STEP;
-    const next = clamp(Number((scale + delta).toFixed(2)), ZOOM_MIN, ZOOM_MAX);
-    zoomAt(next, e.clientX, e.clientY);
-  };
+    const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
+    const ZOOM_MIN = 0.85;
+    const ZOOM_MAX = 2.75;
+    const ZOOM_STEP = 0.15;
 
-  useEffect(() => {
-    const el = canvasRef.current;
-    if (!el) return;
-    const handler = (e) => e.preventDefault();
-    el.addEventListener('wheel', handler, { passive: false });
-    return () => el.removeEventListener('wheel', handler);
-  }, []);
+    const t = {
+        he: {
+            title: "מפת המעונות",
+            subtitle: "בחירת אזור במפה מציגה נתוני תפוסה אמיתיים",
+            filterTitle: "סינון לפי סוג",
+            all: "הכל",
+            base: "יחידים",
+            couples: "זוגות",
+            family: "משפחות",
+            buildings: "בניינים",
+            rooms: "חדרים",
+            capacity: "קיבולת",
+            occupancy: "תפוסה",
+            availableBeds: "מיטות פנויות",
+            dormTypeLabel: "סוג מעונות",
+            zoom: "זום",
+            panHint: "גרור/י להזזה",
+            occupancyDetails: "פרטי תפוסה",
+            calibrate: "כיול",
+            calibrateOn: "כיול פועל (קליק מציג קואורדינטות בקונסול)",
+            calibrateOff: "כיול כבוי",
+            loading: "טוען נתוני מפה...",
+            error: "שגיאה בטעינת נתוני המפה",
+            empty: "אין נתונים זמינים עבור הבחירה הנוכחית",
+            mapPath: "מפה",
+            restricted: "מוצגים רק הנתונים המותרים למשתמש הנוכחי",
+            selectDorm: "בחר/י אזור במפה",
+            selectDormSub: "לחיצה על סיכת מעון תציג נתוני תפוסה אמיתיים.",
+            refresh: "רענון נתונים",
+        },
+        en: {
+            title: "Dormitory Map",
+            subtitle: "Select an area on the map to view real occupancy data",
+            filterTitle: "Filter by type",
+            all: "All",
+            base: "Base",
+            couples: "Couples",
+            family: "Family",
+            buildings: "Buildings",
+            rooms: "Rooms",
+            capacity: "Capacity",
+            occupancy: "Occupancy",
+            availableBeds: "Available Beds",
+            dormTypeLabel: "Dorm Type",
+            zoom: "Zoom",
+            panHint: "Drag to pan",
+            occupancyDetails: "Occupancy Details",
+            calibrate: "Calibrate",
+            calibrateOn: "Calibration ON (click prints coords in console)",
+            calibrateOff: "Calibration OFF",
+            loading: "Loading map data...",
+            error: "Failed to load map data",
+            empty: "No data available for the current selection",
+            mapPath: "Map",
+            restricted: "Showing only data allowed for the current user",
+            selectDorm: "Select an area on the map",
+            selectDormSub: "Click a dorm pin to view real occupancy details.",
+            refresh: "Refresh Data",
+        },
+    }[language];
 
-  const dormGroups = useMemo(
-    () => [
-      { baseId: 'canada', variants: ['canada', 'canada-family', 'canada-couples'] },
-      { baseId: 'mizrach-yashan', variants: ['mizrach-yashan', 'mizrach-yashan-couples'] },
-      { baseId: 'mizrach-hadash', variants: ['mizrach-hadash', 'mizrach-hadash-family', 'mizrach-hadash-couples'] },
-      { baseId: 'rifkin', variants: ['rifkin'] },
-      { baseId: 'senate', variants: ['senate'] },
-      { baseId: 'kfar-hasmaha', variants: ['kfar-hasmaha', 'kfar-hasmaha-couples'] },
+    const resetView = () => {
+        setScale(1);
+        setPan({x: 0, y: 0});
+    };
 
-      { baseId: 'senate-renovated', variants: ['senate-renovated'] },
-      { baseId: 'segal-zutar', variants: ['segal-zutar', 'segal-zutar-family', 'segal-zutar-couples'] },
-      { baseId: 'broshim', variants: ['broshim', 'broshim-family', 'broshim-couples'] },
-      { baseId: 'neve-america', variants: ['neve-america', 'neve-america-couples'] },
-      { baseId: 'ha-amim', variants: ['ha-amim'] },
-    ],
-    []
-  );
+    const zoomAt = (nextScale, clientX, clientY) => {
+        const el = canvasRef.current;
+        if (!el) {
+            setScale(nextScale);
+            return;
+        }
 
-  const dormPositions = {
-    canada: { top: '7.0%', left: '60.5%' },
-    rifkin: { top: '32.0%', left: '28.5%' },
-    senate: { top: '52.5%', left: '32.5%' },
-    'kfar-hasmaha': { top: '76.5%', left: '10.5%' },
-    'mizrach-yashan': { top: '86.5%', left: '66.0%' },
-    'mizrach-hadash': { top: '89.0%', left: '86.0%' },
+        const rect = el.getBoundingClientRect();
+        const cx = clientX - rect.left;
+        const cy = clientY - rect.top;
 
-    'senate-renovated': { top: '55.5%', left: '38.0%' },
-    'segal-zutar': { top: '60.0%', left: '74.0%' },
-    broshim: { top: '10.0%', left: '45.0%' },
-    'neve-america': { top: '40.0%', left: '12.0%' },
-    'ha-amim': { top: '72.0%', left: '70.0%' },
-  };
+        const worldX = (cx - pan.x) / scale;
+        const worldY = (cy - pan.y) / scale;
 
-  const t = {
-    he: {
-      title: 'מפת המעונות',
-      subtitle: 'בחר/י סוג מעונות וצפה/י בתפוסה לפי אזור',
-      filterTitle: 'סינון לפי סוג',
-      all: 'הכל',
-      base: 'יחידים',
-      couples: 'זוגות',
-      family: 'משפחות',
-      buildings: 'בניינים',
-      rooms: 'חדרים',
-      students: 'סטודנטים',
-      capacity: 'קיבולת',
-      occupancy: 'תפוסה',
-      dormTypeLabel: 'סוג מעונות',
-      zoom: 'זום',
-      reset: 'איפוס',
-      panHint: 'גרור/י להזזה',
-      legend: 'מקרא',
-      low: 'נמוכה',
-      mid: 'בינונית',
-      high: 'גבוהה',
-      occupancyDetails: 'פרטי תפוסה',
-      calibrate: 'כיול',
-      calibrateOn: 'כיול פועל (קליק מציג קואורדינטות בקונסול)',
-      calibrateOff: 'כיול כבוי',
-    },
-    en: {
-      title: 'Dormitory Map',
-      subtitle: 'Choose dorm type and view occupancy by area',
-      filterTitle: 'Filter by type',
-      all: 'All',
-      base: 'Base',
-      couples: 'Couples',
-      family: 'Family',
-      buildings: 'Buildings',
-      rooms: 'Rooms',
-      students: 'Students',
-      capacity: 'Capacity',
-      occupancy: 'Occupancy',
-      dormTypeLabel: 'Dorm Type',
-      zoom: 'Zoom',
-      reset: 'Reset',
-      panHint: 'Drag to pan',
-      legend: 'Legend',
-      low: 'Low',
-      mid: 'Medium',
-      high: 'High',
-      occupancyDetails: 'Occupancy Details',
-      calibrate: 'Calibrate',
-      calibrateOn: 'Calibration ON (click prints coords in console)',
-      calibrateOff: 'Calibration OFF',
-    },
-  }[language];
+        const nextPanX = cx - worldX * nextScale;
+        const nextPanY = cy - worldY * nextScale;
 
-  const applyTypeFilter = (variantIds) => {
-    if (typeFilter === 'all') return variantIds;
-    const isBase = (id) => !id.includes('-family') && !id.includes('-couples');
-    if (typeFilter === 'base') return variantIds.filter(isBase);
-    if (typeFilter === 'family') return variantIds.filter((id) => id.includes('-family'));
-    if (typeFilter === 'couples') return variantIds.filter((id) => id.includes('-couples'));
-    return variantIds;
-  };
+        setScale(nextScale);
+        setPan({x: nextPanX, y: nextPanY});
+    };
 
-  const accessibleDormGroups = useMemo(() => {
-    return dormGroups.filter((g) => g.variants.some((v) => canAccessRegion(v)));
-  }, [dormGroups, canAccessRegion]);
+    const zoomIn = () => {
+        const next = clamp(Number((scale + ZOOM_STEP).toFixed(2)), ZOOM_MIN, ZOOM_MAX);
+        const el = canvasRef.current;
+        if (!el) return setScale(next);
+        const rect = el.getBoundingClientRect();
+        zoomAt(next, rect.left + rect.width / 2, rect.top + rect.height / 2);
+    };
 
-  const getStatsForDormIds = (dormIds) => {
-    const b = buildings.filter((x) => dormIds.includes(x.regionId));
-    const r = rooms.filter((x) => dormIds.includes(x.regionId));
-    const s = students.filter((x) => dormIds.includes(x.regionId));
+    const zoomOut = () => {
+        const next = clamp(Number((scale - ZOOM_STEP).toFixed(2)), ZOOM_MIN, ZOOM_MAX);
+        const el = canvasRef.current;
+        if (!el) return setScale(next);
+        const rect = el.getBoundingClientRect();
+        zoomAt(next, rect.left + rect.width / 2, rect.top + rect.height / 2);
+    };
 
-    const assignedCount = s.filter((st) => st.isAssigned).length;
-    const capacity = r.length * 2;
-    const occupancy = capacity > 0 ? Math.round((assignedCount / capacity) * 100) : 0;
+    const onMouseDown = (e) => {
+        if (e.button !== 0) return;
+        setIsDragging(true);
+        dragStart.current = {x: e.clientX, y: e.clientY};
+        panStart.current = {...pan};
+    };
 
-    return { buildings: b.length, rooms: r.length, students: s.length, assigned: assignedCount, capacity, occupancy };
-  };
+    const onMouseMove = (e) => {
+        if (!isDragging) return;
+        const dx = e.clientX - dragStart.current.x;
+        const dy = e.clientY - dragStart.current.y;
+        setPan({x: panStart.current.x + dx, y: panStart.current.y + dy});
+    };
 
-  const occupancyClass = (occ) => {
-    if (occ >= 90) return 'danger';
-    if (occ >= 70) return 'warn';
-    return 'good';
-  };
+    const onMouseUp = () => setIsDragging(false);
 
-  const getBaseRegion = (baseId) => regions.find((r) => r.id === baseId);
+    const onWheel = (e) => {
+        e.preventDefault();
+        const delta = e.deltaY < 0 ? +ZOOM_STEP : -ZOOM_STEP;
+        const next = clamp(Number((scale + delta).toFixed(2)), ZOOM_MIN, ZOOM_MAX);
+        zoomAt(next, e.clientX, e.clientY);
+    };
 
-  const selectedGroupObj = selectedDormGroup
-    ? accessibleDormGroups.find((g) => g.baseId === selectedDormGroup)
-    : null;
+    useEffect(() => {
+        const el = canvasRef.current;
+        if (!el) return;
+        const handler = (e) => e.preventDefault();
+        el.addEventListener("wheel", handler, {passive: false});
+        return () => el.removeEventListener("wheel", handler);
+    }, []);
 
-  const selectedDormIds = selectedGroupObj ? applyTypeFilter(selectedGroupObj.variants) : [];
-  const selectedStats = selectedGroupObj ? getStatsForDormIds(selectedDormIds) : null;
+    const loadMapData = useCallback(async () => {
+        setLoading(true);
+        setLoadError("");
 
-  return (
-    <div className="map-page" dir={language === 'he' ? 'rtl' : 'ltr'}>
-      <div className="page-header">
-        <div className="titles">
-          <h1>{t.title}</h1>
-          <p>{t.subtitle}</p>
-          <p className="map-path">
-            <strong>Map:</strong> <code>{MAP_SRC}</code>
-          </p>
-        </div>
+        try {
+            const buildingsRes = await api.get("/api/buildings/");
+            const rawBuildings = Array.isArray(buildingsRes?.data)
+                ? buildingsRes.data
+                : buildingsRes?.data?.results || [];
 
-        <div className="filter">
-          <div className="filter-label">
-            <Filter size={16} />
-            <span>{t.filterTitle}</span>
-          </div>
-          <select
-            value={typeFilter}
-            onChange={(e) => {
-              setTypeFilter(e.target.value);
-              setSelectedDormGroup(null);
-              resetView();
-            }}
-          >
-            <option value="all">{t.all}</option>
-            <option value="base">{t.base}</option>
-            <option value="couples">{t.couples}</option>
-            <option value="family">{t.family}</option>
-          </select>
-        </div>
-      </div>
+            const visibleBuildings = rawBuildings.filter((b) => {
+                if (isCentralAdmin()) return true;
+                return canAccessRegion(b.region);
+            });
 
-      <div className="map-shell">
-        <div className="map-canvas-wrap">
-          <div className="controls">
-            <div className="controls-row">
-              <div className="controls-title">{t.zoom}</div>
+            const roomResponses = await Promise.all(
+                visibleBuildings.map(async (building) => {
+                    try {
+                        const res = await api.get(`/api/buildings/${building.id}/rooms/`);
+                        return {
+                            buildingId: building.id,
+                            rooms: res?.data?.rooms || [],
+                        };
+                    } catch {
+                        return {
+                            buildingId: building.id,
+                            rooms: [],
+                        };
+                    }
+                })
+            );
 
-              <div className="btnrow">
-                <button className="iconbtn" onClick={zoomIn} type="button" aria-label="Zoom in">
-                  <ZoomIn size={16} />
-                </button>
-                <button className="iconbtn" onClick={zoomOut} type="button" aria-label="Zoom out">
-                  <ZoomOut size={16} />
-                </button>
-                <button className="iconbtn" onClick={resetView} type="button" aria-label="Reset view">
-                  <RotateCcw size={16} />
-                </button>
+            const nextRoomsByBuilding = {};
+            roomResponses.forEach(({buildingId, rooms}) => {
+                nextRoomsByBuilding[buildingId] = rooms;
+            });
 
-                <button
-                  className={`pillbtn ${calibrateMode ? 'on' : ''}`}
-                  type="button"
-                  onClick={() => setCalibrateMode((v) => !v)}
-                  title={calibrateMode ? t.calibrateOn : t.calibrateOff}
-                >
-                  {t.calibrate}
-                </button>
-              </div>
+            setBuildingsData(visibleBuildings);
+            setRoomsByBuilding(nextRoomsByBuilding);
+        } catch (err) {
+            setLoadError(err?.message || t.error);
+        } finally {
+            setLoading(false);
+        }
+    }, [canAccessRegion, isCentralAdmin, t.error]);
 
-              <div className="meta">
-                <span className="zoom-val">{Math.round(scale * 100)}%</span>
-                <span className="pan-hint">
-                  <Move size={13} /> {t.panHint}
-                </span>
-              </div>
-            </div>
+    useEffect(() => {
+        loadMapData();
+    }, [loadMapData]);
 
-            <div className="legend">
-              <span className="lg good" title={t.low} />
-              <span className="lg warn" title={t.mid} />
-              <span className="lg danger" title={t.high} />
-            </div>
-          </div>
 
-          <div
-            ref={canvasRef}
-            className={`map-canvas ${isDragging ? 'dragging' : ''} ${calibrateMode ? 'calibrating' : ''}`}
-            onMouseDown={(e) => {
-              if (calibrateMode) return;
-              onMouseDown(e);
-            }}
-            onMouseMove={onMouseMove}
-            onMouseUp={onMouseUp}
-            onMouseLeave={onMouseUp}
-            onWheel={onWheel}
-            onClick={(e) => {
-              if (!calibrateMode) {
-                setSelectedDormGroup(null);
-                return;
-              }
+    const dormStats = useMemo(() => {
+    const result = {};
 
-              const el = canvasRef.current;
-              if (!el) return;
+    const ensureBucket = (key, label) => {
+        if (!result[key]) {
+            result[key] = {
+                key,
+                labelHe: dormLabels[key]?.he || label || key,
+                labelEn: dormLabels[key]?.en || label || key,
 
-              const rect = el.getBoundingClientRect();
-              const cx = e.clientX - rect.left;
-              const cy = e.clientX - rect.top;
+                buildingsCount: 0,
+                roomsCount: 0,
 
-              const worldX = (cx - pan.x) / scale;
-              const worldY = (cy - pan.y) / scale;
+                // Raw capacity from Room.capacity
+                totalCapacity: 0,
 
-              const leftPct = (worldX / rect.width) * 100;
-              const topPct = (worldY / rect.height) * 100;
+                // Real occupancy from active BedAssignment, through Room.current_occupancy
+                occupiedBeds: 0,
 
-              console.log(`PIN => top: '${topPct.toFixed(1)}%', left: '${leftPct.toFixed(1)}%'`);
-            }}
-          >
-            <div
-              className="map-layer"
-              style={{
-                transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
-                transformOrigin: '0 0',
-              }}
-            >
-              <img className="map-img" src={MAP_SRC} alt="Technion dorms indexed map" draggable={false} />
+                // Calculated as totalCapacity - occupiedBeds
+                availableBeds: 0,
 
-              {accessibleDormGroups.map((group) => {
-                const pos = dormPositions[group.baseId];
-                if (!pos) return null;
+                // Extra useful counters
+                occupiedRooms: 0,
+                fullRooms: 0,
+                emptyRooms: 0,
 
-                const dormIds = applyTypeFilter(group.variants);
-                if (!dormIds.length) return null;
+                variants: new Set(),
+                regionIds: new Set(),
 
-                const stats = getStatsForDormIds(dormIds);
-                const base = getBaseRegion(group.baseId);
-                const occClass = occupancyClass(stats.occupancy);
-                const label = language === 'he' ? base?.name : base?.nameEn;
+                // Debug only: buildings that entered this dorm bucket
+                buildings: [],
+            };
+        }
 
-                return (
-                  <button
-                    key={group.baseId}
-                    className={`pin ${occClass} ${selectedDormGroup === group.baseId ? 'active' : ''}`}
-                    style={{ top: pos.top, left: pos.left }}
-                    onClick={(ev) => {
-                      ev.stopPropagation();
-                      setSelectedDormGroup(group.baseId);
-                    }}
-                    title={`${label} — ${t.occupancy}: ${stats.occupancy}%`}
-                    type="button"
-                  >
-                    <span className="pin-dot" />
-                    <span className="pin-name">{label}</span>
-                    <span className="pin-badge">{stats.occupancy}%</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
+        return result[key];
+    };
 
-        {selectedGroupObj && selectedStats && (
-          <div className="panel">
-            <div className="panel-head">
-              <div>
-                <div className="panel-title">
-                  {language === 'he'
-                    ? getBaseRegion(selectedGroupObj.baseId)?.name
-                    : getBaseRegion(selectedGroupObj.baseId)?.nameEn}
+    buildingsData.forEach((building) => {
+        const dormName = building.dorm_type_name || "";
+        const dormKey = resolveDormKey(dormName);
+
+        // Important debug:
+        // If this appears in the browser console, it means this building exists
+        // in the API, but Map.js does not know which map pin/dorm group it belongs to.
+        if (!dormKey) {
+            console.log("MAP SKIPPED BUILDING:", {
+                buildingId: building.id,
+                buildingNumber: building.number,
+                dormTypeName: dormName,
+                dormTypeCode: building.dorm_type_code,
+                region: building.region,
+                regionName: building.region_name,
+            });
+            return;
+        }
+
+        const bucket = ensureBucket(dormKey, dormName);
+
+        bucket.buildingsCount += 1;
+        bucket.variants.add(inferDormTypeVariant(dormName));
+        bucket.regionIds.add(String(building.region || ""));
+
+        bucket.buildings.push({
+            id: building.id,
+            number: building.number,
+            dormTypeName: dormName,
+            region: building.region,
+            regionName: building.region_name,
+        });
+
+        const rooms = roomsByBuilding[building.id] || [];
+        bucket.roomsCount += rooms.length;
+
+        rooms.forEach((room) => {
+            const capacity = Number(room.capacity || 0);
+
+            // This comes from the backend Room.current_occupancy property.
+            // It is based on active BedAssignment rows.
+            const occupied = Number(room.current_occupancy || 0);
+
+            const available = Math.max(capacity - occupied, 0);
+
+            bucket.totalCapacity += capacity;
+            bucket.occupiedBeds += occupied;
+            bucket.availableBeds += available;
+
+            if (occupied === 0) {
+                bucket.emptyRooms += 1;
+            }
+
+            if (occupied > 0) {
+                bucket.occupiedRooms += 1;
+            }
+
+            if (capacity > 0 && occupied >= capacity) {
+                bucket.fullRooms += 1;
+            }
+        });
+    });
+
+    Object.values(result).forEach((bucket) => {
+        bucket.availableBeds = Math.max(bucket.totalCapacity - bucket.occupiedBeds, 0);
+
+        bucket.occupancy =
+            bucket.totalCapacity > 0
+                ? Math.round((bucket.occupiedBeds / bucket.totalCapacity) * 100)
+                : 0;
+
+        bucket.roomOccupancy =
+            bucket.roomsCount > 0
+                ? Math.round((bucket.occupiedRooms / bucket.roomsCount) * 100)
+                : 0;
+    });
+
+    console.log("MAP DORM STATS:", result);
+
+    return result;
+}, [buildingsData, roomsByBuilding]);
+
+
+    const accessibleDorms = useMemo(() => {
+        return Object.values(dormStats)
+            .filter((dorm) => {
+                if (isCentralAdmin()) return true;
+                const regionIds = Array.from(dorm.regionIds).filter(Boolean);
+                return regionIds.some((regionId) => canAccessRegion(regionId));
+            })
+            .sort((a, b) => a.labelEn.localeCompare(b.labelEn));
+    }, [canAccessRegion, dormStats, isCentralAdmin]);
+
+    const filteredDorms = useMemo(() => {
+        return accessibleDorms.filter((dorm) => {
+            if (typeFilter === "all") return true;
+            return dorm.variants.has(typeFilter);
+        });
+    }, [accessibleDorms, typeFilter]);
+
+    const selectedDorm = selectedDormKey ? dormStats[selectedDormKey] : null;
+
+    return (
+        <div className="map-page" dir={language === "he" ? "rtl" : "ltr"}>
+            <div className="page-header">
+                <div className="titles">
+                    <h1>{t.title}</h1>
+                    <p>{t.subtitle}</p>
+                    <p className="map-path">
+                        <strong>{t.mapPath}:</strong> <code>{MAP_SRC}</code>
+                    </p>
+                    {!isCentralAdmin() && <p className="restricted-note">{t.restricted}</p>}
                 </div>
-                <div className="panel-sub">
-                  {t.dormTypeLabel}:{' '}
-                  {typeFilter === 'all'
-                    ? t.all
-                    : typeFilter === 'base'
-                    ? t.base
-                    : typeFilter === 'couples'
-                    ? t.couples
-                    : t.family}
+
+                <div className="filter">
+                    <div className="filter-label">
+                        <Filter size={16}/>
+                        <span>{t.filterTitle}</span>
+                    </div>
+                    <select
+                        value={typeFilter}
+                        onChange={(e) => {
+                            setTypeFilter(e.target.value);
+                            setSelectedDormKey(null);
+                            resetView();
+                        }}
+                    >
+                        <option value="all">{t.all}</option>
+                        <option value="base">{t.base}</option>
+                        <option value="couples">{t.couples}</option>
+                        <option value="family">{t.family}</option>
+                    </select>
                 </div>
-              </div>
-
-              <button className="close" onClick={() => setSelectedDormGroup(null)} type="button">
-                <X size={18} />
-              </button>
             </div>
 
-            <div className="kpis">
-              <div className="kpi">
-                <Building2 size={16} />
-                <span className="kpi-val">{selectedStats.buildings}</span>
-                <span className="kpi-lbl">{t.buildings}</span>
-              </div>
-              <div className="kpi">
-                <Home size={16} />
-                <span className="kpi-val">{selectedStats.rooms}</span>
-                <span className="kpi-lbl">{t.rooms}</span>
-              </div>
-              <div className="kpi">
-                <Users size={16} />
-                <span className="kpi-val">{selectedStats.students}</span>
-                <span className="kpi-lbl">{t.students}</span>
-              </div>
-            </div>
+            {loading ? (
+                <div className="state-box">{t.loading}</div>
+            ) : loadError ? (
+                <div className="state-box error">
+                    <AlertCircle size={18}/>
+                    <span>{loadError}</span>
+                </div>
+            ) : (
+                <div className="map-shell">
+                    <div className="map-canvas-wrap">
+                        <div className="controls">
+                            <div className="controls-row">
+                                <div className="controls-title">{t.zoom}</div>
 
-            <div className="occ">
-              <div className="occ-top">
-                <div className="occ-title">{t.occupancyDetails}</div>
-                <div className={`occ-pill ${occupancyClass(selectedStats.occupancy)}`}>{selectedStats.occupancy}%</div>
-              </div>
+                                <div className="btnrow">
+                                    <button className="iconbtn" onClick={zoomIn} type="button">
+                                        <ZoomIn size={16}/>
+                                    </button>
+                                    <button className="iconbtn" onClick={zoomOut} type="button">
+                                        <ZoomOut size={16}/>
+                                    </button>
+                                    <button className="iconbtn" onClick={resetView} type="button">
+                                        <RotateCcw size={16}/>
+                                    </button>
+                                    <button
+                                        className={`pillbtn ${calibrateMode ? "on" : ""}`}
+                                        type="button"
+                                        onClick={() => setCalibrateMode((v) => !v)}
+                                        title={calibrateMode ? t.calibrateOn : t.calibrateOff}
+                                    >
+                                        {t.calibrate}
+                                    </button>
+                                </div>
 
-              <div className="bar">
-                <div
-                  className={`fill ${occupancyClass(selectedStats.occupancy)}`}
-                  style={{ width: `${selectedStats.occupancy}%` }}
-                />
-                <div className="bar-label">{selectedStats.occupancy}%</div>
-              </div>
+                                <div className="meta">
+                                    <span className="zoom-val">{Math.round(scale * 100)}%</span>
+                                    <span className="pan-hint">
+                    <Move size={13}/> {t.panHint}
+                  </span>
+                                </div>
+                            </div>
 
-              <div className="occ-bottom">
-                <span>
-                  {t.capacity}: {selectedStats.capacity}
-                </span>
-                <span>
-                  {t.students}: {selectedStats.assigned}/{selectedStats.capacity}
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
+                            <button className="refresh-btn" type="button" onClick={loadMapData}>
+                                {t.refresh}
+                            </button>
+                        </div>
 
-      <style>{`
+                        <div
+                            ref={canvasRef}
+                            className={`map-canvas ${isDragging ? "dragging" : ""} ${calibrateMode ? "calibrating" : ""}`}
+                            onMouseDown={(e) => {
+                                if (calibrateMode) return;
+                                onMouseDown(e);
+                            }}
+                            onMouseMove={onMouseMove}
+                            onMouseUp={onMouseUp}
+                            onMouseLeave={onMouseUp}
+                            onWheel={onWheel}
+                            onClick={(e) => {
+                                if (!calibrateMode) {
+                                    setSelectedDormKey(null);
+                                    return;
+                                }
+
+                                const el = canvasRef.current;
+                                if (!el) return;
+
+                                const rect = el.getBoundingClientRect();
+                                const cx = e.clientX - rect.left;
+                                const cy = e.clientY - rect.top;
+
+                                const worldX = (cx - pan.x) / scale;
+                                const worldY = (cy - pan.y) / scale;
+
+                                const leftPct = (worldX / rect.width) * 100;
+                                const topPct = (worldY / rect.height) * 100;
+
+                                console.log(`PIN => top: '${topPct.toFixed(1)}%', left: '${leftPct.toFixed(1)}%'`);
+                            }}
+                        >
+                            <div
+                                className="map-layer"
+                                style={{
+                                    transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
+                                    transformOrigin: "0 0",
+                                }}
+                            >
+                                <img className="map-img" src={MAP_SRC} alt="Technion dorms indexed map"
+                                     draggable={false}/>
+
+                                {filteredDorms.map((dorm) => {
+                                    const pos = dormPositions[dorm.key];
+                                    if (!pos) return null;
+
+                                    const label = language === "he" ? dorm.labelHe : dorm.labelEn;
+                                    const occClass = occupancyClass(dorm.occupancy);
+
+                                    return (
+                                        <button
+                                            key={dorm.key}
+                                            className={`pin ${occClass} ${selectedDormKey === dorm.key ? "active" : ""}`}
+                                            style={{top: pos.top, left: pos.left}}
+                                            onClick={(ev) => {
+                                                ev.stopPropagation();
+                                                setSelectedDormKey(dorm.key);
+                                            }}
+                                            title={`${label} — ${t.occupancy}: ${dorm.occupancy}%`}
+                                            type="button"
+                                        >
+                                            <span className="pin-dot"/>
+                                            <span className="pin-name">{label}</span>
+                                            <span className="pin-badge">{dorm.occupancy}%</span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="panel">
+                        {selectedDorm ? (
+                            <>
+                                <div className="panel-head">
+                                    <div>
+                                        <div className="panel-title">
+                                            {language === "he" ? selectedDorm.labelHe : selectedDorm.labelEn}
+                                        </div>
+                                        <div className="panel-sub">
+                                            {t.dormTypeLabel}:{" "}
+                                            {typeFilter === "all"
+                                                ? t.all
+                                                : typeFilter === "base"
+                                                    ? t.base
+                                                    : typeFilter === "couples"
+                                                        ? t.couples
+                                                        : t.family}
+                                        </div>
+                                    </div>
+
+                                    <button className="close" onClick={() => setSelectedDormKey(null)} type="button">
+                                        <X size={18}/>
+                                    </button>
+                                </div>
+
+                                <div className="kpis">
+                                    <div className="kpi">
+                                        <Building2 size={16}/>
+                                        <span className="kpi-val">{selectedDorm.buildingsCount}</span>
+                                        <span className="kpi-lbl">{t.buildings}</span>
+                                    </div>
+                                    <div className="kpi">
+                                        <Home size={16}/>
+                                        <span className="kpi-val">{selectedDorm.roomsCount}</span>
+                                        <span className="kpi-lbl">{t.rooms}</span>
+                                    </div>
+                                </div>
+
+                                <div className="details-grid">
+                                    <div className="detail-card">
+                                        <span className="detail-label">{t.capacity}</span>
+                                        <span className="detail-value">{selectedDorm.totalCapacity}</span>
+                                    </div>
+                                    <div className="detail-card">
+                                        <span className="detail-label">{t.availableBeds}</span>
+                                        <span className="detail-value">{selectedDorm.availableBeds}</span>
+                                    </div>
+                                </div>
+
+                                <div className="occ">
+                                    <div className="occ-top">
+                                        <div className="occ-title">{t.occupancyDetails}</div>
+                                        <div className={`occ-pill ${occupancyClass(selectedDorm.occupancy)}`}>
+                                            {selectedDorm.occupancy}%
+                                        </div>
+                                    </div>
+
+                                    <div className="bar">
+                                        <div
+                                            className={`fill ${occupancyClass(selectedDorm.occupancy)}`}
+                                            style={{width: `${selectedDorm.occupancy}%`}}
+                                        />
+                                        <div className="bar-label">{selectedDorm.occupancy}%</div>
+                                    </div>
+
+                                    <div className="occ-bottom">
+                    <span>
+                      {t.capacity}: {selectedDorm.totalCapacity}
+                    </span>
+                                        <span>
+                      {t.availableBeds}: {selectedDorm.availableBeds}
+                    </span>
+                                    </div>
+                                </div>
+                            </>
+                        ) : (
+                            <div className="empty-panel">
+                                <div className="panel-title">{t.selectDorm}</div>
+                                <div className="panel-sub">{t.selectDormSub}</div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            <style>{`
         .map-page {
           padding: 26px;
           background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
@@ -521,7 +707,6 @@ export default function MapPage({ language = 'en' }) {
           font-weight: 800;
           margin: 0 0 6px;
           color: #1e293b;
-          letter-spacing: -0.02em;
         }
 
         .titles p {
@@ -531,12 +716,18 @@ export default function MapPage({ language = 'en' }) {
           font-weight: 600;
         }
 
+        .restricted-note {
+          margin-top: 8px !important;
+          color: #2563eb !important;
+        }
+
         .map-path {
           margin-top: 8px !important;
           font-size: 12px !important;
           color: #475569 !important;
           font-weight: 800 !important;
         }
+
         .map-path code {
           background: #f1f5f9;
           padding: 2px 6px;
@@ -572,15 +763,22 @@ export default function MapPage({ language = 'en' }) {
           font-size: 13px;
           background: white;
           color: #1e293b;
-          cursor: pointer;
-          transition: all 0.2s;
         }
 
-        select:hover { border-color: #94a3b8; }
-        select:focus {
-          outline: none;
-          border-color: #3b82f6;
-          box-shadow: 0 0 0 3px rgba(59,130,246,0.12);
+        .state-box {
+          background: white;
+          border-radius: 14px;
+          padding: 24px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+          color: #475569;
+          font-weight: 700;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+
+        .state-box.error {
+          color: #b91c1c;
         }
 
         .map-shell {
@@ -590,7 +788,9 @@ export default function MapPage({ language = 'en' }) {
         }
 
         @media (max-width: 1200px) {
-          .map-shell { grid-template-columns: 1fr; }
+          .map-shell {
+            grid-template-columns: 1fr;
+          }
         }
 
         .map-canvas-wrap {
@@ -603,27 +803,28 @@ export default function MapPage({ language = 'en' }) {
 
         .controls {
           position: absolute;
-          top: auto;
           bottom: 12px;
           left: 12px;
           z-index: 30;
           background: rgba(255,255,255,0.92);
           border-radius: 12px;
-          padding: 8px 8px;
+          padding: 8px;
           box-shadow: 0 6px 18px rgba(0,0,0,0.12);
           border: 1px solid #e2e8f0;
-          min-width: 165px;
-          backdrop-filter: blur(6px);
+          min-width: 180px;
         }
 
-        .controls-row { display: flex; flex-direction: column; gap: 6px; }
+        .controls-row {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
 
         .controls-title {
           font-size: 10px;
           font-weight: 900;
           color: #1e293b;
           text-transform: uppercase;
-          letter-spacing: 0.09em;
         }
 
         .btnrow {
@@ -639,15 +840,11 @@ export default function MapPage({ language = 'en' }) {
           padding: 6px;
           border-radius: 9px;
           cursor: pointer;
-          transition: all 0.15s;
           color: #475569;
           display: inline-flex;
           align-items: center;
           justify-content: center;
         }
-
-        .iconbtn:hover { background: #e2e8f0; transform: translateY(-1px); }
-        .iconbtn:active { transform: translateY(0); }
 
         .pillbtn {
           border: 1px solid #e2e8f0;
@@ -658,11 +855,12 @@ export default function MapPage({ language = 'en' }) {
           font-weight: 900;
           cursor: pointer;
           color: #334155;
-          transition: all 0.15s;
-          margin-left: 2px;
         }
-        .pillbtn:hover { background: #f8fafc; }
-        .pillbtn.on { border-color: #3b82f6; color: #1d4ed8; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
+
+        .pillbtn.on {
+          border-color: #3b82f6;
+          color: #1d4ed8;
+        }
 
         .meta {
           display: flex;
@@ -674,8 +872,6 @@ export default function MapPage({ language = 'en' }) {
           font-weight: 800;
         }
 
-        .zoom-val { color: #0f172a; }
-
         .pan-hint {
           display: inline-flex;
           align-items: center;
@@ -684,22 +880,18 @@ export default function MapPage({ language = 'en' }) {
           color: #475569;
         }
 
-        .legend {
-          display: flex;
-          gap: 6px;
-          align-items: center;
+        .refresh-btn {
+          margin-top: 8px;
+          width: 100%;
+          border: none;
+          background: #eff6ff;
+          color: #1d4ed8;
+          border-radius: 8px;
+          padding: 8px 10px;
+          font-size: 12px;
+          font-weight: 800;
+          cursor: pointer;
         }
-
-        .lg {
-          width: 12px;
-          height: 12px;
-          border-radius: 4px;
-          display: inline-block;
-          box-shadow: 0 1px 2px rgba(0,0,0,0.10);
-        }
-        .lg.good { background: #10b981; }
-        .lg.warn { background: #f59e0b; }
-        .lg.danger { background: #ef4444; }
 
         .map-canvas {
           position: relative;
@@ -711,15 +903,13 @@ export default function MapPage({ language = 'en' }) {
           background: #f8fafc;
         }
 
-        @media (max-width: 900px) {
-          .map-canvas {
-            height: calc(100vh - 280px);
-            min-height: 560px;
-          }
+        .map-canvas.dragging {
+          cursor: grabbing;
         }
 
-        .map-canvas.dragging { cursor: grabbing; }
-        .map-canvas.calibrating { cursor: crosshair; }
+        .map-canvas.calibrating {
+          cursor: crosshair;
+        }
 
         .map-layer {
           position: absolute;
@@ -762,7 +952,6 @@ export default function MapPage({ language = 'en' }) {
           transform: translate(-50%, -50%) scale(1.08);
         }
 
-        /* Bulletproof color mapping (prevents “all black”) */
         .pin.good { color: #10b981 !important; }
         .pin.warn { color: #f59e0b !important; }
         .pin.danger { color: #ef4444 !important; }
@@ -774,7 +963,6 @@ export default function MapPage({ language = 'en' }) {
           background: currentColor !important;
           border: 3px solid white;
           box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-          transition: all 0.2s;
         }
 
         .pin-name {
@@ -789,7 +977,6 @@ export default function MapPage({ language = 'en' }) {
           border: 1px solid #e2e8f0;
         }
 
-        /* FIXED: was "..pin-badge" in your paste; must be ".pin-badge" */
         .pin-badge {
           background: rgba(255,255,255,0.96);
           color: currentColor !important;
@@ -810,7 +997,7 @@ export default function MapPage({ language = 'en' }) {
           box-shadow: 0 1px 3px rgba(0,0,0,0.08);
           position: sticky;
           top: 16px;
-          height: fit-content;
+          min-height: 220px;
         }
 
         .panel-head {
@@ -835,6 +1022,12 @@ export default function MapPage({ language = 'en' }) {
           font-weight: 800;
         }
 
+        .empty-panel {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+
         .close {
           border: none;
           background: #f1f5f9;
@@ -842,13 +1035,11 @@ export default function MapPage({ language = 'en' }) {
           border-radius: 10px;
           cursor: pointer;
           color: #64748b;
-          transition: all 0.15s;
         }
-        .close:hover { background: #e2e8f0; color: #0f172a; }
 
         .kpis {
           display: grid;
-          grid-template-columns: repeat(3, 1fr);
+          grid-template-columns: repeat(2, 1fr);
           gap: 10px;
           margin-bottom: 16px;
         }
@@ -864,7 +1055,9 @@ export default function MapPage({ language = 'en' }) {
           border: 1px solid #e2e8f0;
         }
 
-        .kpi svg { color: #3b82f6; }
+        .kpi svg {
+          color: #3b82f6;
+        }
 
         .kpi-val {
           font-size: 22px;
@@ -877,7 +1070,36 @@ export default function MapPage({ language = 'en' }) {
           color: #64748b;
           font-weight: 900;
           text-transform: uppercase;
-          letter-spacing: 0.06em;
+          text-align: center;
+        }
+
+        .details-grid {
+          display: grid;
+          grid-template-columns: repeat(2, 1fr);
+          gap: 10px;
+          margin-bottom: 16px;
+        }
+
+        .detail-card {
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          border-radius: 12px;
+          padding: 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+
+        .detail-label {
+          font-size: 11px;
+          font-weight: 800;
+          color: #64748b;
+        }
+
+        .detail-value {
+          font-size: 20px;
+          font-weight: 900;
+          color: #0f172a;
         }
 
         .occ {
@@ -899,7 +1121,6 @@ export default function MapPage({ language = 'en' }) {
           font-weight: 950;
           color: #0f172a;
           text-transform: uppercase;
-          letter-spacing: 0.08em;
         }
 
         .occ-pill {
@@ -920,7 +1141,6 @@ export default function MapPage({ language = 'en' }) {
           border-radius: 999px;
           overflow: hidden;
           margin-bottom: 10px;
-          box-shadow: inset 0 1px 2px rgba(0,0,0,0.08);
           position: relative;
         }
 
@@ -943,9 +1163,6 @@ export default function MapPage({ language = 'en' }) {
           font-size: 10px;
           font-weight: 950;
           color: #0f172a;
-          text-shadow: 0 1px 0 rgba(255,255,255,0.85);
-          pointer-events: none;
-          user-select: none;
         }
 
         .occ-bottom {
@@ -954,8 +1171,10 @@ export default function MapPage({ language = 'en' }) {
           font-size: 11px;
           color: #64748b;
           font-weight: 800;
+          gap: 10px;
+          flex-wrap: wrap;
         }
       `}</style>
-    </div>
-  );
+        </div>
+    );
 }

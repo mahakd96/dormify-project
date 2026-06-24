@@ -41,6 +41,18 @@ urlpatterns = [
     path('allocation/results/', views.allocation_results, name='allocation-results'),
     path('analysis/', views.analysis_data, name='analysis'),
 
+    # What-If Building Inactivation
+    path(
+        'what-if/building-inactivation/simulate/',
+        views.what_if_building_inactivation_simulate,
+        name='what-if-building-inactivation-simulate'
+    ),
+    path(
+        'what-if/building-inactivation/confirm/',
+        views.what_if_building_inactivation_confirm,
+        name='what-if-building-inactivation-confirm'
+    ),
+
     # Manual room assignment actions used by BuildingsPage
     path('room-assignments/assign/', views.assign_student_room, name='assign-student-room'),
     path('room-assignments/move/', views.move_student_room, name='move-student-room'),

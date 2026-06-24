@@ -660,6 +660,13 @@ class TransferSerializer(serializers.ModelSerializer):
     from_room_name = serializers.CharField(source='from_room.name', read_only=True)
     to_room_name = serializers.CharField(source='to_room.name', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
+    requested_by_region_name = serializers.CharField(source='requested_by.region.name', read_only=True)
+
+    from_building_number = serializers.IntegerField(source='from_room.apartment.building.number', read_only=True)
+    from_apartment_number = serializers.CharField(source='from_room.apartment.number', read_only=True)
+
+    to_building_number = serializers.IntegerField(source='to_room.apartment.building.number', read_only=True)
+    to_apartment_number = serializers.CharField(source='to_room.apartment.number', read_only=True)
     requested_by_name = serializers.SerializerMethodField()
     reviewed_by_name = serializers.SerializerMethodField()
 
@@ -670,18 +677,29 @@ class TransferSerializer(serializers.ModelSerializer):
             'student',
             'student_name',
             'student_id_number',
+
             'from_room',
             'from_room_name',
+            'from_building_number',
+            'from_apartment_number',
+
             'to_room',
             'to_room_name',
+            'to_building_number',
+            'to_apartment_number',
+
             'reason',
             'status',
             'status_display',
+
             'requested_by',
             'requested_by_name',
+            'requested_by_region_name',
+
             'reviewed_by',
             'reviewed_by_name',
             'reviewed_at',
+
             'rejection_reason',
             'movement_request',
             'created_at',
