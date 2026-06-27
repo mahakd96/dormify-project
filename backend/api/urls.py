@@ -10,6 +10,8 @@ router = DefaultRouter()
 router.register(r'regions', views.RegionViewSet, basename='region')
 router.register(r'dorm-types', views.DormTypeViewSet, basename='dorm-type')
 router.register(r'buildings', views.BuildingViewSet, basename='building')
+router.register(r'apartments', views.ApartmentViewSet, basename='apartment')
+router.register(r'rooms', views.RoomViewSet, basename='room')
 router.register(r'students', views.StudentViewSet, basename='student')
 router.register(r'transfers', views.TransferViewSet, basename='transfer')
 
@@ -51,6 +53,17 @@ urlpatterns = [
         'what-if/building-inactivation/confirm/',
         views.what_if_building_inactivation_confirm,
         name='what-if-building-inactivation-confirm'
+    ),
+    # What-If Availability Control: buildings, apartments, rooms
+    path(
+        'what-if/availability/simulate/',
+        views.what_if_availability_simulate,
+        name='what-if-availability-simulate'
+    ),
+    path(
+        'what-if/availability/confirm/',
+        views.what_if_availability_confirm,
+        name='what-if-availability-confirm'
     ),
 
     # Manual room assignment actions used by BuildingsPage

@@ -559,6 +559,56 @@ class BuildingViewSet(viewsets.ModelViewSet):
 
 
 
+class ApartmentViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = ApartmentSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = Apartment.objects.select_related(
+            'building',
+            'building__dorm_type',
+            'building__dorm_type__region'
+        ).all()
+
+        user = self.request.user
+
+        if not user.is_central_admin and user.region_id:
+            queryset = queryset.filter(
+                building__dorm_type__region=user.region
+            )
+
+        return queryset.order_by(
+            'building__number',
+            'number'
+        )
+
+
+class RoomViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = RoomSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = Room.objects.select_related(
+            'apartment',
+            'apartment__building',
+            'apartment__building__dorm_type',
+            'apartment__building__dorm_type__region'
+        ).all()
+
+        user = self.request.user
+
+        if not user.is_central_admin and user.region_id:
+            queryset = queryset.filter(
+                apartment__building__dorm_type__region=user.region
+            )
+
+        return queryset.order_by(
+            'apartment__building__number',
+            'apartment__number',
+            'name'
+        )
+
+
 class StudentViewSet(viewsets.ModelViewSet):
     serializer_class = StudentSerializer
     permission_classes = [IsAuthenticated]
@@ -1687,12 +1737,106 @@ def analysis_data(request):
         .order_by('housing_type')
     )
 
-    students_by_region = list(
-        students_qs
-        .values('accepted_dorm_type__region__name')
-        .annotate(count=Count('id'))
-        .order_by('accepted_dorm_type__region__name')
-    )
+    # =========================
+    # Students by region
+    # Source: Student data only.
+    # Primary source: accepted_dorm_type.region
+    # Fallback source: current_dorm_type text, resolved through DormType/code/name aliases.
+    # This prevents "לא ידוע" when the student has dorm information but accepted_dorm_type is missing.
+    # =========================
+
+    def _normalize_for_region_match(value):
+        return re.sub(r'\s+', '', safe_str(value)).lower()
+
+    dorm_types_for_region = DormType.objects.select_related('region').all()
+
+    region_by_dorm_name = {}
+    region_by_dorm_code = {}
+
+    for dorm_type in dorm_types_for_region:
+        if not dorm_type.region:
+            continue
+
+        if dorm_type.name:
+            region_by_dorm_name[_normalize_for_region_match(dorm_type.name)] = dorm_type.region.name
+
+        if dorm_type.code is not None:
+            region_by_dorm_code[str(dorm_type.code)] = dorm_type.region.name
+
+    def _resolve_region_name_from_student_text(value):
+        raw_value = safe_str(value)
+
+        if not raw_value:
+            return None
+
+        normalized_value = _normalize_for_region_match(raw_value)
+
+        # Example: "2", "02", "2.0"
+        code_int = safe_int(raw_value, default=None)
+        if code_int is not None:
+            region_name = region_by_dorm_code.get(str(code_int))
+            if region_name:
+                return region_name
+
+        # Exact dorm name match
+        region_name = region_by_dorm_name.get(normalized_value)
+        if region_name:
+            return region_name
+
+        # Legacy/name aliases from the Excel import mapping.
+        alias_code = EXCEL_DORM_NAME_TO_OFFICIAL_CODE.get(normalized_value)
+        if alias_code is not None:
+            region_name = region_by_dorm_code.get(str(alias_code))
+            if region_name:
+                return region_name
+
+        # Partial match, for values like "מעונות קנדה - בניין 12"
+        for dorm_name_normalized, region_name in region_by_dorm_name.items():
+            if dorm_name_normalized and dorm_name_normalized in normalized_value:
+                return region_name
+
+        for alias_name_normalized, alias_code in EXCEL_DORM_NAME_TO_OFFICIAL_CODE.items():
+            if alias_name_normalized and alias_name_normalized in normalized_value:
+                region_name = region_by_dorm_code.get(str(alias_code))
+                if region_name:
+                    return region_name
+
+        return None
+
+    students_by_region_counts = {}
+
+    for student in students_qs.select_related(
+            'accepted_dorm_type',
+            'accepted_dorm_type__region',
+    ):
+        region_name = None
+
+        if student.accepted_dorm_type and student.accepted_dorm_type.region:
+            region_name = student.accepted_dorm_type.region.name
+
+        if not region_name:
+            region_name = _resolve_region_name_from_student_text(student.current_dorm_type)
+
+        if not region_name:
+            region_name = _resolve_region_name_from_student_text(student.current_address)
+
+        # Do NOT add "לא ידוע" to the graph.
+        # If there is truly no dorm data at all, skip it instead of showing a fake category.
+        if not region_name:
+            continue
+
+        students_by_region_counts[region_name] = students_by_region_counts.get(region_name, 0) + 1
+
+    students_by_region = [
+        {
+            'region': region_name,
+            'count': count,
+        }
+        for region_name, count in sorted(
+            students_by_region_counts.items(),
+            key=lambda item: item[0]
+        )
+    ]
 
     # =========================
     # Transfers distributions
@@ -2216,6 +2360,568 @@ def what_if_building_inactivation_confirm(request):
             'message': 'Building inactivation confirmed and movement requests were created.',
             'inactivated_buildings': inactivate_buildings,
             'selected_building_ids': building_ids,
+            'affected_students_count': len(affected_assignments),
+            'created_requests': created_count,
+            'skipped_existing_requests': skipped_existing_count,
+            'created_request_ids': created_request_ids,
+        }, status=status.HTTP_200_OK)
+
+    except ValueError as e:
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response({
+            'success': False,
+            'error': str(e),
+            'error_type': e.__class__.__name__,
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def _what_if_get_targets_from_request(request):
+    target_type = request.data.get('target_type') or 'building'
+    target_ids = request.data.get('target_ids') or []
+
+    if target_type not in ['building', 'apartment', 'room']:
+        raise ValueError('target_type must be one of: building, apartment, room.')
+
+    if not isinstance(target_ids, list) or len(target_ids) == 0:
+        raise ValueError('target_ids must be a non-empty list.')
+
+    target_ids = list(set(target_ids))
+
+    if target_type == 'building':
+        targets = Building.objects.filter(id__in=target_ids).select_related(
+            'dorm_type',
+            'dorm_type__region'
+        )
+    elif target_type == 'apartment':
+        targets = Apartment.objects.filter(id__in=target_ids).select_related(
+            'building',
+            'building__dorm_type',
+            'building__dorm_type__region'
+        )
+    else:
+        targets = Room.objects.filter(id__in=target_ids).select_related(
+            'apartment',
+            'apartment__building',
+            'apartment__building__dorm_type',
+            'apartment__building__dorm_type__region'
+        )
+
+    if targets.count() != len(target_ids):
+        raise ValueError('One or more selected targets were not found.')
+
+    return target_type, target_ids, targets
+
+
+def _what_if_user_can_access_targets(user, target_type, targets):
+    if user.is_central_admin:
+        return True
+
+    if not user.region_id:
+        return False
+
+    if target_type == 'building':
+        return not targets.exclude(dorm_type__region=user.region).exists()
+
+    if target_type == 'apartment':
+        return not targets.exclude(building__dorm_type__region=user.region).exists()
+
+    return not targets.exclude(apartment__building__dorm_type__region=user.region).exists()
+
+
+def _what_if_get_affected_assignments_for_targets(target_type, target_ids):
+    filters = {
+        'status': BedAssignment.Status.ACTIVE,
+    }
+
+    if target_type == 'building':
+        filters['bed__room__apartment__building_id__in'] = target_ids
+    elif target_type == 'apartment':
+        filters['bed__room__apartment_id__in'] = target_ids
+    else:
+        filters['bed__room_id__in'] = target_ids
+
+    return BedAssignment.objects.filter(**filters).select_related(
+        'student',
+        'student__accepted_dorm_type',
+        'bed',
+        'bed__room',
+        'bed__room__apartment',
+        'bed__room__apartment__building',
+        'bed__room__apartment__building__dorm_type',
+        'bed__room__apartment__building__dorm_type__region',
+    ).order_by(
+        'bed__room__apartment__building__number',
+        'bed__room__apartment__number',
+        'bed__room__name',
+        'bed__label',
+    )
+
+
+def _what_if_get_snapshot_region_for_targets(target_type, targets):
+    if target_type == 'building':
+        region_ids = list(
+            targets.values_list('dorm_type__region_id', flat=True).distinct()
+        )
+    elif target_type == 'apartment':
+        region_ids = list(
+            targets.values_list('building__dorm_type__region_id', flat=True).distinct()
+        )
+    else:
+        region_ids = list(
+            targets.values_list(
+                'apartment__building__dorm_type__region_id',
+                flat=True
+            ).distinct()
+        )
+
+    region_ids = [region_id for region_id in region_ids if region_id]
+
+    if len(region_ids) == 1:
+        return Region.objects.filter(pk=region_ids[0]).first()
+
+    return None
+
+
+def _what_if_analysis_snapshot_generic(
+    region=None,
+    excluded_building_ids=None,
+    excluded_apartment_ids=None,
+    excluded_room_ids=None,
+):
+    excluded_building_ids = excluded_building_ids or []
+    excluded_apartment_ids = excluded_apartment_ids or []
+    excluded_room_ids = excluded_room_ids or []
+
+    buildings_qs = Building.objects.filter(
+        is_active=True
+    ).select_related(
+        'dorm_type',
+        'dorm_type__region'
+    )
+
+    rooms_qs = Room.objects.filter(
+        is_active=True,
+        apartment__is_active=True,
+        apartment__building__is_active=True,
+    )
+
+    assignments_qs = BedAssignment.objects.filter(
+        status=BedAssignment.Status.ACTIVE,
+        bed__room__is_active=True,
+        bed__room__apartment__is_active=True,
+        bed__room__apartment__building__is_active=True,
+    )
+
+    students_qs = Student.objects.all()
+
+    if region:
+        buildings_qs = buildings_qs.filter(
+            dorm_type__region=region
+        )
+        rooms_qs = rooms_qs.filter(
+            apartment__building__dorm_type__region=region
+        )
+        assignments_qs = assignments_qs.filter(
+            bed__room__apartment__building__dorm_type__region=region
+        )
+        students_qs = students_qs.filter(
+            accepted_dorm_type__region=region
+        )
+
+    if excluded_building_ids:
+        buildings_qs = buildings_qs.exclude(
+            id__in=excluded_building_ids
+        )
+        rooms_qs = rooms_qs.exclude(
+            apartment__building_id__in=excluded_building_ids
+        )
+        assignments_qs = assignments_qs.exclude(
+            bed__room__apartment__building_id__in=excluded_building_ids
+        )
+
+    if excluded_apartment_ids:
+        rooms_qs = rooms_qs.exclude(
+            apartment_id__in=excluded_apartment_ids
+        )
+        assignments_qs = assignments_qs.exclude(
+            bed__room__apartment_id__in=excluded_apartment_ids
+        )
+
+    if excluded_room_ids:
+        rooms_qs = rooms_qs.exclude(
+            id__in=excluded_room_ids
+        )
+        assignments_qs = assignments_qs.exclude(
+            bed__room_id__in=excluded_room_ids
+        )
+
+    total_students = students_qs.count()
+    assigned_students = assignments_qs.values('student_id').distinct().count()
+    unassigned_students = max(total_students - assigned_students, 0)
+
+    total_capacity = sum(
+        rooms_qs.values_list('capacity', flat=True)
+    )
+
+    occupied_beds = assignments_qs.values('bed_id').distinct().count()
+    available_beds = max(total_capacity - occupied_beds, 0)
+
+    occupancy_rate = 0
+    if total_capacity > 0:
+        occupancy_rate = round((occupied_beds / total_capacity) * 100, 2)
+
+    return {
+        'total_students': total_students,
+        'assigned_students': assigned_students,
+        'unassigned_students': unassigned_students,
+        'total_buildings': buildings_qs.count(),
+        'total_rooms': rooms_qs.count(),
+        'total_capacity': total_capacity,
+        'total_beds': total_capacity,
+        'occupied_beds': occupied_beds,
+        'assigned_beds': occupied_beds,
+        'available_beds': available_beds,
+        'occupancy_rate': occupancy_rate,
+    }
+
+
+def _what_if_lost_resources_for_targets(target_type, target_ids):
+    if target_type == 'building':
+        lost_apartments_qs = Apartment.objects.filter(
+            building_id__in=target_ids,
+            is_active=True,
+        )
+
+        lost_rooms_qs = Room.objects.filter(
+            apartment__building_id__in=target_ids,
+            is_active=True,
+            apartment__is_active=True,
+        )
+
+        lost_beds_qs = Bed.objects.filter(
+            room__apartment__building_id__in=target_ids,
+            room__is_active=True,
+            room__apartment__is_active=True,
+        )
+
+    elif target_type == 'apartment':
+        lost_apartments_qs = Apartment.objects.filter(
+            id__in=target_ids,
+            is_active=True,
+        )
+
+        lost_rooms_qs = Room.objects.filter(
+            apartment_id__in=target_ids,
+            is_active=True,
+            apartment__is_active=True,
+        )
+
+        lost_beds_qs = Bed.objects.filter(
+            room__apartment_id__in=target_ids,
+            room__is_active=True,
+            room__apartment__is_active=True,
+        )
+
+    else:
+        lost_rooms_qs = Room.objects.filter(
+            id__in=target_ids,
+            is_active=True,
+            apartment__is_active=True,
+        )
+
+        lost_apartments_qs = Apartment.objects.filter(
+            rooms__id__in=target_ids
+        ).distinct()
+
+        lost_beds_qs = Bed.objects.filter(
+            room_id__in=target_ids,
+            room__is_active=True,
+            room__apartment__is_active=True,
+        )
+
+    lost_rooms = lost_rooms_qs.count()
+    lost_capacity = sum(
+        lost_rooms_qs.values_list('capacity', flat=True)
+    )
+
+    return {
+        'lost_apartments': lost_apartments_qs.count(),
+        'lost_rooms': lost_rooms,
+        'lost_capacity': lost_capacity,
+        'lost_beds': lost_beds_qs.count(),
+    }
+
+
+def _what_if_format_targets(target_type, targets):
+    formatted = []
+
+    for target in targets:
+        if target_type == 'building':
+            dorm_type = target.dorm_type
+            region = dorm_type.region if dorm_type else None
+
+            formatted.append({
+                'id': target.id,
+                'target_type': 'building',
+                'label': f'Building {target.number}',
+                'number': target.number,
+                'building_id': target.id,
+                'building_number': target.number,
+                'dorm_type_id': dorm_type.id if dorm_type else None,
+                'dorm_type_name': dorm_type.name if dorm_type else '',
+                'region_id': region.id if region else '',
+                'region_name': region.name if region else '',
+                'is_active': target.is_active,
+            })
+
+        elif target_type == 'apartment':
+            building = target.building
+            dorm_type = building.dorm_type if building else None
+            region = dorm_type.region if dorm_type else None
+
+            formatted.append({
+                'id': target.id,
+                'target_type': 'apartment',
+                'label': f'Building {building.number} / Apartment {target.number}',
+                'number': target.number,
+                'apartment_id': target.id,
+                'apartment_number': target.number,
+                'building_id': building.id if building else None,
+                'building_number': building.number if building else '',
+                'dorm_type_id': dorm_type.id if dorm_type else None,
+                'dorm_type_name': dorm_type.name if dorm_type else '',
+                'region_id': region.id if region else '',
+                'region_name': region.name if region else '',
+                'is_active': target.is_active,
+            })
+
+        else:
+            apartment = target.apartment
+            building = apartment.building if apartment else None
+            dorm_type = building.dorm_type if building else None
+            region = dorm_type.region if dorm_type else None
+
+            formatted.append({
+                'id': target.id,
+                'target_type': 'room',
+                'label': f'Building {building.number} / Apartment {apartment.number} / Room {target.name}',
+                'room_id': target.id,
+                'room_name': target.name,
+                'apartment_id': apartment.id if apartment else None,
+                'apartment_number': apartment.number if apartment else '',
+                'building_id': building.id if building else None,
+                'building_number': building.number if building else '',
+                'dorm_type_id': dorm_type.id if dorm_type else None,
+                'dorm_type_name': dorm_type.name if dorm_type else '',
+                'region_id': region.id if region else '',
+                'region_name': region.name if region else '',
+                'capacity': target.capacity,
+                'is_active': target.is_active,
+            })
+
+    return formatted
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def what_if_availability_simulate(request):
+    """
+    Generic What-if simulation for buildings, apartments, and rooms.
+    This endpoint does NOT change the database.
+    """
+    try:
+        target_type, target_ids, targets = _what_if_get_targets_from_request(request)
+
+        if not _what_if_user_can_access_targets(request.user, target_type, targets):
+            return Response({
+                'success': False,
+                'error': 'אין הרשאה לבצע סימולציה עבור אחד או יותר מהפריטים שנבחרו.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        affected_assignments = _what_if_get_affected_assignments_for_targets(
+            target_type,
+            target_ids
+        )
+
+        affected_students = [
+            _what_if_format_student_from_assignment(assignment)
+            for assignment in affected_assignments
+        ]
+
+        snapshot_region = _what_if_get_snapshot_region_for_targets(
+            target_type,
+            targets
+        )
+
+        excluded_building_ids = target_ids if target_type == 'building' else []
+        excluded_apartment_ids = target_ids if target_type == 'apartment' else []
+        excluded_room_ids = target_ids if target_type == 'room' else []
+
+        analysis_before = _what_if_analysis_snapshot_generic(
+            region=snapshot_region
+        )
+
+        analysis_after = _what_if_analysis_snapshot_generic(
+            region=snapshot_region,
+            excluded_building_ids=excluded_building_ids,
+            excluded_apartment_ids=excluded_apartment_ids,
+            excluded_room_ids=excluded_room_ids,
+        )
+
+        lost_resources = _what_if_lost_resources_for_targets(
+            target_type,
+            target_ids
+        )
+
+        return Response({
+            'success': True,
+            'scenario': f'{target_type}_availability_change',
+            'target_type': target_type,
+            'target_ids': target_ids,
+            'selected_targets': _what_if_format_targets(target_type, targets),
+
+            'summary': {
+                'affected_students_count': len(affected_students),
+                'students_without_valid_placement': len(affected_students),
+
+                'male_count': sum(
+                    1 for student in affected_students
+                    if student.get('gender') == Student.Gender.MALE
+                ),
+                'female_count': sum(
+                    1 for student in affected_students
+                    if student.get('gender') == Student.Gender.FEMALE
+                ),
+
+                **lost_resources,
+            },
+
+            'breakdowns': {
+                'gender': _what_if_count_by_value(affected_students, 'gender'),
+                'requested_religion': _what_if_count_by_value(affected_students, 'requested_religion'),
+                'religious': _what_if_count_by_value(affected_students, 'religious'),
+                'placement_sector': _what_if_count_by_value(affected_students, 'placement_sector'),
+                'category': _what_if_count_by_value(affected_students, 'category'),
+                'housing_type': _what_if_count_by_value(affected_students, 'housing_type'),
+            },
+
+            'analysis_before': analysis_before,
+            'analysis_after': analysis_after,
+            'affected_students': affected_students,
+        }, status=status.HTTP_200_OK)
+
+    except ValueError as e:
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response({
+            'success': False,
+            'error': str(e),
+            'error_type': e.__class__.__name__,
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def what_if_availability_confirm(request):
+    """
+    Confirm generic availability change for buildings, apartments, or rooms.
+    Inactivation affects the database by setting is_active=False.
+    It also creates pending MovementRequest rows for affected active assignments.
+    """
+    try:
+        if not request.user.is_boss:
+            return Response({
+                'success': False,
+                'error': 'רק מנהל יכול לאשר שינוי זמינות ויצירת בקשות העברה.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        target_type, target_ids, targets = _what_if_get_targets_from_request(request)
+
+        if not _what_if_user_can_access_targets(request.user, target_type, targets):
+            return Response({
+                'success': False,
+                'error': 'אין הרשאה לשנות זמינות עבור אחד או יותר מהפריטים שנבחרו.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        action = request.data.get('action') or 'inactivate'
+
+        if action not in ['inactivate', 'reactivate']:
+            raise ValueError('action must be inactivate or reactivate.')
+
+        reason = request.data.get('reason') or 'Availability changed.'
+
+        affected_assignments = list(
+            _what_if_get_affected_assignments_for_targets(
+                target_type,
+                target_ids
+            )
+        )
+
+        created_count = 0
+        skipped_existing_count = 0
+        created_request_ids = []
+
+        with transaction.atomic():
+            new_active_value = action == 'reactivate'
+
+            if target_type == 'building':
+                Building.objects.filter(id__in=target_ids).update(
+                    is_active=new_active_value
+                )
+            elif target_type == 'apartment':
+                Apartment.objects.filter(id__in=target_ids).update(
+                    is_active=new_active_value
+                )
+            else:
+                Room.objects.filter(id__in=target_ids).update(
+                    is_active=new_active_value
+                )
+
+            if action == 'inactivate':
+                for assignment in affected_assignments:
+                    existing_request = MovementRequest.objects.filter(
+                        student=assignment.student,
+                        from_assignment=assignment,
+                        status=MovementRequest.Status.PENDING,
+                    ).first()
+
+                    if existing_request:
+                        skipped_existing_count += 1
+                        continue
+
+                    movement_request = MovementRequest(
+                        student=assignment.student,
+                        from_assignment=assignment,
+                        to_bed=None,
+                        movement_type=MovementRequest.MovementType.INTERNAL,
+                        status=MovementRequest.Status.PENDING,
+                        reason=reason,
+                        requested_by=request.user,
+                    )
+
+                    movement_request.full_clean()
+                    movement_request.save()
+
+                    created_count += 1
+                    created_request_ids.append(movement_request.id)
+
+        return Response({
+            'success': True,
+            'message': 'Availability change confirmed.',
+            'target_type': target_type,
+            'target_ids': target_ids,
+            'action': action,
             'affected_students_count': len(affected_assignments),
             'created_requests': created_count,
             'skipped_existing_requests': skipped_existing_count,
