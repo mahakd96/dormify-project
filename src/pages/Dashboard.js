@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { Users, Building2, Home, CheckCircle, Clock, ArrowLeftRight, Star, Upload, Activity } from 'lucide-react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+
 import { api } from '../services/api';
 
 function Dashboard({ language }) {
@@ -13,24 +13,32 @@ function Dashboard({ language }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [statsRes, transfersRes, batchesRes] = await Promise.all([
-          api.get('/api/statistics/'),
+  const fetchData = async () => {
+    try {
+      const statsRes = await api.get('/api/statistics/');
+      setStats(statsRes.data);
+
+      if (isCentralAdmin()) {
+        const [transfersRes, batchesRes] = await Promise.all([
           api.get('/api/transfers/'),
           api.get('/api/batches/'),
         ]);
-        setStats(statsRes.data);
+
         setTransfers(transfersRes.data?.results || transfersRes.data || []);
         setBatches(batchesRes.data?.batches || []);
-      } catch (err) {
-        console.error('Dashboard fetch error:', err);
-      } finally {
-        setLoading(false);
+      } else {
+        setTransfers([]);
+        setBatches([]);
       }
-    };
-    fetchData();
-  }, []);
+    } catch (err) {
+      console.error('Dashboard fetch error:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  fetchData();
+}, []);
 
   const t = {
     he: {
@@ -246,75 +254,83 @@ inactiveBuildings: 'Inactive Buildings',
         </div>
       </div>
 
-      {/* Bottom section - 2 columns */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '24px' }}>
+        {isCentralAdmin() && (
+  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '24px' }}>
 
-        {/* Recent Transfers */}
-        <div className="chart-card">
-          <h3>{t.recentTransfers}</h3>
-          {transfers.length > 0 ? (
-            <div className="transfers-list">
-              {transfers.slice(0, 5).map(transfer => (
-                <div key={transfer.id} className="transfer-item">
-                  <div className="transfer-icon"><ArrowLeftRight size={16} /></div>
-                  <div className="transfer-info">
-                    <span className="student-name">
-                      {transfer.student?.first_name} {transfer.student?.last_name}
-                    </span>
-                    <span className="transfer-details">{transfer.reason}</span>
-                  </div>
-                  <span
-                    className="transfer-status"
-                    style={{
-                        background: getStatusColor(transfer.status).bg,
-                        color: getStatusColor(transfer.status).color,
-                                }}
-                        >
-                    {getStatusLabel(transfer.status)}
-                    </span>
-                </div>
-              ))}
+    {/* Recent Transfers */}
+    <div className="chart-card">
+      <h3>{t.recentTransfers}</h3>
+      {transfers.length > 0 ? (
+        <div className="transfers-list">
+          {transfers.slice(0, 5).map(transfer => (
+            <div key={transfer.id} className="transfer-item">
+              <div className="transfer-icon"><ArrowLeftRight size={16} /></div>
+              <div className="transfer-info">
+                <span className="student-name">
+                  {transfer.student?.first_name} {transfer.student?.last_name}
+                </span>
+                <span className="transfer-details">{transfer.reason}</span>
+              </div>
+              <span
+                className="transfer-status"
+                style={{
+                  background: getStatusColor(transfer.status).bg,
+                  color: getStatusColor(transfer.status).color,
+                }}
+              >
+                {getStatusLabel(transfer.status)}
+              </span>
             </div>
-          ) : (
-            <p className="no-data">{t.noData}</p>
-          )}
+          ))}
         </div>
+      ) : (
+        <p className="no-data">{t.noData}</p>
+      )}
+    </div>
 
-        {/* Recent Activity */}
-        <div className="chart-card">
-          <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Activity size={18} color="#3b82f6" />
-            {t.recentActivity}
-          </h3>
-          {activity.length > 0 ? (
-            <div className="transfers-list">
-              {activity.map(item => (
-                <div key={item.id} className="transfer-item">
-                  <div className="transfer-icon" style={{ background: item.bg, color: item.color }}>
-                    <item.icon size={16} />
-                  </div>
-                  <div className="transfer-info">
-                    <span className="student-name">{item.text}</span>
-                    <span className="transfer-details">{item.sub} · {formatTime(item.time)}</span>
-                  </div>
-                  {item.status && (
-                    <span style={{
-                      padding: '3px 10px', borderRadius: '20px', fontSize: '11px', fontWeight: '500',
-                      background: getStatusColor(item.status).bg,
-                      color: getStatusColor(item.status).color,
-                      whiteSpace: 'nowrap'
-                    }}>
-                      {getStatusLabel(item.status)}
-                    </span>
-                  )}
-                </div>
-              ))}
+    {/* Recent Activity */}
+    <div className="chart-card">
+      <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <Activity size={18} color="#3b82f6" />
+        {t.recentActivity}
+      </h3>
+      {activity.length > 0 ? (
+        <div className="transfers-list">
+          {activity.map(item => (
+            <div key={item.id} className="transfer-item">
+              <div className="transfer-icon" style={{ background: item.bg, color: item.color }}>
+                <item.icon size={16} />
+              </div>
+              <div className="transfer-info">
+                <span className="student-name">{item.text}</span>
+                <span className="transfer-details">{item.sub} · {formatTime(item.time)}</span>
+              </div>
+              {item.status && (
+                <span style={{
+                  padding: '3px 10px',
+                  borderRadius: '20px',
+                  fontSize: '11px',
+                  fontWeight: '500',
+                  background: getStatusColor(item.status).bg,
+                  color: getStatusColor(item.status).color,
+                  whiteSpace: 'nowrap'
+                }}>
+                  {getStatusLabel(item.status)}
+                </span>
+              )}
             </div>
-          ) : (
-            <p className="no-data">{t.noData}</p>
-          )}
+          ))}
         </div>
-      </div>
+      ) : (
+        <p className="no-data">{t.noData}</p>
+      )}
+    </div>
+  </div>
+)}
+
+
+
+
 
       <style>{`
         .dashboard { padding: 24px; }
