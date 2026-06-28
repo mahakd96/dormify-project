@@ -1,67 +1,200 @@
-import React, { useMemo, useRef, useState, useEffect } from 'react';
-import { Filter, X, ZoomIn, ZoomOut, RotateCcw, Move, Building2, Home, Users } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  AlertCircle,
+  Building2,
+  CheckCircle,
+  Filter,
+  Home,
+  Maximize2,
+  Move,
+  RefreshCcw,
+  Search,
+  Users,
+  X,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
+import { api } from "../services/api";
+import { useAuth } from "../context/AuthContext";
 
-const MAP_FILE = 'dormMap.png';
+const MAP_FILE = "technionDormMap.png";
 const MAP_SRC = `/maps/${MAP_FILE}`;
 
-// -------------------------
-// Mock data structures
-// -------------------------
-const regions = [
-  { id: 'canada', name: 'קנדה', nameEn: 'Canada' },
-  { id: 'mizrach-yashan', name: 'מזרח ישן (הלל קפלן)', nameEn: 'Mizrach Yashan (Hillel Kaplan)' },
-  { id: 'mizrach-hadash', name: 'מזרח חדש', nameEn: 'Mizrach Hadash' },
-  { id: 'rifkin', name: 'ריפקין', nameEn: 'Rifkin' },
-  { id: 'senate', name: 'הסנט', nameEn: 'Senate' },
-  { id: 'kfar-hasmaha', name: 'כפר משתלמים', nameEn: 'Kfar Mishtalmim' },
-  { id: 'senate-renovated', name: 'סנאט משופץ', nameEn: 'Senate Renovated' },
-  { id: 'segal-zutar', name: 'סגל זוטר', nameEn: 'Segal Zutar' },
-  { id: 'broshim', name: 'ברושים', nameEn: 'Broshim' },
-  { id: 'neve-america', name: 'נווה אמריקה', nameEn: 'Neve America' },
-  { id: 'ha-amim', name: 'העמים', nameEn: 'Ha-Amim' },
+const clickableDormAreas = {
+  canada: { top: "15.5%", left: "29.5%", width: "12.5%", height: "7.5%" },
+  broshim: { top: "10.5%", left: "45.0%", width: "10.0%", height: "7.0%" },
+  senate: { top: "21.0%", left: "55.0%", width: "10.0%", height: "7.5%" },
+  "neve-america": { top: "28.0%", left: "72.0%", width: "12.5%", height: "7.5%" },
+  rifkin: { top: "44.5%", left: "16.0%", width: "10.0%", height: "7.0%" },
+  "kfar-hasmaha": { top: "52.0%", left: "40.0%", width: "12.0%", height: "7.0%" },
+  "segel-zutar": { top: "52.0%", left: "63.0%", width: "11.5%", height: "7.0%" },
+  mizrah: { top: "71.0%", left: "78.5%", width: "10.0%", height: "7.0%" },
+};
+
+const dormLabels = {
+  canada: { he: "מעונות קנדה", en: "Canada Dorms", officialBuildings: 22 },
+  senate: { he: "סנאט", en: "Senate", officialBuildings: 9 },
+  "neve-america": { he: "נווה אמריקה", en: "Neve America", officialBuildings: 19 },
+  rifkin: { he: "ריפקין", en: "Rifkin", officialBuildings: 12 },
+  broshim: { he: "ברושים", en: "Broshim", officialBuildings: 2 },
+  "kfar-hasmaha": { he: "כפר הסמכה", en: "Kfar Hasmaha", officialBuildings: 4 },
+  "segel-zutar": { he: "סגל זוטר", en: "Segel Zutar", officialBuildings: 6 },
+  mizrah: { he: "מזרח", en: "Mizrah", officialBuildings: 17 },
+};
+
+const DORM_KEY_ALIASES = [
+  {
+    key: "canada",
+    matches: [
+      "canada",
+      "canada dorms",
+      "קנדה",
+      "מעונות קנדה",
+      "קסל",
+      "עליון עמים",
+      "יחיד בחדר",
+      "זוגות",
+      "משפחות",
+      "רות הכהן",
+    ],
+  },
+  {
+    key: "senate",
+    matches: ["senate", "senat", "סנאט", "סנט", "סנט חדש", "הסנט"],
+  },
+  {
+    key: "neve-america",
+    matches: [
+      "neve america",
+      "neve",
+      "america",
+      "נווה אמריקה",
+      "נוה אמריקה",
+      "מעונות נווה אמריקה",
+    ],
+  },
+  {
+    key: "rifkin",
+    matches: ["rifkin", "ריפקין"],
+  },
+  {
+    key: "broshim",
+    matches: ["broshim", "brosh", "ברושים"],
+  },
+  {
+    key: "kfar-hasmaha",
+    matches: [
+      "kfar hasmaha",
+      "kfar hasmacha",
+      "kfar mishtalmim",
+      "כפר הסמכה",
+      "כפר משתלמים",
+    ],
+  },
+  {
+    key: "segel-zutar",
+    matches: ["segel zutar", "segal zutar", "junior staff", "סגל זוטר"],
+  },
+  {
+    key: "mizrah",
+    matches: [
+      "mizrah",
+      "mizrach",
+      "east",
+      "מזרח",
+      "מזרח ישן",
+      "מזרח חדש",
+      "הלל קפלן",
+      "mizrach yashan",
+      "mizrah yashan",
+      "mizrach hadash",
+      "mizrah hadash",
+    ],
+  },
 ];
 
-const buildings = [
-  { id: 'b1', regionId: 'canada', name: 'Building 1' },
-  { id: 'b2', regionId: 'canada', name: 'Building 2' },
-  { id: 'b3', regionId: 'mizrach-yashan', name: 'Building 3' },
-  { id: 'b4', regionId: 'rifkin', name: 'Building 4' },
-  { id: 'b5', regionId: 'broshim', name: 'Building 5' }
-];
+const normalizeText = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[()]/g, " ")
+    .replace(/[–—]/g, "-")
+    .replace(/[״"]/g, "")
+    .replace(/[׳']/g, "")
+    .replace(/\//g, " ")
+    .replace(/\s+/g, " ");
 
-const rooms = [
-  { id: 'r1', regionId: 'canada', buildingId: 'b1' },
-  { id: 'r2', regionId: 'canada', buildingId: 'b1' },
-  { id: 'r3', regionId: 'canada', buildingId: 'b2' },
-  { id: 'r4', regionId: 'mizrach-yashan', buildingId: 'b3' },
-  { id: 'r5', regionId: 'mizrach-yashan', buildingId: 'b3' },
-  { id: 'r6', regionId: 'rifkin', buildingId: 'b4' },
-  { id: 'r7', regionId: 'broshim', buildingId: 'b5' },
-  { id: 'r8', regionId: 'broshim', buildingId: 'b5' }
-];
+function resolveDormKey(name) {
+  const raw = normalizeText(name);
 
-const students = [
-  { id: 's1', regionId: 'canada', isAssigned: true },
-  { id: 's2', regionId: 'canada', isAssigned: true },
-  { id: 's3', regionId: 'canada', isAssigned: false },
-  { id: 's4', regionId: 'mizrach-yashan', isAssigned: true },
-  { id: 's5', regionId: 'rifkin', isAssigned: true },
-  { id: 's6', regionId: 'rifkin', isAssigned: true },
-  { id: 's7', regionId: 'broshim', isAssigned: false }
-];
+  for (const item of DORM_KEY_ALIASES) {
+    if (item.matches.some((match) => raw.includes(normalizeText(match)))) {
+      return item.key;
+    }
+  }
 
-// Mock auth context
-const useAuth = () => ({
-  canAccessRegion: () => true
-});
+  return null;
+}
 
-export default function MapPage({ language = 'en' }) {
-  const { canAccessRegion } = useAuth();
+function inferDormTypeVariant(name) {
+  const raw = normalizeText(name);
 
-  const [typeFilter, setTypeFilter] = useState('all');
-  const [selectedDormGroup, setSelectedDormGroup] = useState(null);
+  if (raw.includes("family") || raw.includes("משפחה") || raw.includes("משפחות")) {
+    return "family";
+  }
 
+  if (
+    raw.includes("couple") ||
+    raw.includes("couples") ||
+    raw.includes("זוג") ||
+    raw.includes("זוגות")
+  ) {
+    return "couples";
+  }
+
+  return "base";
+}
+
+function occupancyClass(occupancyRate, availableBeds, totalCapacity) {
+  if (Number(totalCapacity || 0) <= 0) return "neutral";
+  if (Number(availableBeds || 0) <= 0 || Number(occupancyRate || 0) >= 100) return "full";
+  if (Number(occupancyRate || 0) >= 90) return "danger";
+  if (Number(occupancyRate || 0) >= 70) return "warn";
+  return "good";
+}
+
+function safeNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function getFirstDefined(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== "") {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function formatPercent(value) {
+  const n = safeNumber(value, 0);
+  return `${Math.round(n)}%`;
+}
+
+export default function MapPage({ language = "he" }) {
+  const { canAccessRegion, isCentralAdmin } = useAuth();
+
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [selectedDormKey, setSelectedDormKey] = useState(null);
+  const [searchTerm, setSearchTerm] = useState("");
   const [calibrateMode, setCalibrateMode] = useState(false);
+
+  const [buildingRows, setBuildingRows] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
 
   const canvasRef = useRef(null);
   const [scale, setScale] = useState(1);
@@ -70,10 +203,102 @@ export default function MapPage({ language = 'en' }) {
   const dragStart = useRef({ x: 0, y: 0 });
   const panStart = useRef({ x: 0, y: 0 });
 
-  const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
-  const ZOOM_MIN = 0.85;
-  const ZOOM_MAX = 2.75;
+  const ZOOM_MIN = 0.8;
+  const ZOOM_MAX = 3.2;
   const ZOOM_STEP = 0.15;
+
+  const t =
+    {
+      he: {
+        title: "מפת המעונות",
+        subtitle: "לחיצה על שם מעון במפה מציגה תפוסה אמיתית לפי שיבוצי מיטות פעילים",
+        all: "הכל",
+        base: "יחידים",
+        couples: "זוגות",
+        family: "משפחות",
+        searchPlaceholder: "חיפוש מעון...",
+        loading: "טוען נתוני מפה...",
+        error: "שגיאה בטעינת נתוני המפה",
+        restricted: "מוצגים רק הנתונים המותרים למשתמש הנוכחי",
+        refresh: "רענון נתונים",
+        zoom: "זום",
+        panHint: "גרירה להזזת המפה",
+        calibrate: "כיול",
+        calibrateOn: "כיול פעיל",
+        selectDorm: "בחרי מעון במפה",
+        selectDormSub: "לחצי על שם המעון שמופיע בתמונה כדי לראות קיבולת, תפוסה ומיטות פנויות.",
+        occupancyDetails: "פרטי תפוסה",
+        officialBuildings: "מספר בניינים לפי משרד המעונות",
+        databaseBuildings: "בניינים במערכת",
+        activeBuildings: "בניינים פעילים",
+        inactiveBuildings: "בניינים לא פעילים",
+        rooms: "חדרים",
+        capacity: "קיבולת מיטות",
+        occupiedBeds: "מיטות תפוסות",
+        availableBeds: "מיטות פנויות",
+        occupancy: "תפוסה",
+        status: "סטטוס",
+        full: "מלא",
+        almostFull: "כמעט מלא",
+        available: "זמין",
+        noCapacity: "אין נתוני קיבולת",
+        noData: "אין נתונים להצגה עבור המעון הזה",
+        buildingsList: "רשימת בניינים",
+        building: "בניין",
+        sourceNote: "התפוסה מחושבת לפי שיבוצי מיטה פעילים",
+      },
+      en: {
+        title: "Dormitory Map",
+        subtitle: "Click a dorm name on the map to view real occupancy from active bed assignments",
+        all: "All",
+        base: "Base",
+        couples: "Couples",
+        family: "Family",
+        searchPlaceholder: "Search dorm...",
+        loading: "Loading map data...",
+        error: "Failed to load map data",
+        restricted: "Showing only data allowed for the current user",
+        refresh: "Refresh Data",
+        zoom: "Zoom",
+        panHint: "Drag to move the map",
+        calibrate: "Calibrate",
+        calibrateOn: "Calibration ON",
+        selectDorm: "Select a dorm on the map",
+        selectDormSub: "Click the dorm name shown inside the image to see capacity, occupancy, and available beds.",
+        occupancyDetails: "Occupancy Details",
+        officialBuildings: "Dorm office building count",
+        databaseBuildings: "Buildings in system",
+        activeBuildings: "Active Buildings",
+        inactiveBuildings: "Inactive Buildings",
+        rooms: "Rooms",
+        capacity: "Bed Capacity",
+        occupiedBeds: "Occupied Beds",
+        availableBeds: "Available Beds",
+        occupancy: "Occupancy",
+        status: "Status",
+        full: "Full",
+        almostFull: "Almost Full",
+        available: "Available",
+        noCapacity: "No capacity data",
+        noData: "No data to display for this dorm",
+        buildingsList: "Buildings List",
+        building: "Building",
+        sourceNote: "Occupancy is calculated from active bed assignments",
+      },
+    }[language] || {};
+
+  const canSeeRegion = useCallback(
+    (regionValue) => {
+      if (isCentralAdmin()) return true;
+
+      try {
+        return canAccessRegion(regionValue);
+      } catch {
+        return false;
+      }
+    },
+    [canAccessRegion, isCentralAdmin]
+  );
 
   const resetView = () => {
     setScale(1);
@@ -82,6 +307,7 @@ export default function MapPage({ language = 'en' }) {
 
   const zoomAt = (nextScale, clientX, clientY) => {
     const el = canvasRef.current;
+
     if (!el) {
       setScale(nextScale);
       return;
@@ -102,23 +328,34 @@ export default function MapPage({ language = 'en' }) {
   };
 
   const zoomIn = () => {
-    const next = clamp(Number((scale + ZOOM_STEP).toFixed(2)), ZOOM_MIN, ZOOM_MAX);
+    const next = Math.min(ZOOM_MAX, Number((scale + ZOOM_STEP).toFixed(2)));
     const el = canvasRef.current;
-    if (!el) return setScale(next);
+
+    if (!el) {
+      setScale(next);
+      return;
+    }
+
     const rect = el.getBoundingClientRect();
     zoomAt(next, rect.left + rect.width / 2, rect.top + rect.height / 2);
   };
 
   const zoomOut = () => {
-    const next = clamp(Number((scale - ZOOM_STEP).toFixed(2)), ZOOM_MIN, ZOOM_MAX);
+    const next = Math.max(ZOOM_MIN, Number((scale - ZOOM_STEP).toFixed(2)));
     const el = canvasRef.current;
-    if (!el) return setScale(next);
+
+    if (!el) {
+      setScale(next);
+      return;
+    }
+
     const rect = el.getBoundingClientRect();
     zoomAt(next, rect.left + rect.width / 2, rect.top + rect.height / 2);
   };
 
   const onMouseDown = (e) => {
-    if (e.button !== 0) return;
+    if (calibrateMode || e.button !== 0) return;
+
     setIsDragging(true);
     dragStart.current = { x: e.clientX, y: e.clientY };
     panStart.current = { ...pan };
@@ -126,600 +363,1003 @@ export default function MapPage({ language = 'en' }) {
 
   const onMouseMove = (e) => {
     if (!isDragging) return;
+
     const dx = e.clientX - dragStart.current.x;
     const dy = e.clientY - dragStart.current.y;
-    setPan({ x: panStart.current.x + dx, y: panStart.current.y + dy });
+
+    setPan({
+      x: panStart.current.x + dx,
+      y: panStart.current.y + dy,
+    });
   };
 
-  const onMouseUp = () => setIsDragging(false);
+  const onMouseUp = () => {
+    setIsDragging(false);
+  };
 
   const onWheel = (e) => {
     e.preventDefault();
-    const delta = e.deltaY < 0 ? +ZOOM_STEP : -ZOOM_STEP;
-    const next = clamp(Number((scale + delta).toFixed(2)), ZOOM_MIN, ZOOM_MAX);
+
+    const delta = e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
+    const next = Math.min(
+      ZOOM_MAX,
+      Math.max(ZOOM_MIN, Number((scale + delta).toFixed(2)))
+    );
+
     zoomAt(next, e.clientX, e.clientY);
   };
 
+  const loadMapData = useCallback(async () => {
+    setLoading(true);
+    setLoadError("");
+
+    try {
+      let analysisData = null;
+      let lastError = null;
+
+      const analysisEndpoints = [
+        "/api/analysis-data/",
+        "/api/analysis_data/",
+        "/api/analysis/",
+      ];
+
+      for (const endpoint of analysisEndpoints) {
+        try {
+          const res = await api.get(endpoint);
+          analysisData = res?.data || {};
+          break;
+        } catch (err) {
+          lastError = err;
+        }
+      }
+
+      if (!analysisData) {
+        throw lastError || new Error("Could not load analysis data");
+      }
+
+      const analysisSummary = analysisData.summary || {};
+
+      const fixedSummary = {
+        total_students: safeNumber(analysisSummary.total_students, 0),
+        assigned_students: safeNumber(analysisSummary.assigned_students, 0),
+        unassigned_students: safeNumber(analysisSummary.unassigned_students, 0),
+        priority_students: safeNumber(analysisSummary.priority_students, 0),
+
+        total_buildings: safeNumber(
+          getFirstDefined(
+            analysisSummary.total_buildings,
+            analysisSummary.active_buildings,
+            0
+          ),
+          0
+        ),
+        active_buildings: safeNumber(analysisSummary.active_buildings, 0),
+        inactive_buildings: safeNumber(analysisSummary.inactive_buildings, 0),
+        total_rooms: safeNumber(analysisSummary.total_rooms, 0),
+
+        total_capacity: safeNumber(
+          getFirstDefined(
+            analysisSummary.total_capacity,
+            analysisSummary.total_beds,
+            0
+          ),
+          0
+        ),
+        total_beds: safeNumber(
+          getFirstDefined(
+            analysisSummary.total_beds,
+            analysisSummary.total_capacity,
+            0
+          ),
+          0
+        ),
+
+        occupied_beds: safeNumber(
+          getFirstDefined(
+            analysisSummary.occupied_beds,
+            analysisSummary.assigned_beds,
+            0
+          ),
+          0
+        ),
+        assigned_beds: safeNumber(
+          getFirstDefined(
+            analysisSummary.assigned_beds,
+            analysisSummary.occupied_beds,
+            0
+          ),
+          0
+        ),
+        available_beds: safeNumber(analysisSummary.available_beds, 0),
+        occupancy_rate: safeNumber(analysisSummary.occupancy_rate, 0),
+        pending_transfers: safeNumber(analysisSummary.pending_transfers, 0),
+      };
+
+      setSummary(fixedSummary);
+
+      const occupancyRows = Array.isArray(analysisData.occupancy_data)
+        ? analysisData.occupancy_data
+        : [];
+
+      const rowsFromBackend = occupancyRows.map((row) => {
+        const totalBeds = safeNumber(
+          getFirstDefined(row.total_beds, row.total_capacity, 0),
+          0
+        );
+
+        const assignedBeds = safeNumber(
+          getFirstDefined(
+            row.assigned,
+            row.assigned_beds,
+            row.occupied_beds,
+            0
+          ),
+          0
+        );
+
+        const availableBeds = safeNumber(
+          getFirstDefined(
+            row.available_beds,
+            Math.max(totalBeds - assignedBeds, 0)
+          ),
+          0
+        );
+
+        const occupancyRate = safeNumber(
+          getFirstDefined(
+            row.occupancy_rate,
+            totalBeds > 0 ? (assignedBeds / totalBeds) * 100 : 0
+          ),
+          0
+        );
+
+        return {
+          id: getFirstDefined(row.building_id, row.id),
+          number: getFirstDefined(row.building_number, row.number, row.building),
+          dorm_type_name: getFirstDefined(row.dorm_type, row.dorm_type_name, ""),
+          dorm_type_code: getFirstDefined(row.dorm_type_code, ""),
+          region: getFirstDefined(row.region_id, row.region, ""),
+          region_name: getFirstDefined(row.region, row.region_name, ""),
+          rooms_count: safeNumber(row.rooms_count, 0),
+
+          total_capacity: totalBeds,
+          total_beds: totalBeds,
+
+          occupied_beds: assignedBeds,
+          assigned_beds: assignedBeds,
+
+          available_beds: availableBeds,
+          occupancy_rate: occupancyRate,
+
+          is_active: row.is_active !== false,
+        };
+      });
+
+      const visibleRows = rowsFromBackend.filter((building) => {
+        if (isCentralAdmin()) return true;
+        return canSeeRegion(building.region) || canSeeRegion(building.region_name);
+      });
+
+      setBuildingRows(visibleRows);
+    } catch (err) {
+      console.error("Map data load error:", err);
+      setLoadError(err?.message || t.error);
+    } finally {
+      setLoading(false);
+    }
+  }, [canSeeRegion, isCentralAdmin, t.error]);
+
   useEffect(() => {
+    loadMapData();
+  }, [loadMapData]);
+
+  const dormStats = useMemo(() => {
+    const result = {};
+
+    Object.keys(dormLabels).forEach((key) => {
+      result[key] = {
+        key,
+        labelHe: dormLabels[key].he,
+        labelEn: dormLabels[key].en,
+        officialBuildings: dormLabels[key].officialBuildings,
+        buildingsCount: 0,
+        activeBuildings: 0,
+        inactiveBuildings: 0,
+        roomsCount: 0,
+        totalCapacity: 0,
+        occupiedBeds: 0,
+        availableBeds: 0,
+        occupancy: 0,
+        variants: new Set(),
+        regionIds: new Set(),
+        buildings: [],
+      };
+    });
+
+    buildingRows.forEach((building) => {
+      const dormName = building.dorm_type_name || "";
+      const dormKey = resolveDormKey(dormName);
+
+      if (!dormKey || !result[dormKey]) {
+        console.log("MAP SKIPPED BUILDING:", {
+          buildingId: building.id,
+          buildingNumber: building.number,
+          dormTypeName: dormName,
+          dormTypeCode: building.dorm_type_code,
+          region: building.region,
+          regionName: building.region_name,
+        });
+        return;
+      }
+
+      const bucket = result[dormKey];
+
+      const capacity = safeNumber(
+        getFirstDefined(building.total_capacity, building.total_beds, 0),
+        0
+      );
+
+      const occupied = safeNumber(
+        getFirstDefined(
+          building.occupied_beds,
+          building.assigned_beds,
+          building.assigned,
+          0
+        ),
+        0
+      );
+
+      const available = safeNumber(
+        getFirstDefined(
+          building.available_beds,
+          Math.max(capacity - occupied, 0)
+        ),
+        0
+      );
+
+      const rooms = safeNumber(building.rooms_count, 0);
+
+      bucket.buildingsCount += 1;
+      bucket.roomsCount += rooms;
+      bucket.totalCapacity += capacity;
+      bucket.occupiedBeds += occupied;
+      bucket.availableBeds += available;
+      bucket.variants.add(inferDormTypeVariant(dormName));
+      bucket.regionIds.add(String(building.region || building.region_name || ""));
+
+      if (building.is_active === false) {
+        bucket.inactiveBuildings += 1;
+      } else {
+        bucket.activeBuildings += 1;
+      }
+
+      bucket.buildings.push({
+        id: building.id,
+        number: building.number,
+        dormTypeName: dormName,
+        region: building.region,
+        regionName: building.region_name,
+        roomsCount: rooms,
+        capacity,
+        occupied,
+        available,
+        occupancy:
+          capacity > 0
+            ? Math.round((occupied / capacity) * 100)
+            : safeNumber(building.occupancy_rate, 0),
+        isActive: building.is_active,
+      });
+    });
+
+    Object.values(result).forEach((bucket) => {
+      bucket.availableBeds = Math.max(bucket.totalCapacity - bucket.occupiedBeds, 0);
+      bucket.occupancy =
+        bucket.totalCapacity > 0
+          ? Math.round((bucket.occupiedBeds / bucket.totalCapacity) * 100)
+          : 0;
+
+      bucket.buildings.sort((a, b) =>
+        String(a.number).localeCompare(String(b.number), undefined, { numeric: true })
+      );
+    });
+
+    return result;
+  }, [buildingRows]);
+
+  const filteredDormKeys = useMemo(() => {
+    const search = normalizeText(searchTerm);
+
+    return Object.keys(dormLabels).filter((key) => {
+      const dorm = dormStats[key];
+
+      if (!dorm) return false;
+
+      const matchesType =
+        typeFilter === "all" ||
+        dorm.variants.has(typeFilter) ||
+        dorm.buildingsCount === 0;
+
+      const label = `${dorm.labelEn} ${dorm.labelHe}`;
+      const matchesSearch = !search || normalizeText(label).includes(search);
+
+      return matchesType && matchesSearch;
+    });
+  }, [dormStats, searchTerm, typeFilter]);
+
+  const selectedDorm = selectedDormKey ? dormStats[selectedDormKey] : null;
+
+  const systemTotals = useMemo(() => {
+    const officialBuildings = Object.values(dormLabels).reduce(
+      (sum, dorm) => sum + (dorm.officialBuildings || 0),
+      0
+    );
+
+    return {
+      officialBuildings,
+      databaseBuildings: safeNumber(
+        getFirstDefined(summary?.total_buildings, summary?.active_buildings, 0),
+        0
+      ),
+      capacity: safeNumber(
+        getFirstDefined(summary?.total_capacity, summary?.total_beds, 0),
+        0
+      ),
+      occupied: safeNumber(
+        getFirstDefined(summary?.occupied_beds, summary?.assigned_beds, 0),
+        0
+      ),
+      available: safeNumber(summary?.available_beds, 0),
+    };
+  }, [summary]);
+
+  const getDormStatus = (dorm) => {
+    if (!dorm || dorm.totalCapacity <= 0) return t.noCapacity;
+
+    const cls = occupancyClass(dorm.occupancy, dorm.availableBeds, dorm.totalCapacity);
+
+    if (cls === "full") return t.full;
+    if (cls === "danger" || cls === "warn") return t.almostFull;
+    return t.available;
+  };
+
+  const handleCanvasClick = (e) => {
+    if (!calibrateMode) return;
+
     const el = canvasRef.current;
+
     if (!el) return;
-    const handler = (e) => e.preventDefault();
-    el.addEventListener('wheel', handler, { passive: false });
-    return () => el.removeEventListener('wheel', handler);
-  }, []);
 
-  const dormGroups = useMemo(
-    () => [
-      { baseId: 'canada', variants: ['canada', 'canada-family', 'canada-couples'] },
-      { baseId: 'mizrach-yashan', variants: ['mizrach-yashan', 'mizrach-yashan-couples'] },
-      { baseId: 'mizrach-hadash', variants: ['mizrach-hadash', 'mizrach-hadash-family', 'mizrach-hadash-couples'] },
-      { baseId: 'rifkin', variants: ['rifkin'] },
-      { baseId: 'senate', variants: ['senate'] },
-      { baseId: 'kfar-hasmaha', variants: ['kfar-hasmaha', 'kfar-hasmaha-couples'] },
+    const rect = el.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
 
-      { baseId: 'senate-renovated', variants: ['senate-renovated'] },
-      { baseId: 'segal-zutar', variants: ['segal-zutar', 'segal-zutar-family', 'segal-zutar-couples'] },
-      { baseId: 'broshim', variants: ['broshim', 'broshim-family', 'broshim-couples'] },
-      { baseId: 'neve-america', variants: ['neve-america', 'neve-america-couples'] },
-      { baseId: 'ha-amim', variants: ['ha-amim'] },
-    ],
-    []
-  );
+    const worldX = (cx - pan.x) / scale;
+    const worldY = (cy - pan.y) / scale;
 
-  const dormPositions = {
-    canada: { top: '7.0%', left: '60.5%' },
-    rifkin: { top: '32.0%', left: '28.5%' },
-    senate: { top: '52.5%', left: '32.5%' },
-    'kfar-hasmaha': { top: '76.5%', left: '10.5%' },
-    'mizrach-yashan': { top: '86.5%', left: '66.0%' },
-    'mizrach-hadash': { top: '89.0%', left: '86.0%' },
+    const leftPct = (worldX / rect.width) * 100;
+    const topPct = (worldY / rect.height) * 100;
 
-    'senate-renovated': { top: '55.5%', left: '38.0%' },
-    'segal-zutar': { top: '60.0%', left: '74.0%' },
-    broshim: { top: '10.0%', left: '45.0%' },
-    'neve-america': { top: '40.0%', left: '12.0%' },
-    'ha-amim': { top: '72.0%', left: '70.0%' },
+    console.log(
+      `CLICK AREA POSITION => top: "${topPct.toFixed(1)}%", left: "${leftPct.toFixed(1)}%"`
+    );
   };
-
-  const t = {
-    he: {
-      title: 'מפת המעונות',
-      subtitle: 'בחר/י סוג מעונות וצפה/י בתפוסה לפי אזור',
-      filterTitle: 'סינון לפי סוג',
-      all: 'הכל',
-      base: 'יחידים',
-      couples: 'זוגות',
-      family: 'משפחות',
-      buildings: 'בניינים',
-      rooms: 'חדרים',
-      students: 'סטודנטים',
-      capacity: 'קיבולת',
-      occupancy: 'תפוסה',
-      dormTypeLabel: 'סוג מעונות',
-      zoom: 'זום',
-      reset: 'איפוס',
-      panHint: 'גרור/י להזזה',
-      legend: 'מקרא',
-      low: 'נמוכה',
-      mid: 'בינונית',
-      high: 'גבוהה',
-      occupancyDetails: 'פרטי תפוסה',
-      calibrate: 'כיול',
-      calibrateOn: 'כיול פועל (קליק מציג קואורדינטות בקונסול)',
-      calibrateOff: 'כיול כבוי',
-    },
-    en: {
-      title: 'Dormitory Map',
-      subtitle: 'Choose dorm type and view occupancy by area',
-      filterTitle: 'Filter by type',
-      all: 'All',
-      base: 'Base',
-      couples: 'Couples',
-      family: 'Family',
-      buildings: 'Buildings',
-      rooms: 'Rooms',
-      students: 'Students',
-      capacity: 'Capacity',
-      occupancy: 'Occupancy',
-      dormTypeLabel: 'Dorm Type',
-      zoom: 'Zoom',
-      reset: 'Reset',
-      panHint: 'Drag to pan',
-      legend: 'Legend',
-      low: 'Low',
-      mid: 'Medium',
-      high: 'High',
-      occupancyDetails: 'Occupancy Details',
-      calibrate: 'Calibrate',
-      calibrateOn: 'Calibration ON (click prints coords in console)',
-      calibrateOff: 'Calibration OFF',
-    },
-  }[language];
-
-  const applyTypeFilter = (variantIds) => {
-    if (typeFilter === 'all') return variantIds;
-    const isBase = (id) => !id.includes('-family') && !id.includes('-couples');
-    if (typeFilter === 'base') return variantIds.filter(isBase);
-    if (typeFilter === 'family') return variantIds.filter((id) => id.includes('-family'));
-    if (typeFilter === 'couples') return variantIds.filter((id) => id.includes('-couples'));
-    return variantIds;
-  };
-
-  const accessibleDormGroups = useMemo(() => {
-    return dormGroups.filter((g) => g.variants.some((v) => canAccessRegion(v)));
-  }, [dormGroups, canAccessRegion]);
-
-  const getStatsForDormIds = (dormIds) => {
-    const b = buildings.filter((x) => dormIds.includes(x.regionId));
-    const r = rooms.filter((x) => dormIds.includes(x.regionId));
-    const s = students.filter((x) => dormIds.includes(x.regionId));
-
-    const assignedCount = s.filter((st) => st.isAssigned).length;
-    const capacity = r.length * 2;
-    const occupancy = capacity > 0 ? Math.round((assignedCount / capacity) * 100) : 0;
-
-    return { buildings: b.length, rooms: r.length, students: s.length, assigned: assignedCount, capacity, occupancy };
-  };
-
-  const occupancyClass = (occ) => {
-    if (occ >= 90) return 'danger';
-    if (occ >= 70) return 'warn';
-    return 'good';
-  };
-
-  const getBaseRegion = (baseId) => regions.find((r) => r.id === baseId);
-
-  const selectedGroupObj = selectedDormGroup
-    ? accessibleDormGroups.find((g) => g.baseId === selectedDormGroup)
-    : null;
-
-  const selectedDormIds = selectedGroupObj ? applyTypeFilter(selectedGroupObj.variants) : [];
-  const selectedStats = selectedGroupObj ? getStatsForDormIds(selectedDormIds) : null;
 
   return (
-    <div className="map-page" dir={language === 'he' ? 'rtl' : 'ltr'}>
+    <div className="map-page" dir={language === "he" ? "rtl" : "ltr"}>
       <div className="page-header">
-        <div className="titles">
+        <div>
           <h1>{t.title}</h1>
           <p>{t.subtitle}</p>
-          <p className="map-path">
-            <strong>Map:</strong> <code>{MAP_SRC}</code>
-          </p>
+          {!isCentralAdmin() && <p className="restricted-note">{t.restricted}</p>}
         </div>
 
-        <div className="filter">
-          <div className="filter-label">
-            <Filter size={16} />
-            <span>{t.filterTitle}</span>
+        <div className="header-actions">
+          <div className="search-box">
+            <Search size={16} />
+            <input
+              value={searchTerm}
+              placeholder={t.searchPlaceholder}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
           </div>
-          <select
-            value={typeFilter}
-            onChange={(e) => {
-              setTypeFilter(e.target.value);
-              setSelectedDormGroup(null);
-              resetView();
-            }}
-          >
-            <option value="all">{t.all}</option>
-            <option value="base">{t.base}</option>
-            <option value="couples">{t.couples}</option>
-            <option value="family">{t.family}</option>
-          </select>
+
+          <div className="filter-box">
+            <Filter size={16} />
+            <select
+              value={typeFilter}
+              onChange={(e) => {
+                setTypeFilter(e.target.value);
+                setSelectedDormKey(null);
+              }}
+            >
+              <option value="all">{t.all}</option>
+              <option value="base">{t.base}</option>
+              <option value="couples">{t.couples}</option>
+              <option value="family">{t.family}</option>
+            </select>
+          </div>
+
+          <button className="primary-btn" type="button" onClick={loadMapData}>
+            <RefreshCcw size={16} />
+            {t.refresh}
+          </button>
         </div>
       </div>
 
-      <div className="map-shell">
-        <div className="map-canvas-wrap">
-          <div className="controls">
-            <div className="controls-row">
-              <div className="controls-title">{t.zoom}</div>
+      <div className="summary-strip">
+        <div className="summary-card">
+          <Building2 size={18} />
+          <span>{t.officialBuildings}</span>
+          <strong>{systemTotals.officialBuildings}</strong>
+        </div>
 
-              <div className="btnrow">
-                <button className="iconbtn" onClick={zoomIn} type="button" aria-label="Zoom in">
+        <div className="summary-card">
+          <Building2 size={18} />
+          <span>{t.databaseBuildings}</span>
+          <strong>{systemTotals.databaseBuildings}</strong>
+        </div>
+
+        <div className="summary-card">
+          <Home size={18} />
+          <span>{t.capacity}</span>
+          <strong>{systemTotals.capacity}</strong>
+        </div>
+
+        <div className="summary-card">
+          <Users size={18} />
+          <span>{t.occupiedBeds}</span>
+          <strong>{systemTotals.occupied}</strong>
+        </div>
+
+        <div className="summary-card success">
+          <CheckCircle size={18} />
+          <span>{t.availableBeds}</span>
+          <strong>{systemTotals.available}</strong>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="state-box">{t.loading}</div>
+      ) : loadError ? (
+        <div className="state-box error">
+          <AlertCircle size={18} />
+          <span>{loadError}</span>
+        </div>
+      ) : (
+        <div className="map-shell">
+          <div className="map-card">
+            <div className="map-toolbar">
+              <div className="toolbar-left">
+                <span className="toolbar-title">{t.zoom}</span>
+
+                <button className="icon-btn" type="button" onClick={zoomIn}>
                   <ZoomIn size={16} />
                 </button>
-                <button className="iconbtn" onClick={zoomOut} type="button" aria-label="Zoom out">
+
+                <button className="icon-btn" type="button" onClick={zoomOut}>
                   <ZoomOut size={16} />
                 </button>
-                <button className="iconbtn" onClick={resetView} type="button" aria-label="Reset view">
-                  <RotateCcw size={16} />
+
+                <button className="icon-btn" type="button" onClick={resetView}>
+                  <Maximize2 size={16} />
                 </button>
 
                 <button
-                  className={`pillbtn ${calibrateMode ? 'on' : ''}`}
+                  className={`pill-btn ${calibrateMode ? "active" : ""}`}
                   type="button"
                   onClick={() => setCalibrateMode((v) => !v)}
-                  title={calibrateMode ? t.calibrateOn : t.calibrateOff}
                 >
-                  {t.calibrate}
+                  {calibrateMode ? t.calibrateOn : t.calibrate}
                 </button>
               </div>
 
-              <div className="meta">
-                <span className="zoom-val">{Math.round(scale * 100)}%</span>
-                <span className="pan-hint">
-                  <Move size={13} /> {t.panHint}
-                </span>
+              <div className="toolbar-hint">
+                <Move size={14} />
+                <span>{t.panHint}</span>
+                <strong>{Math.round(scale * 100)}%</strong>
+              </div>
+            </div>
+
+            <div
+              ref={canvasRef}
+              className={`map-canvas ${isDragging ? "dragging" : ""} ${
+                calibrateMode ? "calibrating" : ""
+              }`}
+              onMouseDown={onMouseDown}
+              onMouseMove={onMouseMove}
+              onMouseUp={onMouseUp}
+              onMouseLeave={onMouseUp}
+              onWheel={onWheel}
+              onClick={handleCanvasClick}
+            >
+              <div
+                className="map-layer"
+                style={{
+                  transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
+                  transformOrigin: "0 0",
+                }}
+              >
+                <img
+                  className="map-img"
+                  src={MAP_SRC}
+                  alt="Technion dormitory map"
+                  draggable={false}
+                />
+
+                {filteredDormKeys.map((key) => {
+                  const area = clickableDormAreas[key];
+                  const dorm = dormStats[key];
+
+                  if (!area || !dorm) return null;
+
+                  const cls = occupancyClass(
+                    dorm.occupancy,
+                    dorm.availableBeds,
+                    dorm.totalCapacity
+                  );
+
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      className={`click-area ${cls} ${
+                        selectedDormKey === key ? "selected" : ""
+                      }`}
+                      style={{
+                        top: area.top,
+                        left: area.left,
+                        width: area.width,
+                        height: area.height,
+                      }}
+                      title={`${
+                        language === "he" ? dorm.labelHe : dorm.labelEn
+                      } — ${t.occupancy}: ${formatPercent(dorm.occupancy)}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedDormKey(key);
+                      }}
+                    >
+                      <span className="sr-only">
+                        {language === "he" ? dorm.labelHe : dorm.labelEn}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
             <div className="legend">
-              <span className="lg good" title={t.low} />
-              <span className="lg warn" title={t.mid} />
-              <span className="lg danger" title={t.high} />
+              <div className="legend-item">
+                <span className="legend-dot good" />
+                <span>{t.available}</span>
+              </div>
+
+              <div className="legend-item">
+                <span className="legend-dot warn" />
+                <span>{t.almostFull}</span>
+              </div>
+
+              <div className="legend-item">
+                <span className="legend-dot full" />
+                <span>{t.full}</span>
+              </div>
             </div>
           </div>
 
-          <div
-            ref={canvasRef}
-            className={`map-canvas ${isDragging ? 'dragging' : ''} ${calibrateMode ? 'calibrating' : ''}`}
-            onMouseDown={(e) => {
-              if (calibrateMode) return;
-              onMouseDown(e);
-            }}
-            onMouseMove={onMouseMove}
-            onMouseUp={onMouseUp}
-            onMouseLeave={onMouseUp}
-            onWheel={onWheel}
-            onClick={(e) => {
-              if (!calibrateMode) {
-                setSelectedDormGroup(null);
-                return;
-              }
+          <aside className="info-panel">
+            {selectedDorm ? (
+              <>
+                <div className="panel-head">
+                  <div>
+                    <h2>
+                      {language === "he"
+                        ? selectedDorm.labelHe
+                        : selectedDorm.labelEn}
+                    </h2>
+                    <p>{t.sourceNote}</p>
+                  </div>
 
-              const el = canvasRef.current;
-              if (!el) return;
-
-              const rect = el.getBoundingClientRect();
-              const cx = e.clientX - rect.left;
-              const cy = e.clientX - rect.top;
-
-              const worldX = (cx - pan.x) / scale;
-              const worldY = (cy - pan.y) / scale;
-
-              const leftPct = (worldX / rect.width) * 100;
-              const topPct = (worldY / rect.height) * 100;
-
-              console.log(`PIN => top: '${topPct.toFixed(1)}%', left: '${leftPct.toFixed(1)}%'`);
-            }}
-          >
-            <div
-              className="map-layer"
-              style={{
-                transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
-                transformOrigin: '0 0',
-              }}
-            >
-              <img className="map-img" src={MAP_SRC} alt="Technion dorms indexed map" draggable={false} />
-
-              {accessibleDormGroups.map((group) => {
-                const pos = dormPositions[group.baseId];
-                if (!pos) return null;
-
-                const dormIds = applyTypeFilter(group.variants);
-                if (!dormIds.length) return null;
-
-                const stats = getStatsForDormIds(dormIds);
-                const base = getBaseRegion(group.baseId);
-                const occClass = occupancyClass(stats.occupancy);
-                const label = language === 'he' ? base?.name : base?.nameEn;
-
-                return (
                   <button
-                    key={group.baseId}
-                    className={`pin ${occClass} ${selectedDormGroup === group.baseId ? 'active' : ''}`}
-                    style={{ top: pos.top, left: pos.left }}
-                    onClick={(ev) => {
-                      ev.stopPropagation();
-                      setSelectedDormGroup(group.baseId);
-                    }}
-                    title={`${label} — ${t.occupancy}: ${stats.occupancy}%`}
+                    className="close-btn"
                     type="button"
+                    onClick={() => setSelectedDormKey(null)}
                   >
-                    <span className="pin-dot" />
-                    <span className="pin-name">{label}</span>
-                    <span className="pin-badge">{stats.occupancy}%</span>
+                    <X size={18} />
                   </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        {selectedGroupObj && selectedStats && (
-          <div className="panel">
-            <div className="panel-head">
-              <div>
-                <div className="panel-title">
-                  {language === 'he'
-                    ? getBaseRegion(selectedGroupObj.baseId)?.name
-                    : getBaseRegion(selectedGroupObj.baseId)?.nameEn}
                 </div>
-                <div className="panel-sub">
-                  {t.dormTypeLabel}:{' '}
-                  {typeFilter === 'all'
-                    ? t.all
-                    : typeFilter === 'base'
-                    ? t.base
-                    : typeFilter === 'couples'
-                    ? t.couples
-                    : t.family}
-                </div>
-              </div>
 
-              <button className="close" onClick={() => setSelectedDormGroup(null)} type="button">
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="kpis">
-              <div className="kpi">
-                <Building2 size={16} />
-                <span className="kpi-val">{selectedStats.buildings}</span>
-                <span className="kpi-lbl">{t.buildings}</span>
-              </div>
-              <div className="kpi">
-                <Home size={16} />
-                <span className="kpi-val">{selectedStats.rooms}</span>
-                <span className="kpi-lbl">{t.rooms}</span>
-              </div>
-              <div className="kpi">
-                <Users size={16} />
-                <span className="kpi-val">{selectedStats.students}</span>
-                <span className="kpi-lbl">{t.students}</span>
-              </div>
-            </div>
-
-            <div className="occ">
-              <div className="occ-top">
-                <div className="occ-title">{t.occupancyDetails}</div>
-                <div className={`occ-pill ${occupancyClass(selectedStats.occupancy)}`}>{selectedStats.occupancy}%</div>
-              </div>
-
-              <div className="bar">
                 <div
-                  className={`fill ${occupancyClass(selectedStats.occupancy)}`}
-                  style={{ width: `${selectedStats.occupancy}%` }}
-                />
-                <div className="bar-label">{selectedStats.occupancy}%</div>
-              </div>
+                  className={`status-card ${occupancyClass(
+                    selectedDorm.occupancy,
+                    selectedDorm.availableBeds,
+                    selectedDorm.totalCapacity
+                  )}`}
+                >
+                  <span>{t.status}</span>
+                  <strong>{getDormStatus(selectedDorm)}</strong>
+                  <b>{formatPercent(selectedDorm.occupancy)}</b>
+                </div>
 
-              <div className="occ-bottom">
-                <span>
-                  {t.capacity}: {selectedStats.capacity}
-                </span>
-                <span>
-                  {t.students}: {selectedStats.assigned}/{selectedStats.capacity}
-                </span>
+                <div className="kpi-grid">
+                  <div className="kpi">
+                    <span>{t.officialBuildings}</span>
+                    <strong>{selectedDorm.officialBuildings}</strong>
+                  </div>
+
+                  <div className="kpi">
+                    <span>{t.databaseBuildings}</span>
+                    <strong>{selectedDorm.buildingsCount}</strong>
+                  </div>
+
+                  <div className="kpi">
+                    <span>{t.activeBuildings}</span>
+                    <strong>{selectedDorm.activeBuildings}</strong>
+                  </div>
+
+                  <div className="kpi">
+                    <span>{t.inactiveBuildings}</span>
+                    <strong>{selectedDorm.inactiveBuildings}</strong>
+                  </div>
+
+                  <div className="kpi">
+                    <span>{t.rooms}</span>
+                    <strong>{selectedDorm.roomsCount}</strong>
+                  </div>
+
+                  <div className="kpi">
+                    <span>{t.capacity}</span>
+                    <strong>{selectedDorm.totalCapacity}</strong>
+                  </div>
+
+                  <div className="kpi">
+                    <span>{t.occupiedBeds}</span>
+                    <strong>{selectedDorm.occupiedBeds}</strong>
+                  </div>
+
+                  <div className="kpi available">
+                    <span>{t.availableBeds}</span>
+                    <strong>{selectedDorm.availableBeds}</strong>
+                  </div>
+                </div>
+
+                <div className="occupancy-box">
+                  <div className="occupancy-top">
+                    <span>{t.occupancyDetails}</span>
+                    <strong>{formatPercent(selectedDorm.occupancy)}</strong>
+                  </div>
+
+                  <div className="progress">
+                    <div
+                      className={`progress-fill ${occupancyClass(
+                        selectedDorm.occupancy,
+                        selectedDorm.availableBeds,
+                        selectedDorm.totalCapacity
+                      )}`}
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          Math.max(0, selectedDorm.occupancy)
+                        )}%`,
+                      }}
+                    />
+                  </div>
+
+                  <div className="occupancy-bottom">
+                    <span>
+                      {selectedDorm.occupiedBeds}/{selectedDorm.totalCapacity}
+                    </span>
+                    <span>
+                      {selectedDorm.availableBeds} {t.availableBeds}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="buildings-section">
+                  <h3>{t.buildingsList}</h3>
+
+                  {selectedDorm.buildings.length > 0 ? (
+                    <div className="building-list">
+                      {selectedDorm.buildings.map((building) => (
+                        <div
+                          className="building-row"
+                          key={`${building.id}-${building.number}`}
+                        >
+                          <div>
+                            <strong>
+                              {t.building} {building.number}
+                            </strong>
+                            <span>
+                              {building.dormTypeName}
+                              {building.regionName ? ` · ${building.regionName}` : ""}
+                            </span>
+                          </div>
+
+                          <div className="building-mini">
+                            <b>{formatPercent(building.occupancy)}</b>
+                            <small>
+                              {building.occupied}/{building.capacity}
+                            </small>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="no-data">{t.noData}</p>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="empty-panel">
+                <h2>{t.selectDorm}</h2>
+                <p>{t.selectDormSub}</p>
               </div>
-            </div>
-          </div>
-        )}
-      </div>
+            )}
+          </aside>
+        </div>
+      )}
 
       <style>{`
         .map-page {
-          padding: 26px;
-          background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
           min-height: 100vh;
+          padding: 24px;
+          background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+          color: #0f172a;
         }
 
         .page-header {
           display: flex;
           justify-content: space-between;
-          align-items: center;
-          gap: 18px;
-          margin-bottom: 18px;
-          background: white;
-          padding: 18px 22px;
-          border-radius: 14px;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-        }
-
-        .titles h1 {
-          font-size: 28px;
-          font-weight: 800;
-          margin: 0 0 6px;
-          color: #1e293b;
-          letter-spacing: -0.02em;
-        }
-
-        .titles p {
-          margin: 0;
-          color: #64748b;
-          font-size: 14px;
-          font-weight: 600;
-        }
-
-        .map-path {
-          margin-top: 8px !important;
-          font-size: 12px !important;
-          color: #475569 !important;
-          font-weight: 800 !important;
-        }
-        .map-path code {
-          background: #f1f5f9;
-          padding: 2px 6px;
-          border-radius: 6px;
+          align-items: flex-start;
+          gap: 20px;
+          margin-bottom: 14px;
+          padding: 18px 20px;
+          background: rgba(255, 255, 255, 0.96);
           border: 1px solid #e2e8f0;
+          border-radius: 18px;
+          box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+        }
+
+        .page-header h1 {
+          margin: 0 0 6px;
+          font-size: 26px;
+          font-weight: 900;
           color: #0f172a;
         }
 
-        .filter {
+        .page-header p {
+          margin: 0;
+          font-size: 14px;
+          font-weight: 700;
+          color: #64748b;
+        }
+
+        .restricted-note {
+          margin-top: 8px !important;
+          color: #2563eb !important;
+        }
+
+        .header-actions {
           display: flex;
           align-items: center;
           gap: 10px;
-          background: #f8fafc;
-          border: 1px solid #e2e8f0;
-          padding: 10px 12px;
-          border-radius: 10px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
         }
 
-        .filter-label {
+        .search-box,
+        .filter-box {
+          height: 40px;
           display: flex;
           align-items: center;
           gap: 8px;
+          padding: 0 12px;
+          background: #f8fafc;
+          border: 1px solid #cbd5e1;
+          border-radius: 12px;
           color: #475569;
-          font-size: 13px;
+        }
+
+        .search-box input {
+          width: 160px;
+          border: none;
+          outline: none;
+          background: transparent;
+          color: #0f172a;
+          font-weight: 700;
+        }
+
+        .filter-box select {
+          border: none;
+          outline: none;
+          background: transparent;
+          color: #0f172a;
+          font-weight: 800;
+          cursor: pointer;
+        }
+
+        .primary-btn {
+          height: 40px;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          padding: 0 14px;
+          border: none;
+          border-radius: 12px;
+          background: #2563eb;
+          color: white;
+          font-weight: 900;
+          cursor: pointer;
+          box-shadow: 0 8px 18px rgba(37, 99, 235, 0.22);
+        }
+
+        .summary-strip {
+          display: grid;
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+          gap: 12px;
+          margin-bottom: 14px;
+        }
+
+        .summary-card {
+          background: white;
+          border: 1px solid #e2e8f0;
+          border-radius: 16px;
+          padding: 14px;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          box-shadow: 0 5px 16px rgba(15, 23, 42, 0.06);
+        }
+
+        .summary-card svg {
+          color: #2563eb;
+          flex-shrink: 0;
+        }
+
+        .summary-card.success svg {
+          color: #059669;
+        }
+
+        .summary-card span {
+          flex: 1;
+          color: #64748b;
+          font-size: 12px;
           font-weight: 800;
         }
 
-        select {
-          border: 1px solid #cbd5e1;
-          border-radius: 8px;
-          padding: 7px 10px;
-          font-weight: 700;
-          font-size: 13px;
-          background: white;
-          color: #1e293b;
-          cursor: pointer;
-          transition: all 0.2s;
+        .summary-card strong {
+          color: #0f172a;
+          font-size: 20px;
+          font-weight: 950;
         }
 
-        select:hover { border-color: #94a3b8; }
-        select:focus {
-          outline: none;
-          border-color: #3b82f6;
-          box-shadow: 0 0 0 3px rgba(59,130,246,0.12);
+        .state-box {
+          background: white;
+          border-radius: 18px;
+          padding: 26px;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          color: #475569;
+          font-weight: 800;
+          box-shadow: 0 6px 20px rgba(15, 23, 42, 0.08);
+        }
+
+        .state-box.error {
+          color: #b91c1c;
         }
 
         .map-shell {
           display: grid;
-          grid-template-columns: 1fr 360px;
+          grid-template-columns: minmax(0, 1fr) 390px;
           gap: 16px;
+          align-items: start;
         }
 
-        @media (max-width: 1200px) {
-          .map-shell { grid-template-columns: 1fr; }
-        }
-
-        .map-canvas-wrap {
+        .map-card {
           position: relative;
           background: white;
-          border-radius: 14px;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-          overflow: hidden;
-        }
-
-        .controls {
-          position: absolute;
-          top: auto;
-          bottom: 12px;
-          left: 12px;
-          z-index: 30;
-          background: rgba(255,255,255,0.92);
-          border-radius: 12px;
-          padding: 8px 8px;
-          box-shadow: 0 6px 18px rgba(0,0,0,0.12);
           border: 1px solid #e2e8f0;
-          min-width: 165px;
-          backdrop-filter: blur(6px);
+          border-radius: 20px;
+          overflow: hidden;
+          box-shadow: 0 14px 36px rgba(15, 23, 42, 0.12);
         }
 
-        .controls-row { display: flex; flex-direction: column; gap: 6px; }
-
-        .controls-title {
-          font-size: 10px;
-          font-weight: 900;
-          color: #1e293b;
-          text-transform: uppercase;
-          letter-spacing: 0.09em;
-        }
-
-        .btnrow {
+        .map-toolbar {
+          position: absolute;
+          left: 14px;
+          right: 14px;
+          top: 14px;
+          z-index: 40;
           display: flex;
-          gap: 6px;
+          justify-content: space-between;
           align-items: center;
-          flex-wrap: wrap;
+          gap: 12px;
+          pointer-events: none;
         }
 
-        .iconbtn {
+        .toolbar-left,
+        .toolbar-hint {
+          pointer-events: auto;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 8px;
+          background: rgba(255, 255, 255, 0.92);
+          border: 1px solid #e2e8f0;
+          border-radius: 14px;
+          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+          backdrop-filter: blur(8px);
+        }
+
+        .toolbar-title {
+          font-size: 11px;
+          font-weight: 950;
+          color: #334155;
+          text-transform: uppercase;
+        }
+
+        .icon-btn {
+          width: 32px;
+          height: 32px;
           border: none;
+          border-radius: 10px;
           background: #f1f5f9;
-          padding: 6px;
-          border-radius: 9px;
+          color: #334155;
           cursor: pointer;
-          transition: all 0.15s;
-          color: #475569;
           display: inline-flex;
           align-items: center;
           justify-content: center;
         }
 
-        .iconbtn:hover { background: #e2e8f0; transform: translateY(-1px); }
-        .iconbtn:active { transform: translateY(0); }
+        .icon-btn:hover {
+          background: #e2e8f0;
+        }
 
-        .pillbtn {
-          border: 1px solid #e2e8f0;
-          background: white;
-          padding: 6px 8px;
+        .pill-btn {
+          height: 32px;
+          border: 1px solid #cbd5e1;
           border-radius: 999px;
+          background: white;
+          color: #334155;
+          padding: 0 10px;
           font-size: 11px;
           font-weight: 900;
           cursor: pointer;
-          color: #334155;
-          transition: all 0.15s;
-          margin-left: 2px;
         }
-        .pillbtn:hover { background: #f8fafc; }
-        .pillbtn.on { border-color: #3b82f6; color: #1d4ed8; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
 
-        .meta {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 10px;
-          font-size: 10px;
-          color: #64748b;
+        .pill-btn.active {
+          background: #eff6ff;
+          border-color: #2563eb;
+          color: #1d4ed8;
+        }
+
+        .toolbar-hint {
+          color: #475569;
+          font-size: 12px;
           font-weight: 800;
         }
 
-        .zoom-val { color: #0f172a; }
-
-        .pan-hint {
-          display: inline-flex;
-          align-items: center;
-          gap: 5px;
-          font-size: 10px;
-          color: #475569;
+        .toolbar-hint strong {
+          color: #0f172a;
         }
-
-        .legend {
-          display: flex;
-          gap: 6px;
-          align-items: center;
-        }
-
-        .lg {
-          width: 12px;
-          height: 12px;
-          border-radius: 4px;
-          display: inline-block;
-          box-shadow: 0 1px 2px rgba(0,0,0,0.10);
-        }
-        .lg.good { background: #10b981; }
-        .lg.warn { background: #f59e0b; }
-        .lg.danger { background: #ef4444; }
 
         .map-canvas {
           position: relative;
-          height: calc(100vh - 240px);
+          height: calc(100vh - 270px);
           min-height: 620px;
-          max-height: 860px;
+          max-height: 900px;
           overflow: hidden;
-          cursor: grab;
           background: #f8fafc;
+          cursor: grab;
         }
 
-        @media (max-width: 900px) {
-          .map-canvas {
-            height: calc(100vh - 280px);
-            min-height: 560px;
-          }
+        .map-canvas.dragging {
+          cursor: grabbing;
         }
 
-        .map-canvas.dragging { cursor: grabbing; }
-        .map-canvas.calibrating { cursor: crosshair; }
+        .map-canvas.calibrating {
+          cursor: crosshair;
+        }
 
         .map-layer {
           position: absolute;
@@ -733,227 +1373,437 @@ export default function MapPage({ language = 'en' }) {
           width: 100%;
           height: 100%;
           object-fit: contain;
-          pointer-events: none;
           user-select: none;
+          pointer-events: none;
         }
 
-        .pin {
+        .click-area {
           position: absolute;
           transform: translate(-50%, -50%);
+          border-radius: 14px;
+          border: 2px solid transparent;
+          background: rgba(255, 255, 255, 0.01);
+          cursor: pointer;
+          z-index: 20;
+          transition: all 0.18s ease;
+        }
+
+        .click-area:hover {
+          background: rgba(37, 99, 235, 0.16);
+          border-color: rgba(37, 99, 235, 0.85);
+          box-shadow: 0 0 0 6px rgba(37, 99, 235, 0.12);
+        }
+
+        .click-area.selected {
+          background: rgba(37, 99, 235, 0.22);
+          border-color: #2563eb;
+          box-shadow: 0 0 0 7px rgba(37, 99, 235, 0.16);
+        }
+
+        .click-area.full {
+          border-color: rgba(239, 68, 68, 0.7);
+        }
+
+        .click-area.danger {
+          border-color: rgba(249, 115, 22, 0.65);
+        }
+
+        .click-area.warn {
+          border-color: rgba(245, 158, 11, 0.65);
+        }
+
+        .click-area.good {
+          border-color: rgba(16, 185, 129, 0.55);
+        }
+
+        .sr-only {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          padding: 0;
+          margin: -1px;
+          overflow: hidden;
+          clip: rect(0, 0, 0, 0);
+          white-space: nowrap;
+          border: 0;
+        }
+
+        .legend {
+          position: absolute;
+          left: 14px;
+          bottom: 14px;
+          z-index: 35;
           display: flex;
-          flex-direction: column;
+          gap: 10px;
+          align-items: center;
+          padding: 10px 12px;
+          background: rgba(255, 255, 255, 0.94);
+          border: 1px solid #e2e8f0;
+          border-radius: 14px;
+          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+          backdrop-filter: blur(8px);
+        }
+
+        .legend-item {
+          display: flex;
           align-items: center;
           gap: 6px;
-          cursor: pointer;
-          transition: all 0.16s;
-          z-index: 10;
-          border: none;
-          background: transparent;
-          padding: 0;
-        }
-
-        .pin:hover {
-          z-index: 20;
-          transform: translate(-50%, -50%) scale(1.05);
-        }
-
-        .pin.active {
-          z-index: 25;
-          transform: translate(-50%, -50%) scale(1.08);
-        }
-
-        /* Bulletproof color mapping (prevents “all black”) */
-        .pin.good { color: #10b981 !important; }
-        .pin.warn { color: #f59e0b !important; }
-        .pin.danger { color: #ef4444 !important; }
-
-        .pin-dot {
-          width: 22px;
-          height: 22px;
-          border-radius: 50%;
-          background: currentColor !important;
-          border: 3px solid white;
-          box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-          transition: all 0.2s;
-        }
-
-        .pin-name {
-          background: rgba(255,255,255,0.96);
-          padding: 5px 10px;
-          border-radius: 7px;
+          color: #334155;
           font-size: 12px;
           font-weight: 900;
-          color: #0f172a;
-          box-shadow: 0 2px 8px rgba(0,0,0,0.12);
           white-space: nowrap;
-          border: 1px solid #e2e8f0;
         }
 
-        /* FIXED: was "..pin-badge" in your paste; must be ".pin-badge" */
-        .pin-badge {
-          background: rgba(255,255,255,0.96);
-          color: currentColor !important;
-          padding: 4px 10px;
-          border-radius: 999px;
-          font-size: 11px;
-          font-weight: 950;
-          box-shadow: 0 2px 6px rgba(0,0,0,0.12);
-          min-width: 48px;
-          text-align: center;
-          border: 1px solid #e2e8f0;
+        .legend-dot {
+          width: 11px;
+          height: 11px;
+          border-radius: 50%;
         }
 
-        .panel {
+        .legend-dot.good {
+          background: #10b981;
+        }
+
+        .legend-dot.warn {
+          background: #f59e0b;
+        }
+
+        .legend-dot.full {
+          background: #ef4444;
+        }
+
+        .info-panel {
           background: white;
-          border-radius: 14px;
-          padding: 20px;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+          border: 1px solid #e2e8f0;
+          border-radius: 20px;
+          padding: 18px;
+          box-shadow: 0 14px 36px rgba(15, 23, 42, 0.1);
           position: sticky;
           top: 16px;
-          height: fit-content;
+          max-height: calc(100vh - 48px);
+          overflow: auto;
         }
 
         .panel-head {
           display: flex;
           justify-content: space-between;
+          gap: 12px;
           align-items: flex-start;
-          margin-bottom: 16px;
-          padding-bottom: 16px;
-          border-bottom: 2px solid #f1f5f9;
+          padding-bottom: 14px;
+          border-bottom: 1px solid #e2e8f0;
+          margin-bottom: 14px;
         }
 
-        .panel-title {
-          font-weight: 900;
-          font-size: 18px;
-          margin-bottom: 6px;
-          color: #0f172a;
-        }
-
-        .panel-sub {
-          font-size: 12px;
-          color: #64748b;
-          font-weight: 800;
-        }
-
-        .close {
-          border: none;
-          background: #f1f5f9;
-          padding: 8px;
-          border-radius: 10px;
-          cursor: pointer;
-          color: #64748b;
-          transition: all 0.15s;
-        }
-        .close:hover { background: #e2e8f0; color: #0f172a; }
-
-        .kpis {
-          display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap: 10px;
-          margin-bottom: 16px;
-        }
-
-        .kpi {
-          background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
-          border-radius: 12px;
-          padding: 14px;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          gap: 8px;
-          border: 1px solid #e2e8f0;
-        }
-
-        .kpi svg { color: #3b82f6; }
-
-        .kpi-val {
+        .panel-head h2,
+        .empty-panel h2 {
+          margin: 0 0 6px;
           font-size: 22px;
           font-weight: 950;
           color: #0f172a;
         }
 
-        .kpi-lbl {
-          font-size: 10px;
+        .panel-head p,
+        .empty-panel p {
+          margin: 0;
           color: #64748b;
-          font-weight: 900;
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
+          font-size: 13px;
+          font-weight: 700;
+          line-height: 1.5;
         }
 
-        .occ {
-          background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
-          border-radius: 12px;
-          padding: 16px;
-          border: 1px solid #e2e8f0;
-        }
-
-        .occ-top {
-          display: flex;
-          justify-content: space-between;
+        .close-btn {
+          border: none;
+          border-radius: 10px;
+          background: #f1f5f9;
+          color: #64748b;
+          cursor: pointer;
+          padding: 8px;
+          display: inline-flex;
           align-items: center;
-          margin-bottom: 12px;
+          justify-content: center;
         }
 
-        .occ-title {
-          font-size: 12px;
-          font-weight: 950;
-          color: #0f172a;
-          text-transform: uppercase;
-          letter-spacing: 0.08em;
-        }
-
-        .occ-pill {
-          padding: 6px 12px;
-          border-radius: 999px;
-          font-size: 12px;
-          font-weight: 950;
+        .status-card {
+          padding: 14px;
+          border-radius: 16px;
+          margin-bottom: 14px;
+          display: grid;
+          grid-template-columns: 1fr auto;
+          gap: 4px 12px;
+          align-items: center;
           color: white;
         }
 
-        .occ-pill.good { background: #10b981; }
-        .occ-pill.warn { background: #f59e0b; }
-        .occ-pill.danger { background: #ef4444; }
-
-        .bar {
-          height: 10px;
-          background: #e2e8f0;
-          border-radius: 999px;
-          overflow: hidden;
-          margin-bottom: 10px;
-          box-shadow: inset 0 1px 2px rgba(0,0,0,0.08);
-          position: relative;
+        .status-card span {
+          font-size: 12px;
+          font-weight: 900;
+          opacity: 0.9;
         }
 
-        .fill {
-          height: 100%;
-          transition: width 0.3s ease;
-          border-radius: 999px;
-        }
-
-        .fill.good { background: linear-gradient(90deg, #10b981 0%, #059669 100%); }
-        .fill.warn { background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%); }
-        .fill.danger { background: linear-gradient(90deg, #ef4444 0%, #dc2626 100%); }
-
-        .bar-label {
-          position: absolute;
-          inset: 0;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 10px;
+        .status-card strong {
+          font-size: 18px;
           font-weight: 950;
-          color: #0f172a;
-          text-shadow: 0 1px 0 rgba(255,255,255,0.85);
-          pointer-events: none;
-          user-select: none;
         }
 
-        .occ-bottom {
+        .status-card b {
+          grid-row: span 2;
+          font-size: 28px;
+          font-weight: 950;
+        }
+
+        .status-card.good {
+          background: linear-gradient(135deg, #10b981, #059669);
+        }
+
+        .status-card.warn {
+          background: linear-gradient(135deg, #f59e0b, #d97706);
+        }
+
+        .status-card.danger {
+          background: linear-gradient(135deg, #f97316, #ea580c);
+        }
+
+        .status-card.full {
+          background: linear-gradient(135deg, #ef4444, #dc2626);
+        }
+
+        .status-card.neutral {
+          background: linear-gradient(135deg, #64748b, #475569);
+        }
+
+        .kpi-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+          margin-bottom: 14px;
+        }
+
+        .kpi {
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          border-radius: 14px;
+          padding: 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+
+        .kpi span {
+          color: #64748b;
+          font-size: 11px;
+          font-weight: 900;
+        }
+
+        .kpi strong {
+          color: #0f172a;
+          font-size: 22px;
+          font-weight: 950;
+        }
+
+        .kpi.available strong {
+          color: #059669;
+        }
+
+        .occupancy-box {
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          border-radius: 16px;
+          padding: 14px;
+          margin-bottom: 16px;
+        }
+
+        .occupancy-top,
+        .occupancy-bottom {
           display: flex;
           justify-content: space-between;
-          font-size: 11px;
+          align-items: center;
+          gap: 10px;
+        }
+
+        .occupancy-top {
+          margin-bottom: 10px;
+        }
+
+        .occupancy-top span {
+          font-size: 12px;
+          color: #475569;
+          font-weight: 950;
+          text-transform: uppercase;
+        }
+
+        .occupancy-top strong {
+          color: #0f172a;
+          font-size: 16px;
+          font-weight: 950;
+        }
+
+        .progress {
+          height: 12px;
+          border-radius: 999px;
+          background: #e2e8f0;
+          overflow: hidden;
+          margin-bottom: 10px;
+        }
+
+        .progress-fill {
+          height: 100%;
+          border-radius: 999px;
+          transition: width 0.25s ease;
+        }
+
+        .progress-fill.good {
+          background: #10b981;
+        }
+
+        .progress-fill.warn {
+          background: #f59e0b;
+        }
+
+        .progress-fill.danger {
+          background: #f97316;
+        }
+
+        .progress-fill.full {
+          background: #ef4444;
+        }
+
+        .progress-fill.neutral {
+          background: #64748b;
+        }
+
+        .occupancy-bottom {
+          font-size: 12px;
           color: #64748b;
           font-weight: 800;
+        }
+
+        .buildings-section h3 {
+          margin: 0 0 10px;
+          font-size: 15px;
+          font-weight: 950;
+          color: #0f172a;
+        }
+
+        .building-list {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+
+        .building-row {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: center;
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          border-radius: 12px;
+          padding: 10px;
+        }
+
+        .building-row strong {
+          display: block;
+          margin-bottom: 3px;
+          font-size: 13px;
+          font-weight: 950;
+          color: #0f172a;
+        }
+
+        .building-row span {
+          display: block;
+          font-size: 11px;
+          font-weight: 700;
+          color: #64748b;
+        }
+
+        .building-mini {
+          min-width: 70px;
+          text-align: end;
+        }
+
+        .building-mini b {
+          display: block;
+          color: #0f172a;
+          font-size: 16px;
+          font-weight: 950;
+        }
+
+        .building-mini small {
+          color: #64748b;
+          font-weight: 800;
+        }
+
+        .empty-panel {
+          padding: 24px 8px;
+          text-align: center;
+        }
+
+        .no-data {
+          margin: 0;
+          padding: 14px;
+          background: #f8fafc;
+          border: 1px dashed #cbd5e1;
+          border-radius: 12px;
+          color: #64748b;
+          font-size: 13px;
+          font-weight: 800;
+          text-align: center;
+        }
+
+        @media (max-width: 1200px) {
+          .map-shell {
+            grid-template-columns: 1fr;
+          }
+
+          .info-panel {
+            position: static;
+            max-height: none;
+          }
+
+          .map-canvas {
+            height: 620px;
+          }
+        }
+
+        @media (max-width: 900px) {
+          .map-page {
+            padding: 14px;
+          }
+
+          .page-header {
+            flex-direction: column;
+          }
+
+          .header-actions {
+            width: 100%;
+            justify-content: stretch;
+          }
+
+          .search-box {
+            flex: 1;
+          }
+
+          .search-box input {
+            width: 100%;
+          }
+
+          .summary-strip {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+
+          .map-toolbar {
+            align-items: flex-start;
+            flex-direction: column;
+          }
+
+          .toolbar-hint {
+            display: none;
+          }
+
+          .map-canvas {
+            min-height: 480px;
+            height: 520px;
+          }
         }
       `}</style>
     </div>
