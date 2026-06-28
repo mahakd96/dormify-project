@@ -279,9 +279,7 @@ export const studentsAPI = {
       throw new Error(getErrorMessage(err, "Failed to load student"));
     }
   },
-};
-
-<<<<<<< HEAD
+  };
 
 export const analysisAPI = {
   getData: async () => {
