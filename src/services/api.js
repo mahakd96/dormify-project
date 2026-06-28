@@ -282,27 +282,92 @@ export const studentsAPI = {
     }
   },
 
-  getCounts: async () => {
+    getCounts: async () => {
     try {
       const { data } = await api.get("/api/students/counts/");
       return data;
     } catch (err) {
       console.warn(
-        "studentsAPI.getCounts failed:",
+        "studentsAPI.getCounts failed, computing from students list:",
         err?.response?.data || err.message
       );
 
-      return {
-        total: 0,
-        all: 0,
-        all_students: 0,
-        total_students: 0,
-        staying: 0,
-        new: 0,
-        new_students: 0,
-        transferring: 0,
-        leaving: 0,
-      };
+      try {
+        const { data } = await api.get("/api/students/");
+        const list = Array.isArray(data) ? data : data.results || [];
+
+        const isStatus = (student, words) => {
+          const text = [
+            student.status,
+            student.student_status,
+            student.type,
+            student.student_type,
+            student.category,
+            student.assignment_status,
+            student.sap_status,
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+
+          return words.some((word) => text.includes(word));
+        };
+
+        const total = list.length;
+
+        const staying = list.filter((s) =>
+          isStatus(s, ["staying", "stay", "נשאר"])
+        ).length;
+
+        const newStudents = list.filter((s) =>
+          isStatus(s, ["new", "incoming", "חדש", "נכנס"])
+        ).length;
+
+        const transferring = list.filter((s) =>
+          isStatus(s, ["transferring", "transfer", "מעבר", "עובר"])
+        ).length;
+
+        const leaving = list.filter((s) =>
+          isStatus(s, ["leaving", "leave", "עזיבה", "עוזב"])
+        ).length;
+
+        return {
+          total,
+          all: total,
+          all_students: total,
+          total_students: total,
+
+          staying,
+          staying_students: staying,
+
+          new: newStudents,
+          new_students: newStudents,
+          incoming: newStudents,
+
+          transferring,
+          transferring_students: transferring,
+
+          leaving,
+          leaving_students: leaving,
+        };
+      } catch (fallbackErr) {
+        console.warn(
+          "studentsAPI.getCounts fallback failed:",
+          fallbackErr?.response?.data || fallbackErr.message
+        );
+
+        return {
+          total: 0,
+          all: 0,
+          all_students: 0,
+          total_students: 0,
+          staying: 0,
+          new: 0,
+          new_students: 0,
+          transferring: 0,
+          leaving: 0,
+        };
+      }
     }
   },
 
