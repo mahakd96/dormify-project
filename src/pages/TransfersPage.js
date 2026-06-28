@@ -1089,6 +1089,15 @@ export default function TransfersPage({ language = 'he' }) {
           }
         </div>
       </div>
+      {showModal && (
+        <NewRequestModal
+          onClose={() => setShowModal(false)}
+          onSuccess={() => {
+            setShowModal(false);
+            loadRequests();
+          }}
+        />
+      )}
 
       <style>{`
         /* ═══════════════════════════════════════════════
