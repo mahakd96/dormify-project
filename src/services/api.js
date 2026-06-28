@@ -279,8 +279,7 @@ export const studentsAPI = {
       throw new Error(getErrorMessage(err, "Failed to load student"));
     }
   },
-};
-
+  };
 
 export const analysisAPI = {
   getData: async () => {
@@ -292,6 +291,7 @@ export const analysisAPI = {
     }
   },
 };
+
 
 export const transfersAPI = {
   getAll: async () => {
@@ -317,13 +317,13 @@ export const transfersAPI = {
       const { data } = await api.put(`/api/transfers/${id}/reject/`, {
         reason,
       });
-
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to reject transfer"));
     }
   },
 };
+
 export const apartmentsAPI = {
   getAll: async () => {
     try {
@@ -345,6 +345,7 @@ export const roomsAPI = {
     }
   },
 };
+
 export const whatIfAPI = {
   simulateBuildingInactivation: async (buildingIds) => {
     try {
@@ -384,7 +385,8 @@ export const whatIfAPI = {
       );
     }
   },
-    simulateAvailabilityChange: async ({
+
+  simulateAvailabilityChange: async ({
     targetType,
     targetIds,
     action = "inactivate",
@@ -425,7 +427,6 @@ export const whatIfAPI = {
       );
     }
   },
-
 };
 export const debugAuthAPI = {
   getAccessToken,
