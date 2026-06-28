@@ -281,6 +281,7 @@ export const studentsAPI = {
   },
 };
 
+
 export const analysisAPI = {
   getData: async () => {
     try {
@@ -323,7 +324,109 @@ export const transfersAPI = {
     }
   },
 };
+export const apartmentsAPI = {
+  getAll: async () => {
+    try {
+      const { data } = await api.get("/api/apartments/");
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load apartments"));
+    }
+  },
+};
 
+export const roomsAPI = {
+  getAll: async () => {
+    try {
+      const { data } = await api.get("/api/rooms/");
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load rooms"));
+    }
+  },
+};
+export const whatIfAPI = {
+  simulateBuildingInactivation: async (buildingIds) => {
+    try {
+      const { data } = await api.post(
+        "/api/what-if/building-inactivation/simulate/",
+        {
+          building_ids: buildingIds,
+        }
+      );
+
+      return data;
+    } catch (err) {
+      throw new Error(
+        getErrorMessage(err, "Failed to simulate building inactivation")
+      );
+    }
+  },
+
+  confirmBuildingInactivation: async (
+    buildingIds,
+    reason = "Building inactivated"
+  ) => {
+    try {
+      const { data } = await api.post(
+        "/api/what-if/building-inactivation/confirm/",
+        {
+          building_ids: buildingIds,
+          reason,
+          inactivate_buildings: true,
+        }
+      );
+
+      return data;
+    } catch (err) {
+      throw new Error(
+        getErrorMessage(err, "Failed to confirm building inactivation")
+      );
+    }
+  },
+    simulateAvailabilityChange: async ({
+    targetType,
+    targetIds,
+    action = "inactivate",
+  }) => {
+    try {
+      const { data } = await api.post("/api/what-if/availability/simulate/", {
+        target_type: targetType,
+        target_ids: targetIds,
+        action,
+      });
+
+      return data;
+    } catch (err) {
+      throw new Error(
+        getErrorMessage(err, "Failed to simulate availability change")
+      );
+    }
+  },
+
+  confirmAvailabilityChange: async ({
+    targetType,
+    targetIds,
+    action = "inactivate",
+    reason = "Availability changed",
+  }) => {
+    try {
+      const { data } = await api.post("/api/what-if/availability/confirm/", {
+        target_type: targetType,
+        target_ids: targetIds,
+        action,
+        reason,
+      });
+
+      return data;
+    } catch (err) {
+      throw new Error(
+        getErrorMessage(err, "Failed to confirm availability change")
+      );
+    }
+  },
+
+};
 export const debugAuthAPI = {
   getAccessToken,
   getRefreshToken,
