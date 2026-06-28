@@ -22,6 +22,7 @@ import SettingsPage from './pages/SettingsPage';
 import MapPage from './pages/MapPage';
 // At the top imports:
 import AnalysisPage from './pages/AnalysisPage';
+import WhatIfPage from './pages/WhatIfPage';
 
 // Inside Routes:
 
@@ -101,6 +102,8 @@ function AppContent() {
         <Route path="/upload" element={<UploadPage language={language} />} />
         <Route path="/priority" element={<PriorityPage language={language} />} />
         <Route path="/allocation" element={<AllocationPage language={language} />} />
+          <Route path="/analysis" element={<AnalysisPage language={language} />} />
+          <Route path="/what-if" element={<WhatIfPage language={language} />} />
         <Route path="/allocation/results" element={<AllocationResultsPage language={language} />} />
         <Route path="/transfers" element={<TransfersPage language={language} />} />
         <Route path="/reports" element={<ReportsPage language={language} />} />
