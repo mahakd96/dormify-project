@@ -20,6 +20,7 @@ import {
   UserCog,
   Map,
   TrendingUp,  // ← ADD THIS
+    HelpCircle,
 } from 'lucide-react';
 function Sidebar({ collapsed, onToggle, language }) {
   const auth = useAuth();
@@ -77,6 +78,7 @@ function Sidebar({ collapsed, onToggle, language }) {
     { path: '/transfers', icon: ArrowLeftRight, label: language === 'he' ? 'בקשות מעבר' : 'Transfer Requests', show: true },
     { path: '/reports', icon: BarChart3, label: language === 'he' ? 'דוחות' : 'Reports', show: true },
     { path: '/analysis', icon: TrendingUp, label: language === 'he' ? 'ניתוח נתונים' : 'Data Analysis', show: true },
+      { path: '/what-if', icon: HelpCircle, label: language === 'he' ? 'כלי מה אם' : 'What-If Tool', show: true },
     { path: '/users', icon: UserCog, label: language === 'he' ? 'מידע על עובדים ' : 'Workers Contacts', show: canManageUsers() },
     { path: '/settings', icon: Settings, label: language === 'he' ? 'הגדרות' : 'Settings', show: true },
   ];
