@@ -312,23 +312,18 @@ export const transfersAPI = {
     }
   },
 
-
   reject: async (id, reason = "") => {
     try {
       const { data } = await api.put(`/api/transfers/${id}/reject/`, {
         reason,
       });
-
-
-  reject: async (id) => {
-    try {
-      const { data } = await api.put(`/api/transfers/${id}/reject/`);
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to reject transfer"));
     }
   },
 };
+
 export const apartmentsAPI = {
   getAll: async () => {
     try {
@@ -350,6 +345,7 @@ export const roomsAPI = {
     }
   },
 };
+
 export const whatIfAPI = {
   simulateBuildingInactivation: async (buildingIds) => {
     try {
@@ -389,7 +385,8 @@ export const whatIfAPI = {
       );
     }
   },
-    simulateAvailabilityChange: async ({
+
+  simulateAvailabilityChange: async ({
     targetType,
     targetIds,
     action = "inactivate",
@@ -430,10 +427,7 @@ export const whatIfAPI = {
       );
     }
   },
-
 };
-
-
 export const debugAuthAPI = {
   getAccessToken,
   getRefreshToken,
