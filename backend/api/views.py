@@ -25,7 +25,7 @@ from .models import (
 from .serializers import (
     UserSerializer, LoginSerializer, RegisterSerializer,
     RegionSerializer, DormTypeSerializer, BuildingSerializer, ApartmentSerializer,
-    RoomSerializer, StudentSerializer, TransferSerializer,
+    RoomSerializer, StudentSerializer, StudentListSerializer, TransferSerializer,
     AllocationRunSerializer, ImportBatchSerializer, RegionInboxSerializer
 )
 
@@ -615,6 +615,9 @@ class StudentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
+
+        if self.action == 'list':
+            return StudentListSerializer
         return StudentSerializer
 
     def get_queryset(self):
