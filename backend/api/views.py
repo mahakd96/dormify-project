@@ -11,7 +11,6 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.exceptions import ValidationError as DRFValidationError
 
-from django.http import HttpResponse
 from django.utils import timezone
 from django.db import transaction
 from django.db.models import Q, Count
@@ -5735,7 +5734,6 @@ def _excel_response(buffer, filename):
         f'attachment; filename="{filename}"'
     )
     return response
-
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
