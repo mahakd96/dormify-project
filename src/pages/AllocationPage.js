@@ -299,8 +299,8 @@ function AllocationPage({ language = 'he' }) {
   const t = useMemo(() => {
     const strings = {
       he: {
-        title: 'ניהול שיבוץ',
-        subtitle: 'הפעלת אלגוריתם השיבוץ החכם וניהול תוצאות',
+        title: 'שיבוץ סטודנטים',
+        subtitle: '',
         runAllocation: 'הפעל שיבוץ',
         running: 'מריץ שיבוץ...',
         stopAllocation: 'עצור שיבוץ',
@@ -413,10 +413,16 @@ function AllocationPage({ language = 'he' }) {
         malformedSummary: 'נתוני שיבוץ לא תקינים',
         currentStatus:   'סטטוס נוכחי',
         region:          'אזור',
+        studentBreakdownTitle: 'פילוח סטודנטים',
+        newStudents:     'חדשים',
+        continuing:      'ממשיכים',
+        transfers:       'העברות',
+        leaving:         'עוזבים',
+        priorityStudents:'עדיפות',
       },
       en: {
-        title: 'Allocation Management',
-        subtitle: 'Run the smart allocation algorithm and manage results',
+        title: 'Allocation ',
+        subtitle: '',
         runAllocation: 'Run Allocation',
         running: 'Running...',
         stopAllocation: 'Stop Run',
@@ -529,6 +535,12 @@ function AllocationPage({ language = 'he' }) {
         malformedSummary: 'Malformed allocation summary response',
         currentStatus:   'Current status',
         region:          'Region',
+        studentBreakdownTitle: 'Student Breakdown',
+        newStudents:     'New',
+        continuing:      'Continuing',
+        transfers:       'Transfers',
+        leaving:         'Leaving',
+        priorityStudents:'Priority',
       },
     };
     return strings[language] || strings.en;
@@ -1029,37 +1041,75 @@ function AllocationPage({ language = 'he' }) {
           </div>
 
           <div className="ap-header-stats">
-            <div className="ap-stat-item">
-              <div className="ap-stat-icon ap-stat-blue"><Users size={16} /></div>
-              <div>
-                <div className="ap-stat-val">{summary?.total_students || 0}</div>
-                <div className="ap-stat-lbl">{t.totalStudents}</div>
-              </div>
-            </div>
-            <div className="ap-stat-divider" />
-            <div className="ap-stat-item">
-              <div className="ap-stat-icon ap-stat-green"><Check size={16} /></div>
-              <div>
-                <div className="ap-stat-val ap-stat-green-text">{summary?.assigned_students || 0}</div>
-                <div className="ap-stat-lbl">{t.allocatedStudents}</div>
-              </div>
-            </div>
-            <div className="ap-stat-divider" />
-            <div className="ap-stat-item">
-              <div className="ap-stat-icon ap-stat-amber"><AlertTriangle size={16} /></div>
-              <div>
-                <div className="ap-stat-val ap-stat-amber-text">{summary?.unassigned_students || 0}</div>
-                <div className="ap-stat-lbl">{t.unallocatedStudents}</div>
-              </div>
-            </div>
-            <div className="ap-stat-divider" />
-            <div className="ap-stat-item">
-              <div className="ap-stat-icon ap-stat-slate"><Home size={16} /></div>
-              <div>
-                <div className="ap-stat-val">{summary?.available_beds || 0}</div>
-                <div className="ap-stat-lbl">{t.freeBedsLabel}</div>
-              </div>
-            </div>
+            {result ? (
+              <>
+                <div className="ap-stat-item">
+                  <div className="ap-stat-icon ap-stat-green"><Check size={16} /></div>
+                  <div>
+                    <div className="ap-stat-val ap-stat-green-text">{result.successful_assignments || 0}</div>
+                    <div className="ap-stat-lbl">{t.successfulAssign}</div>
+                  </div>
+                </div>
+                <div className="ap-stat-divider" />
+                <div className="ap-stat-item">
+                  <div className="ap-stat-icon ap-stat-blue"><Users size={16} /></div>
+                  <div>
+                    <div className="ap-stat-val">{result.roommate_matches || 0}</div>
+                    <div className="ap-stat-lbl">{t.roommateMatches}</div>
+                  </div>
+                </div>
+                <div className="ap-stat-divider" />
+                <div className="ap-stat-item">
+                  <div className="ap-stat-icon ap-stat-amber"><AlertTriangle size={16} /></div>
+                  <div>
+                    <div className="ap-stat-val ap-stat-amber-text">{result.conflicts || 0}</div>
+                    <div className="ap-stat-lbl">{t.conflicts}</div>
+                  </div>
+                </div>
+                <div className="ap-stat-divider" />
+                <div className="ap-stat-item">
+                  <div className="ap-stat-icon ap-stat-slate"><Home size={16} /></div>
+                  <div>
+                    <div className="ap-stat-val">{summary?.available_beds || 0}</div>
+                    <div className="ap-stat-lbl">{t.freeBedsLabel}</div>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="ap-stat-item">
+                  <div className="ap-stat-icon ap-stat-blue"><Users size={16} /></div>
+                  <div>
+                    <div className="ap-stat-val">{summary?.total_students || 0}</div>
+                    <div className="ap-stat-lbl">{t.totalStudents}</div>
+                  </div>
+                </div>
+                <div className="ap-stat-divider" />
+                <div className="ap-stat-item">
+                  <div className="ap-stat-icon ap-stat-green"><Check size={16} /></div>
+                  <div>
+                    <div className="ap-stat-val ap-stat-green-text">{summary?.assigned_students || 0}</div>
+                    <div className="ap-stat-lbl">{t.allocatedStudents}</div>
+                  </div>
+                </div>
+                <div className="ap-stat-divider" />
+                <div className="ap-stat-item">
+                  <div className="ap-stat-icon ap-stat-amber"><AlertTriangle size={16} /></div>
+                  <div>
+                    <div className="ap-stat-val ap-stat-amber-text">{summary?.unassigned_students || 0}</div>
+                    <div className="ap-stat-lbl">{t.unallocatedStudents}</div>
+                  </div>
+                </div>
+                <div className="ap-stat-divider" />
+                <div className="ap-stat-item">
+                  <div className="ap-stat-icon ap-stat-slate"><Home size={16} /></div>
+                  <div>
+                    <div className="ap-stat-val">{summary?.available_beds || 0}</div>
+                    <div className="ap-stat-lbl">{t.freeBedsLabel}</div>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -1196,224 +1246,96 @@ function AllocationPage({ language = 'he' }) {
           </div>
         )}
 
-        {/* ── 6. Main Content Grid ──────────── */}
-        <div className="ap-content-grid">
+        {/* ── 6. Main Content ──────────────── */}
+        <div className="ap-main-col">
 
-          {/* Left Column */}
-          <div className="ap-left-col">
-
-            {/* Inventory by Housing Type */}
-            <div className="ap-card">
-              <div className="ap-card-header">
-                <div className="ap-card-title-row">
-                  <Building2 size={16} />
-                  <h2 className="ap-card-title">{t.inventoryTitle}</h2>
-                </div>
+          {/* Inventory by Housing Type */}
+          <div className="ap-card">
+            <div className="ap-card-header">
+              <div className="ap-card-title-row">
+                <Building2 size={16} />
+                <h2 className="ap-card-title">{t.inventoryTitle}</h2>
               </div>
-
-              {summary?.inventory_by_type ? (
-                <div className="ap-inv-list">
-                  {inventoryTypes.map(([typeKey, label]) => (
-                    <InventoryTypeRow
-                      key={typeKey}
-                      typeKey={typeKey}
-                      label={label}
-                      item={summary.inventory_by_type[typeKey] || {}}
-                      expandedType={expandedType}
-                      onToggle={(k) => setExpandedType(prev => prev === k ? null : k)}
-                      t={t}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <div className="ap-empty-hint">
-                  <Info size={14} />
-                  <span>{t.noResultsHint}</span>
-                </div>
-              )}
             </div>
 
-            {/* Allocation Conditions */}
-            <div className="ap-card">
-              <div className="ap-card-header">
-                <div className="ap-card-title-row">
-                  <SlidersHorizontal size={16} />
-                  <h2 className="ap-card-title">{t.conditionsTitle}</h2>
-                </div>
+            {summary?.inventory_by_type ? (
+              <div className="ap-inv-list">
+                {inventoryTypes.map(([typeKey, label]) => (
+                  <InventoryTypeRow
+                    key={typeKey}
+                    typeKey={typeKey}
+                    label={label}
+                    item={summary.inventory_by_type[typeKey] || {}}
+                    expandedType={expandedType}
+                    onToggle={(k) => setExpandedType(prev => prev === k ? null : k)}
+                    t={t}
+                  />
+                ))}
               </div>
-
-              <div className="ap-conditions-grid">
-                {/* Critical Column */}
-                <div className="ap-conditions-col">
-                  <div className="ap-cond-col-header ap-cond-col-critical">
-                    <ShieldCheck size={14} />
-                    <div>
-                      <div className="ap-cond-col-title">{t.criticalTitle}</div>
-                      <div className="ap-cond-col-hint">{t.criticalHint}</div>
-                    </div>
-                    <span className="ap-count-badge">{hardConstraints.length}</span>
-                  </div>
-                  <div className="ap-cond-list">
-                    {hardConstraints.map(([key]) => (
-                      <CriticalConditionCard key={key} condKey={key} t={t} />
-                    ))}
-                  </div>
-                </div>
-
-                {/* Flexible Column */}
-                <div className="ap-conditions-col">
-                  <div className="ap-cond-col-header ap-cond-col-flexible">
-                    <SlidersHorizontal size={14} />
-                    <div>
-                      <div className="ap-cond-col-title">{t.flexibleTitle}</div>
-                      <div className="ap-cond-col-hint">{t.flexibleHint}</div>
-                    </div>
-                    <span className="ap-count-badge">{optimizationPreferences.length}</span>
-                  </div>
-                  <div className="ap-cond-list">
-                    {optimizationPreferences.map(([key, value]) => (
-                      <FlexibleConditionCard
-                        key={key}
-                        condKey={key}
-                        value={value}
-                        t={t}
-                        onToggle={toggleConstraintEnabled}
-                        onWeightChange={setConstraintWeight}
-                      />
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {!canRun && (
-                <div className="ap-lock-notice">
-                  <Lock size={14} />
-                  <span>{t.noPermission}</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Right Column */}
-          <div className="ap-right-col">
-
-            {/* Results Card */}
-            <div className="ap-card ap-results-card">
-              <div className="ap-card-header">
-                <div className="ap-card-title-row">
-                  <BarChart3 size={16} />
-                  <h2 className="ap-card-title">{t.resultsTitle}</h2>
-                </div>
-                <StatusBadge statusKey={currentStatusKey} t={t} />
-              </div>
-
-              {result ? (
-                <div className="ap-results-body">
-                  <div className="ap-results-kpis">
-                    <div className="ap-kpi ap-kpi-green">
-                      <div className="ap-kpi-icon"><Check size={17} /></div>
-                      <div>
-                        <div className="ap-kpi-val">{result.successful_assignments || 0}</div>
-                        <div className="ap-kpi-lbl">{t.successfulAssign}</div>
-                      </div>
-                    </div>
-                    <div className="ap-kpi ap-kpi-blue">
-                      <div className="ap-kpi-icon"><Users size={17} /></div>
-                      <div>
-                        <div className="ap-kpi-val">{result.roommate_matches || 0}</div>
-                        <div className="ap-kpi-lbl">{t.roommateMatches}</div>
-                      </div>
-                    </div>
-                    <div className="ap-kpi ap-kpi-amber">
-                      <div className="ap-kpi-icon"><AlertTriangle size={17} /></div>
-                      <div>
-                        <div className="ap-kpi-val">{result.conflicts || 0}</div>
-                        <div className="ap-kpi-lbl">{t.conflicts}</div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {result.run?.completed_at && (
-                    <div className="ap-results-meta">
-                      <Calendar size={13} />
-                      <span>
-                        {new Date(result.run.completed_at).toLocaleDateString(
-                          language === 'he' ? 'he-IL' : 'en-US',
-                          { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
-                        )}
-                      </span>
-                    </div>
-                  )}
-
-                  <button
-                    className="ap-view-results-btn"
-                    onClick={handleViewResults}
-                    disabled={runStatus !== 'completed'}
-                  >
-                    <ExternalLink size={15} />
-                    {t.viewFullResults}
-                  </button>
-
-                  {showDelBtn && (
-                    <button
-                      className="ap-delete-inline-btn"
-                      onClick={requestDeleteResults}
-                      disabled={isDeleting}
-                    >
-                      {isDeleting
-                        ? <><Loader size={13} className="ap-spin" /> {t.deletingResults}</>
-                        : <><Trash2 size={13} /> {t.deleteResults}</>
-                      }
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <div className="ap-no-results">
-                  <div className="ap-no-results-icon">
-                    <BarChart3 size={28} />
-                  </div>
-                  <div className="ap-no-results-title">{t.noResultsTitle}</div>
-                  <div className="ap-no-results-hint">{t.noResultsHint}</div>
-
-                  {!hasStudents && !isRunning && (
-                    <div className="ap-no-students-note">
-                      <Check size={14} />
-                      {t.noStudents}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Student Breakdown (when available) */}
-            {summary?.students_by_category && (
-              <div className="ap-card">
-                <div className="ap-card-header">
-                  <div className="ap-card-title-row">
-                    <Users size={16} />
-                    <h2 className="ap-card-title">{t.totalStudents}</h2>
-                  </div>
-                </div>
-                <div className="ap-breakdown-grid">
-                  {[
-                    ['new',        t.newStudents || 'New'],
-                    ['continuing', t.continuing || 'Continuing'],
-                    ['transfer',   t.transfers || 'Transfers'],
-                    ['leaving',    t.leaving || 'Leaving'],
-                  ].map(([k, lbl]) => (
-                    <div key={k} className="ap-breakdown-item">
-                      <div className="ap-breakdown-val">{summary.students_by_category[k] || 0}</div>
-                      <div className="ap-breakdown-lbl">{lbl}</div>
-                    </div>
-                  ))}
-                  <div className="ap-breakdown-item ap-breakdown-priority">
-                    <div className="ap-breakdown-val">{summary.priority_students || 0}</div>
-                    <div className="ap-breakdown-lbl">{t.priorityStudents || 'Priority'}</div>
-                  </div>
-                </div>
+            ) : (
+              <div className="ap-empty-hint">
+                <Info size={14} />
+                <span>{t.noResultsHint}</span>
               </div>
             )}
+          </div>
 
+          {/* Allocation Conditions */}
+          <div className="ap-card">
+            <div className="ap-card-header">
+              <div className="ap-card-title-row">
+                <SlidersHorizontal size={16} />
+                <h2 className="ap-card-title">{t.conditionsTitle}</h2>
+              </div>
+            </div>
+
+            {/* Critical Conditions */}
+            <div className="ap-cond-section">
+              <div className="ap-cond-section-header ap-cond-col-critical">
+                <ShieldCheck size={14} />
+                <div>
+                  <div className="ap-cond-col-title">{t.criticalTitle}</div>
+                  <div className="ap-cond-col-hint">{t.criticalHint}</div>
+                </div>
+                <span className="ap-count-badge">{hardConstraints.length}</span>
+              </div>
+              <div className="ap-cond-grid-2">
+                {hardConstraints.map(([key]) => (
+                  <CriticalConditionCard key={key} condKey={key} t={t} />
+                ))}
+              </div>
+            </div>
+
+            {/* Flexible Preferences */}
+            <div className="ap-cond-section ap-cond-section-divider">
+              <div className="ap-cond-section-header ap-cond-col-flexible">
+                <SlidersHorizontal size={14} />
+                <div>
+                  <div className="ap-cond-col-title">{t.flexibleTitle}</div>
+                  <div className="ap-cond-col-hint">{t.flexibleHint}</div>
+                </div>
+                <span className="ap-count-badge">{optimizationPreferences.length}</span>
+              </div>
+              <div className="ap-cond-grid-2">
+                {optimizationPreferences.map(([key, value]) => (
+                  <FlexibleConditionCard
+                    key={key}
+                    condKey={key}
+                    value={value}
+                    t={t}
+                    onToggle={toggleConstraintEnabled}
+                    onWeightChange={setConstraintWeight}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {!canRun && (
+              <div className="ap-lock-notice">
+                <Lock size={14} />
+                <span>{t.noPermission}</span>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1430,7 +1352,7 @@ function AllocationPage({ language = 'he' }) {
 const styles = `
   /* ── Variables ────────────────────────────── */
   .ap-page {
-    --ap-bg: #f0f2f5;
+    --ap-bg: #f0f4f8;
     --ap-surface: #ffffff;
     --ap-surface-2: #f8fafc;
     --ap-border: rgba(15, 23, 42, 0.08);
@@ -1450,14 +1372,14 @@ const styles = `
     --ap-red: #dc2626;
     --ap-red-soft: rgba(220, 38, 38, 0.09);
     --ap-red-border: rgba(220, 38, 38, 0.18);
-    --ap-shadow: 0 1px 3px rgba(15,23,42,0.06), 0 4px 12px rgba(15,23,42,0.04);
-    --ap-shadow-md: 0 4px 16px rgba(15,23,42,0.08);
+    --ap-shadow: 0 1px 3px rgba(15,23,42,0.06), 0 4px 14px rgba(15,23,42,0.05);
+    --ap-shadow-md: 0 4px 20px rgba(15,23,42,0.09);
     --ap-radius: 14px;
     --ap-radius-sm: 10px;
     --ap-radius-xs: 7px;
     min-height: calc(100vh - 64px);
     padding: 20px;
-    background: var(--ap-bg);
+    background: linear-gradient(145deg, #eef2f7 0%, #e8f0fe 55%, #edfaf4 100%);
     font-family: inherit;
   }
 
@@ -1477,6 +1399,10 @@ const styles = `
     border-radius: var(--ap-radius);
     box-shadow: var(--ap-shadow);
     overflow: hidden;
+    transition: box-shadow 0.18s;
+  }
+  .ap-card:hover {
+    box-shadow: var(--ap-shadow-md);
   }
 
   .ap-card-header {
@@ -1542,10 +1468,10 @@ const styles = `
 
   /* ── Header Card ─────────────────────────── */
   .ap-header-card {
-    background: var(--ap-surface);
+    background: linear-gradient(135deg, #ffffff 60%, rgba(37,99,235,0.03) 100%);
     border: 1px solid var(--ap-border);
     border-radius: var(--ap-radius);
-    box-shadow: var(--ap-shadow);
+    box-shadow: var(--ap-shadow-md);
     padding: 18px 20px;
     display: flex;
     flex-direction: column;
@@ -1611,7 +1537,7 @@ const styles = `
     display: flex;
     align-items: center;
     gap: 0;
-    background: var(--ap-surface-2);
+    background: linear-gradient(135deg, var(--ap-surface-2) 0%, rgba(37,99,235,0.03) 100%);
     border: 1px solid var(--ap-border);
     border-radius: var(--ap-radius-sm);
     padding: 0;
@@ -1957,16 +1883,8 @@ const styles = `
     color: var(--ap-amber);
   }
 
-  /* ── Content Grid ─────────────────────────── */
-  .ap-content-grid {
-    display: grid;
-    grid-template-columns: 1fr 340px;
-    gap: 14px;
-    align-items: start;
-  }
-
-  .ap-left-col,
-  .ap-right-col {
+  /* ── Main Content ────────────────────────── */
+  .ap-main-col {
     display: flex;
     flex-direction: column;
     gap: 14px;
@@ -2138,29 +2056,28 @@ const styles = `
   }
 
   /* ── Conditions ──────────────────────────── */
-  .ap-conditions-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0;
+  .ap-cond-section {
+    padding: 16px;
     border-top: 1px solid var(--ap-border);
   }
 
-  .ap-conditions-col {
-    padding: 16px;
-    min-width: 0;
+  .ap-cond-section-divider {
+    border-top: 2px solid var(--ap-border);
   }
 
-  .ap-conditions-col:first-child {
-    border-right: 1px solid var(--ap-border);
-  }
-
-  .ap-cond-col-header {
+  .ap-cond-section-header {
     display: flex;
     align-items: flex-start;
     gap: 9px;
     margin-bottom: 14px;
     padding-bottom: 12px;
     border-bottom: 1px solid var(--ap-border);
+  }
+
+  .ap-cond-grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
   }
 
   .ap-cond-col-critical { color: #0f766e; }
@@ -2196,12 +2113,6 @@ const styles = `
     font-weight: 800;
     margin-left: auto;
     flex-shrink: 0;
-  }
-
-  .ap-cond-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
   }
 
   /* Condition Cards */
@@ -2403,197 +2314,6 @@ const styles = `
     font-weight: 600;
   }
 
-  /* ── Results Card ────────────────────────── */
-  .ap-results-card { display: flex; flex-direction: column; }
-
-  .ap-results-body {
-    padding: 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .ap-results-kpis {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .ap-kpi {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 11px 13px;
-    border-radius: var(--ap-radius-sm);
-    border: 1px solid var(--ap-border);
-    background: var(--ap-surface-2);
-  }
-  .ap-kpi-green { background: var(--ap-green-soft); border-color: var(--ap-green-border); }
-  .ap-kpi-blue  { background: var(--ap-blue-soft);  border-color: var(--ap-blue-border); }
-  .ap-kpi-amber { background: var(--ap-amber-soft); border-color: var(--ap-amber-border); }
-
-  .ap-kpi-icon {
-    width: 34px;
-    height: 34px;
-    border-radius: var(--ap-radius-xs);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(255,255,255,0.7);
-    border: 1px solid rgba(255,255,255,0.6);
-    flex-shrink: 0;
-  }
-  .ap-kpi-green .ap-kpi-icon { color: var(--ap-green); }
-  .ap-kpi-blue  .ap-kpi-icon { color: var(--ap-blue);  }
-  .ap-kpi-amber .ap-kpi-icon { color: var(--ap-amber); }
-
-  .ap-kpi-val {
-    font-size: 20px;
-    font-weight: 800;
-    color: var(--ap-text);
-    letter-spacing: -0.02em;
-  }
-  .ap-kpi-lbl {
-    font-size: 11.5px;
-    font-weight: 600;
-    color: var(--ap-muted);
-    margin-top: 1px;
-  }
-
-  .ap-results-meta {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--ap-muted);
-    font-weight: 500;
-  }
-
-  .ap-view-results-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 7px;
-    padding: 11px;
-    border-radius: var(--ap-radius-sm);
-    border: 1px solid var(--ap-blue-border);
-    background: var(--ap-blue-soft);
-    color: var(--ap-blue);
-    font-size: 13.5px;
-    font-weight: 700;
-    cursor: pointer;
-    font-family: inherit;
-    transition: background 0.14s, border-color 0.14s;
-    width: 100%;
-  }
-  .ap-view-results-btn:hover:not(:disabled) { background: rgba(37,99,235,0.13); border-color: rgba(37,99,235,0.28); }
-  .ap-view-results-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-
-  .ap-delete-inline-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 9px;
-    border-radius: var(--ap-radius-sm);
-    border: 1px solid var(--ap-red-border);
-    background: var(--ap-red-soft);
-    color: var(--ap-red);
-    font-size: 13px;
-    font-weight: 700;
-    cursor: pointer;
-    font-family: inherit;
-    transition: background 0.14s;
-    width: 100%;
-  }
-  .ap-delete-inline-btn:hover:not(:disabled) { background: rgba(220,38,38,0.14); }
-  .ap-delete-inline-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-
-  /* ── Empty State ─────────────────────────── */
-  .ap-no-results {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    padding: 32px 16px;
-    text-align: center;
-  }
-
-  .ap-no-results-icon {
-    width: 52px;
-    height: 52px;
-    border-radius: 16px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--ap-surface-2);
-    border: 1px solid var(--ap-border);
-    color: var(--ap-muted);
-  }
-
-  .ap-no-results-title {
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--ap-text);
-  }
-
-  .ap-no-results-hint {
-    font-size: 12.5px;
-    color: var(--ap-muted);
-    font-weight: 500;
-    line-height: 1.5;
-  }
-
-  .ap-no-students-note {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 7px 12px;
-    border-radius: 999px;
-    background: var(--ap-green-soft);
-    border: 1px solid var(--ap-green-border);
-    color: var(--ap-green);
-    font-size: 12px;
-    font-weight: 700;
-    margin-top: 4px;
-  }
-
-  /* ── Breakdown ───────────────────────────── */
-  .ap-breakdown-grid {
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: 8px;
-    padding: 14px 16px;
-  }
-
-  .ap-breakdown-item {
-    border-radius: var(--ap-radius-xs);
-    border: 1px solid var(--ap-border);
-    background: var(--ap-surface-2);
-    padding: 10px 6px;
-    text-align: center;
-  }
-
-  .ap-breakdown-priority {
-    background: var(--ap-amber-soft);
-    border-color: var(--ap-amber-border);
-  }
-
-  .ap-breakdown-val {
-    font-size: 18px;
-    font-weight: 800;
-    color: var(--ap-text);
-    letter-spacing: -0.02em;
-  }
-  .ap-breakdown-priority .ap-breakdown-val { color: var(--ap-amber); }
-
-  .ap-breakdown-lbl {
-    font-size: 10.5px;
-    font-weight: 600;
-    color: var(--ap-muted);
-    margin-top: 3px;
-  }
-
   /* ── Empty hint ──────────────────────────── */
   .ap-empty-hint {
     display: flex;
@@ -2724,25 +2444,14 @@ const styles = `
   }
 
   /* ── Responsive ──────────────────────────── */
-  @media (max-width: 1024px) {
-    .ap-content-grid {
-      grid-template-columns: 1fr;
-    }
-    .ap-right-col {
-      order: -1;
-    }
-  }
-
   @media (max-width: 768px) {
     .ap-page { padding: 12px; }
     .ap-header-stats { flex-wrap: wrap; }
     .ap-stat-item { flex: 0 1 calc(50% - 1px); }
-    .ap-conditions-grid { grid-template-columns: 1fr; }
-    .ap-conditions-col:first-child { border-right: none; border-bottom: 1px solid var(--ap-border); }
+    .ap-cond-grid-2 { grid-template-columns: 1fr; }
     .ap-controls-bar { flex-direction: column; align-items: stretch; }
     .ap-controls-left, .ap-controls-right { justify-content: stretch; }
     .ap-controls-left .ap-btn, .ap-controls-right .ap-btn { flex: 1; justify-content: center; }
-    .ap-breakdown-grid { grid-template-columns: repeat(3, 1fr); }
     .ap-inv-metrics-grid { grid-template-columns: repeat(2, 1fr); }
   }
 
@@ -2751,7 +2460,6 @@ const styles = `
     .ap-header-meta { justify-content: flex-start; }
     .ap-stat-item { flex: 1 1 100%; }
     .ap-stat-divider { display: none; }
-    .ap-breakdown-grid { grid-template-columns: 1fr 1fr; }
     .ap-inv-quick-stats { display: none; }
   }
 `;

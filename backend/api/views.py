@@ -5717,4 +5717,169 @@ def allocation_conditions(request):
         'conditions': validated,
     }, status=status.HTTP_200_OK)
 
+# =========================
+# Reports
+# =========================
+
+def _excel_response(buffer, filename):
+    """Return an in-memory XLSX workbook as a downloadable HTTP response."""
+    response = HttpResponse(
+        buffer.getvalue(),
+        content_type=(
+            'application/vnd.openxmlformats-officedocument.'
+            'spreadsheetml.sheet'
+        ),
+    )
+    response['Content-Disposition'] = (
+        f'attachment; filename="{filename}"'
+    )
+    return response
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def dormify_report(request):
+    """Generate the complete Dormify Excel report."""
+    from .report_exports import generate_dormify_report
+
+    try:
+        buffer = generate_dormify_report()
+    except Exception as exc:
+        return Response(
+            {'error': str(exc)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    today = timezone.now().strftime('%Y-%m-%d')
+    return _excel_response(
+        buffer,
+        f'Dormify_Report_{today}.xlsx',
+    )
+
+
+def _resolve_report_region(request):
+    """
+    Resolve the optional report region query parameter.
+
+    This helper intentionally has a report-specific name so it does not
+    overwrite the existing allocation helper `_resolve_region(region_value)`.
+    """
+    region_id = request.query_params.get('region_id') or None
+
+    if not region_id:
+        return None, None
+
+    try:
+        region_obj = Region.objects.get(pk=region_id)
+        return region_id, region_obj.name
+    except (Region.DoesNotExist, ValueError, TypeError):
+        return region_id, None
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def student_allocation_report(request):
+    """
+    Legacy endpoint retained for backward compatibility.
+
+    It delegates to the student-actions report generator.
+    """
+    from .report_exports import generate_student_actions_report
+
+    try:
+        buffer = generate_student_actions_report()
+    except Exception as exc:
+        return Response(
+            {'error': str(exc)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    today = timezone.now().strftime('%Y-%m-%d')
+    return _excel_response(
+        buffer,
+        f'Dormify_Student_Allocation_Report_{today}.xlsx',
+    )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def student_actions_report(request):
+    """Generate the student-actions report, optionally filtered by region."""
+    from .report_exports import generate_student_actions_report
+
+    region_id, region_name = _resolve_report_region(request)
+
+    try:
+        buffer = generate_student_actions_report(
+            region_id=region_id,
+            region_name=region_name,
+        )
+    except Exception as exc:
+        return Response(
+            {'error': str(exc)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    today = timezone.now().strftime('%Y-%m-%d')
+    file_part = region_id or 'All_Regions'
+
+    return _excel_response(
+        buffer,
+        f'Dormify_Student_Actions_Report_{file_part}_{today}.xlsx',
+    )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def capacity_report(request):
+    """Generate the capacity report, optionally filtered by region."""
+    from .report_exports import generate_capacity_report
+
+    region_id, region_name = _resolve_report_region(request)
+
+    try:
+        buffer = generate_capacity_report(
+            region_id=region_id,
+            region_name=region_name,
+        )
+    except Exception as exc:
+        return Response(
+            {'error': str(exc)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    today = timezone.now().strftime('%Y-%m-%d')
+    file_part = region_id or 'All_Regions'
+
+    return _excel_response(
+        buffer,
+        f'Dormify_Capacity_Report_{file_part}_{today}.xlsx',
+    )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def manual_review_report(request):
+    """Generate the manual-review report, optionally filtered by region."""
+    from .report_exports import generate_manual_review_report
+
+    region_id, region_name = _resolve_report_region(request)
+
+    try:
+        buffer = generate_manual_review_report(
+            region_id=region_id,
+            region_name=region_name,
+        )
+    except Exception as exc:
+        return Response(
+            {'error': str(exc)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    today = timezone.now().strftime('%Y-%m-%d')
+    file_part = region_id or 'All_Regions'
+
+    return _excel_response(
+        buffer,
+        f'Dormify_Manual_Review_Report_{file_part}_{today}.xlsx',
+    )
 
