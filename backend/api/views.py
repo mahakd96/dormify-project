@@ -5438,3 +5438,283 @@ def swap_students_rooms(request):
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
+# =========================
+# Allocation Status Endpoint
+# =========================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def allocation_status(request):
+    """
+    Returns the current allocation status for the user's region:
+    the most recent run (any status) plus active counts.
+    """
+    user = request.user
+    region_value = request.query_params.get('region')
+
+    if region_value:
+        region = _resolve_region(region_value)
+        if not region:
+            return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+    elif user.is_central_admin:
+        return Response({
+            'status': 'not_started',
+            'run': None,
+            'region': None,
+        }, status=status.HTTP_200_OK)
+    elif user.region:
+        region = user.region
+    else:
+        return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+
+    active_statuses = [
+        AllocationRun.Status.QUEUED,
+        AllocationRun.Status.RUNNING,
+        AllocationRun.Status.CANCELLATION_REQUESTED,
+    ]
+
+    active_run = AllocationRun.objects.filter(
+        region=region,
+        status__in=active_statuses,
+    ).order_by('-started_at').first()
+
+    if active_run:
+        return Response({
+            'status': active_run.status,
+            'run': AllocationRunSerializer(active_run).data,
+            'region': RegionSerializer(region).data,
+        }, status=status.HTTP_200_OK)
+
+    latest_run = AllocationRun.objects.filter(
+        region=region,
+    ).order_by('-started_at').first()
+
+    if not latest_run:
+        return Response({
+            'status': 'not_started',
+            'run': None,
+            'region': RegionSerializer(region).data,
+        }, status=status.HTTP_200_OK)
+
+    return Response({
+        'status': latest_run.status,
+        'run': AllocationRunSerializer(latest_run).data,
+        'region': RegionSerializer(region).data,
+    }, status=status.HTTP_200_OK)
+
+
+# =========================
+# Inventory by Housing Type
+# =========================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def inventory_by_housing_type(request):
+    """
+    Returns detailed inventory breakdown per housing type (DormType),
+    including building-level details.
+    """
+    user = request.user
+    region_value = request.query_params.get('region')
+
+    if region_value:
+        region = _resolve_region(region_value)
+        if not region:
+            return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+    elif user.is_central_admin:
+        region = None
+    elif user.region:
+        region = user.region
+    else:
+        return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+
+    dorm_types_qs = DormType.objects.prefetch_related(
+        'buildings',
+        'buildings__apartments',
+        'buildings__apartments__rooms',
+        'buildings__apartments__rooms__beds',
+    ).order_by('code', 'name')
+
+    if region:
+        dorm_types_qs = dorm_types_qs.filter(region=region)
+
+    active_assignment_bed_ids = set(
+        BedAssignment.objects.filter(
+            status=BedAssignment.Status.ACTIVE
+        ).values_list('bed_id', flat=True)
+    )
+
+    result = []
+
+    for dorm_type in dorm_types_qs:
+        buildings_data = []
+        dt_total_beds = 0
+        dt_occupied_beds = 0
+        dt_available_beds = 0
+        dt_total_rooms = 0
+        dt_total_apts = 0
+        dt_buildings = 0
+
+        for building in dorm_type.buildings.all():
+            if not building.is_active:
+                continue
+
+            b_total_beds = 0
+            b_occupied = 0
+            b_total_rooms = 0
+            b_active_apts = 0
+
+            for apartment in building.apartments.all():
+                if not apartment.is_active:
+                    continue
+
+                b_active_apts += 1
+
+                for room in apartment.rooms.all():
+                    if not room.is_active:
+                        continue
+
+                    b_total_rooms += 1
+                    room_beds = list(room.beds.all())
+                    b_total_beds += len(room_beds)
+
+                    for bed in room_beds:
+                        if bed.id in active_assignment_bed_ids:
+                            b_occupied += 1
+
+            b_available = max(b_total_beds - b_occupied, 0)
+            b_occupancy = round((b_occupied / b_total_beds) * 100, 1) if b_total_beds > 0 else 0
+
+            dt_buildings += 1
+            dt_total_apts += b_active_apts
+            dt_total_rooms += b_total_rooms
+            dt_total_beds += b_total_beds
+            dt_occupied_beds += b_occupied
+            dt_available_beds += b_available
+
+            buildings_data.append({
+                'id': building.id,
+                'number': building.number,
+                'is_active': building.is_active,
+                'total_beds': b_total_beds,
+                'occupied_beds': b_occupied,
+                'available_beds': b_available,
+                'total_rooms': b_total_rooms,
+                'apartments': b_active_apts,
+                'occupancy_pct': b_occupancy,
+            })
+
+        dt_occupancy = round(
+            (dt_occupied_beds / dt_total_beds) * 100, 1
+        ) if dt_total_beds > 0 else 0
+
+        result.append({
+            'id': dorm_type.id,
+            'code': dorm_type.code,
+            'name': dorm_type.name,
+            'buildings_count': dt_buildings,
+            'apartments': dt_total_apts,
+            'rooms': dt_total_rooms,
+            'total_beds': dt_total_beds,
+            'occupied_beds': dt_occupied_beds,
+            'available_beds': dt_available_beds,
+            'temporarily_unavailable_beds': 0,
+            'occupancy_pct': dt_occupancy,
+            'buildings': buildings_data,
+        })
+
+    return Response({
+        'region': RegionSerializer(region).data if region else None,
+        'inventory': result,
+    }, status=status.HTTP_200_OK)
+
+
+# =========================
+# Allocation Conditions
+# =========================
+
+# In-memory store for conditions per region (production would use DB/cache).
+# This is a simple approach; for persistence across restarts use a dedicated model.
+_CONDITIONS_STORE = {}
+
+DEFAULT_CONDITIONS = {
+    'sameGender':              {'enabled': True,  'strict': True,  'critical': True,  'weight': 0},
+    'priorityFirst':           {'enabled': True,  'strict': True,  'critical': True,  'weight': 0},
+    'roommatePositiveOnly':    {'enabled': True,  'strict': True,  'critical': True,  'weight': 0},
+    'ReligiousTogether':       {'enabled': True,  'strict': True,  'critical': True,  'weight': 0},
+    'sameReligion':            {'enabled': True,  'strict': False, 'critical': False, 'weight': 6},
+    'roommateMatch':           {'enabled': True,  'strict': False, 'critical': False, 'weight': 8},
+    'sectorMatching':          {'enabled': True,  'strict': False, 'critical': False, 'weight': 7},
+    'avoidYearMix_1_with_3_4': {'enabled': True,  'strict': False, 'critical': False, 'weight': 4},
+    'avoidAtudaimWithHasmaha': {'enabled': True,  'strict': False, 'critical': False, 'weight': 4},
+}
+
+
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAuthenticated])
+def allocation_conditions(request):
+    """
+    GET  /api/allocation/conditions/ — return saved conditions for the region.
+    PUT  /api/allocation/conditions/ — update and persist conditions.
+    """
+    user = request.user
+
+    region_value = (
+        request.query_params.get('region')
+        or (request.data.get('region') if request.method == 'PUT' else None)
+    )
+
+    if region_value:
+        region = _resolve_region(region_value)
+        if not region:
+            return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        region_key = str(region.id)
+    elif not user.is_central_admin and user.region:
+        region = user.region
+        region_key = str(region.id)
+    else:
+        region = None
+        region_key = '__global__'
+
+    if request.method == 'GET':
+        saved = _CONDITIONS_STORE.get(region_key, DEFAULT_CONDITIONS.copy())
+        return Response({
+            'region': RegionSerializer(region).data if region else None,
+            'conditions': saved,
+        }, status=status.HTTP_200_OK)
+
+    # PUT
+    if not (user.is_boss or user.is_central_admin):
+        return Response(
+            {'error': 'אין הרשאה לשנות תנאי שיבוץ'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    incoming = request.data.get('conditions')
+    if not isinstance(incoming, dict):
+        return Response(
+            {'error': 'conditions must be a JSON object'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    validated = {}
+    for key, value in incoming.items():
+        if not isinstance(value, dict):
+            continue
+        is_critical = DEFAULT_CONDITIONS.get(key, {}).get('critical', False)
+        validated[key] = {
+            'enabled': True if is_critical else bool(value.get('enabled', True)),
+            'strict': bool(value.get('strict', is_critical)),
+            'critical': is_critical,
+            'weight': 0 if is_critical else max(0, min(10, int(value.get('weight', 5)))),
+        }
+
+    _CONDITIONS_STORE[region_key] = validated
+
+    return Response({
+        'message': 'Conditions updated successfully',
+        'region': RegionSerializer(region).data if region else None,
+        'conditions': validated,
+    }, status=status.HTTP_200_OK)
+
+

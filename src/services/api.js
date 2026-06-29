@@ -220,6 +220,54 @@ export const allocationAPI = {
       throw new Error(getErrorMessage(err, "Failed to load allocation results"));
     }
   },
+
+  getConditions: async (regionId = null) => {
+    try {
+      const url = regionId
+        ? `/api/allocation/conditions/?region=${regionId}`
+        : "/api/allocation/conditions/";
+      const { data } = await api.get(url);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load allocation conditions"));
+    }
+  },
+
+  updateConditions: async (conditions, regionId = null) => {
+    try {
+      const payload = regionId ? { conditions, region: regionId } : { conditions };
+      const { data } = await api.put("/api/allocation/conditions/", payload);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to update allocation conditions"));
+    }
+  },
+
+  getStatus: async (regionId = null) => {
+    try {
+      const url = regionId
+        ? `/api/allocation/status/?region=${regionId}`
+        : "/api/allocation/status/";
+      const { data } = await api.get(url);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to get allocation status"));
+    }
+  },
+};
+
+export const inventoryAPI = {
+  getByHousingType: async (regionId = null) => {
+    try {
+      const url = regionId
+        ? `/api/inventory/by-housing-type/?region=${regionId}`
+        : "/api/inventory/by-housing-type/";
+      const { data } = await api.get(url);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load inventory by housing type"));
+    }
+  },
 };
 
 export const inboxAPI = {
