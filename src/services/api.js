@@ -66,7 +66,6 @@ const getErrorMessage = (err, fallback = "Request failed") => {
 api.interceptors.request.use(
   (config) => {
     const token = getAccessToken();
-
     config.headers = config.headers || {};
 
     if (token) {
@@ -80,9 +79,7 @@ api.interceptors.request.use(
 
 api.interceptors.response.use(
   (response) => response,
-  async (error) => {
-    return Promise.reject(error);
-  }
+  async (error) => Promise.reject(error)
 );
 
 export const authAPI = {
@@ -266,8 +263,6 @@ export const inboxAPI = {
 };
 
 export const uploadAPI = {
-  // Main Excel upload:
-  // עוזבים / מעברים / נכנסים חדשים / נשארים
   uploadExcel: async (file) => {
     try {
       const form = new FormData();
@@ -285,8 +280,6 @@ export const uploadAPI = {
     }
   },
 
-  // Additions Excel upload:
-  // מתווספים
   uploadAdditionsExcel: async (file) => {
     try {
       const form = new FormData();
@@ -315,6 +308,15 @@ export const studentsAPI = {
     }
   },
 
+  getStudents: async (params = {}) => {
+    try {
+      const { data } = await api.get("/api/students/", { params });
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load students"));
+    }
+  },
+
   getById: async (id) => {
     try {
       const { data } = await api.get(`/api/students/${id}/`);
@@ -323,8 +325,109 @@ export const studentsAPI = {
       throw new Error(getErrorMessage(err, "Failed to load student"));
     }
   },
-};
 
+    getCounts: async () => {
+    try {
+      const { data } = await api.get("/api/students/counts/");
+      return data;
+    } catch (err) {
+      console.warn(
+        "studentsAPI.getCounts failed, computing from students list:",
+        err?.response?.data || err.message
+      );
+
+      try {
+        const { data } = await api.get("/api/students/");
+        const list = Array.isArray(data) ? data : data.results || [];
+
+        const isStatus = (student, words) => {
+          const text = [
+            student.status,
+            student.student_status,
+            student.type,
+            student.student_type,
+            student.category,
+            student.assignment_status,
+            student.sap_status,
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+
+          return words.some((word) => text.includes(word));
+        };
+
+        const total = list.length;
+
+        const staying = list.filter((s) =>
+          isStatus(s, ["staying", "stay", "נשאר"])
+        ).length;
+
+        const newStudents = list.filter((s) =>
+          isStatus(s, ["new", "incoming", "חדש", "נכנס"])
+        ).length;
+
+        const transferring = list.filter((s) =>
+          isStatus(s, ["transferring", "transfer", "מעבר", "עובר"])
+        ).length;
+
+        const leaving = list.filter((s) =>
+          isStatus(s, ["leaving", "leave", "עזיבה", "עוזב"])
+        ).length;
+
+        return {
+          total,
+          all: total,
+          all_students: total,
+          total_students: total,
+
+          staying,
+          staying_students: staying,
+
+          new: newStudents,
+          new_students: newStudents,
+          incoming: newStudents,
+
+          transferring,
+          transferring_students: transferring,
+
+          leaving,
+          leaving_students: leaving,
+        };
+      } catch (fallbackErr) {
+        console.warn(
+          "studentsAPI.getCounts fallback failed:",
+          fallbackErr?.response?.data || fallbackErr.message
+        );
+
+        return {
+          total: 0,
+          all: 0,
+          all_students: 0,
+          total_students: 0,
+          staying: 0,
+          new: 0,
+          new_students: 0,
+          transferring: 0,
+          leaving: 0,
+        };
+      }
+    }
+  },
+
+  getFilterOptions: async () => {
+    try {
+      const { data } = await api.get("/api/students/filter-options/");
+      return data;
+    } catch (err) {
+      console.warn(
+        "studentsAPI.getFilterOptions failed:",
+        err?.response?.data || err.message
+      );
+      return {};
+    }
+  },
+};
 
 export const analysisAPI = {
   getData: async () => {
@@ -361,13 +464,90 @@ export const transfersAPI = {
       const { data } = await api.put(`/api/transfers/${id}/reject/`, {
         reason,
       });
-
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to reject transfer"));
     }
   },
 };
+
+export const requestsAPI = {
+  getAll: async (params = {}) => {
+    try {
+      const { data } = await api.get("/api/transfers/", { params });
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load requests"));
+    }
+  },
+
+  create: async (payload) => {
+    try {
+      const { data } = await api.post("/api/transfers/", payload);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to create request"));
+    }
+  },
+
+  approve: async (id, payload = {}) => {
+    try {
+      const { data } = await api.put(`/api/transfers/${id}/approve/`, payload);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to approve request"));
+    }
+  },
+
+  reject: async (id, reason = "") => {
+    try {
+      const { data } = await api.put(`/api/transfers/${id}/reject/`, {
+        reason,
+      });
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to reject request"));
+    }
+  },
+
+  checkFeasibility: async (id) => {
+    try {
+      const { data } = await api.get(`/api/transfers/${id}/feasibility/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to check feasibility"));
+    }
+  },
+
+  checkFeasibilityForStudent: async (
+    studentId,
+    requestType,
+    sameApartment = false
+  ) => {
+    try {
+      const { data } = await api.get("/api/transfers/check-feasibility/", {
+        params: {
+          student_id: studentId,
+          request_type: requestType,
+          same_apartment: sameApartment,
+        },
+      });
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to check feasibility"));
+    }
+  },
+
+  getAddStudentBeds: async (id) => {
+    try {
+      const { data } = await api.get(`/api/transfers/${id}/add-student-beds/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load available beds"));
+    }
+  },
+};
+
 export const apartmentsAPI = {
   getAll: async () => {
     try {
@@ -389,6 +569,7 @@ export const roomsAPI = {
     }
   },
 };
+
 export const whatIfAPI = {
   simulateBuildingInactivation: async (buildingIds) => {
     try {
@@ -428,7 +609,8 @@ export const whatIfAPI = {
       );
     }
   },
-    simulateAvailabilityChange: async ({
+
+  simulateAvailabilityChange: async ({
     targetType,
     targetIds,
     action = "inactivate",
@@ -469,8 +651,8 @@ export const whatIfAPI = {
       );
     }
   },
-
 };
+
 export const debugAuthAPI = {
   getAccessToken,
   getRefreshToken,
