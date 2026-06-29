@@ -10,6 +10,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.exceptions import ValidationError as DRFValidationError
 
+from django.http import HttpResponse
 from django.utils import timezone
 from django.db import transaction
 from django.db.models import Q, Count
@@ -4908,4 +4909,95 @@ def swap_students_rooms(request):
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+
+# =========================
+# Reports
+# =========================
+
+def _excel_response(buffer, filename):
+    response = HttpResponse(
+        buffer.getvalue(),
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def dormify_report(request):
+    from .report_exports import generate_dormify_report
+    try:
+        buffer = generate_dormify_report()
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    today = timezone.now().strftime('%Y-%m-%d')
+    return _excel_response(buffer, f'Dormify_Report_{today}.xlsx')
+
+
+def _resolve_region(request):
+    """Return (region_id, region_name) from ?region_id= query param, or (None, None)."""
+    region_id = request.query_params.get('region_id') or None
+    if not region_id:
+        return None, None
+    try:
+        region_obj = Region.objects.get(pk=region_id)
+        return region_id, region_obj.name
+    except Region.DoesNotExist:
+        return region_id, None
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def student_allocation_report(request):
+    # Legacy endpoint kept for backward compatibility — delegates to student actions generator.
+    from .report_exports import generate_student_actions_report
+    try:
+        buffer = generate_student_actions_report()
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    today = timezone.now().strftime('%Y-%m-%d')
+    return _excel_response(buffer, f'Dormify_Student_Allocation_Report_{today}.xlsx')
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def student_actions_report(request):
+    from .report_exports import generate_student_actions_report
+    region_id, region_name = _resolve_region(request)
+    try:
+        buffer = generate_student_actions_report(region_id=region_id, region_name=region_name)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    today      = timezone.now().strftime('%Y-%m-%d')
+    file_part  = region_id or 'All_Regions'
+    return _excel_response(buffer, f'Dormify_Student_Actions_Report_{file_part}_{today}.xlsx')
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def capacity_report(request):
+    from .report_exports import generate_capacity_report
+    region_id, region_name = _resolve_region(request)
+    try:
+        buffer = generate_capacity_report(region_id=region_id, region_name=region_name)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    today     = timezone.now().strftime('%Y-%m-%d')
+    file_part = region_id or 'All_Regions'
+    return _excel_response(buffer, f'Dormify_Capacity_Report_{file_part}_{today}.xlsx')
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def manual_review_report(request):
+    from .report_exports import generate_manual_review_report
+    region_id, region_name = _resolve_region(request)
+    try:
+        buffer = generate_manual_review_report(region_id=region_id, region_name=region_name)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    today     = timezone.now().strftime('%Y-%m-%d')
+    file_part = region_id or 'All_Regions'
+    return _excel_response(buffer, f'Dormify_Manual_Review_Report_{file_part}_{today}.xlsx')
 
