@@ -79,6 +79,13 @@ urlpatterns = [
     path('room-assignments/unassign/', views.unassign_student_room, name='unassign-student-room'),
     path('room-assignments/swap/', views.swap_students_rooms, name='swap-students-rooms'),
 
+    # Reports
+    path('reports/dormify-report/',            views.dormify_report,            name='dormify-report'),
+    path('reports/student-allocation-report/', views.student_allocation_report, name='student-allocation-report'),
+    path('reports/student-actions-report/',    views.student_actions_report,    name='student-actions-report'),
+    path('reports/capacity-report/',           views.capacity_report,           name='capacity-report'),
+    path('reports/manual-review-report/',      views.manual_review_report,      name='manual-review-report'),
+
     # ViewSet routes
     path('', include(router.urls)),
 ]
