@@ -701,6 +701,43 @@ export const whatIfAPI = {
   },
 };
 
+export const regionsAPI = {
+  getAll: async () => {
+    try {
+      const { data } = await api.get('/api/regions/');
+      return Array.isArray(data) ? data : (data.results || []);
+    } catch (err) {
+      throw new Error(getErrorMessage(err, 'Failed to load regions'));
+    }
+  },
+};
+
+export const reportsAPI = {
+  downloadDormifyReport: async () => {
+    return api.get('/api/reports/dormify-report/', { responseType: 'blob' });
+  },
+
+  // Legacy: kept for backward compat
+  downloadStudentAllocationReport: async () => {
+    return api.get('/api/reports/student-allocation-report/', { responseType: 'blob' });
+  },
+
+  downloadStudentActionsReport: async (regionId = null) => {
+    const params = regionId ? { region_id: regionId } : {};
+    return api.get('/api/reports/student-actions-report/', { responseType: 'blob', params });
+  },
+
+  downloadCapacityReport: async (regionId = null) => {
+    const params = regionId ? { region_id: regionId } : {};
+    return api.get('/api/reports/capacity-report/', { responseType: 'blob', params });
+  },
+
+  downloadManualReviewReport: async (regionId = null) => {
+    const params = regionId ? { region_id: regionId } : {};
+    return api.get('/api/reports/manual-review-report/', { responseType: 'blob', params });
+  },
+};
+
 export const debugAuthAPI = {
   getAccessToken,
   getRefreshToken,
