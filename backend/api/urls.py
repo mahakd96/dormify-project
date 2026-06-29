@@ -36,11 +36,18 @@ urlpatterns = [
     path('inbox/<int:inbox_id>/viewed/', views.mark_inbox_viewed, name='mark-inbox-viewed'),
     path('inbox/<int:inbox_id>/processed/', views.mark_inbox_processed, name='mark-inbox-processed'),
 
-    # Allocation
+    # Allocation - legacy synchronous endpoint (kept for backward compat)
     path('allocation/run/', views.run_allocation, name='run-allocation'),
     path('allocation/history/', views.allocation_history, name='allocation-history'),
     path('allocation/summary/', views.allocation_summary, name='allocation-summary'),
     path('allocation/results/', views.allocation_results, name='allocation-results'),
+
+    # Allocation lifecycle (async: start → poll → stop / delete)
+    path('allocation/start/', views.start_allocation_run, name='allocation-start'),
+    path('allocation/runs/active/', views.get_active_allocation_run, name='allocation-active-run'),
+    path('allocation/runs/<int:run_id>/', views.get_allocation_run_detail, name='allocation-run-detail'),
+    path('allocation/runs/<int:run_id>/stop/', views.stop_allocation_run, name='allocation-run-stop'),
+    path('allocation/runs/<int:run_id>/delete/', views.delete_allocation_run, name='allocation-run-delete'),
     path('analysis/', views.analysis_data, name='analysis'),
 
     # What-If Building Inactivation

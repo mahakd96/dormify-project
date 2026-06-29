@@ -146,15 +146,60 @@ export const allocationAPI = {
 
   run: async (regionId, payload = {}) => {
     try {
-      const body = {
-        region: regionId,
-        ...payload,
-      };
-
+      const body = { region: regionId, ...payload };
       const { data } = await api.post("/api/allocation/run/", body);
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Allocation run failed"));
+    }
+  },
+
+  startRun: async (regionId, payload = {}) => {
+    try {
+      const body = { region: regionId, ...payload };
+      const { data } = await api.post("/api/allocation/start/", body);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to start allocation run"));
+    }
+  },
+
+  getRunStatus: async (runId) => {
+    try {
+      const { data } = await api.get(`/api/allocation/runs/${runId}/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to get run status"));
+    }
+  },
+
+  stopRun: async (runId) => {
+    try {
+      const { data } = await api.post(`/api/allocation/runs/${runId}/stop/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to stop allocation run"));
+    }
+  },
+
+  deleteResults: async (runId) => {
+    try {
+      const { data } = await api.delete(`/api/allocation/runs/${runId}/delete/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to delete allocation results"));
+    }
+  },
+
+  getActiveRun: async (regionId = null) => {
+    try {
+      const url = regionId
+        ? `/api/allocation/runs/active/?region=${regionId}`
+        : "/api/allocation/runs/active/";
+      const { data } = await api.get(url);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to get active run"));
     }
   },
 
@@ -172,7 +217,6 @@ export const allocationAPI = {
       const url = regionId
         ? `/api/allocation/results/?region=${regionId}`
         : "/api/allocation/results/";
-
       const { data } = await api.get(url);
       return data;
     } catch (err) {

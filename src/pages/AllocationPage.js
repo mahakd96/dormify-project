@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { allocationAPI, inboxAPI } from '../services/api';
@@ -19,6 +19,8 @@ import {
   BarChart3,
   ShieldCheck,
   SlidersHorizontal,
+  Square,
+  Trash2,
 } from 'lucide-react';
 
 function AllocationPage({ language = 'he' }) {
@@ -36,6 +38,16 @@ function AllocationPage({ language = 'he' }) {
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [result, setResult] = useState(null);
+
+  const [runId, setRunId] = useState(null);
+  const [runStatus, setRunStatus] = useState(null);
+  const [isStopping, setIsStopping] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [confirmModal, setConfirmModal] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  const pollRef = useRef(null);
+  const mountedRef = useRef(true);
 
   const [constraints, setConstraints] = useState({
     sameGender: { enabled: true, strict: true, critical: true, weight: 0 },
@@ -123,6 +135,23 @@ function AllocationPage({ language = 'he' }) {
           noResultsYet: 'עדיין אין תוצאות זמינות. הריצי שיבוץ כדי להפיק תוצאות.',
           resultsHint: 'כפתור התוצאות יופעל לאחר הרצת שיבוץ מוצלחת.',
           currentStatus: 'סטטוס נוכחי',
+          stopAllocation: 'עצור שיבוץ',
+          stoppingStopping: 'עוצר ומנקה...',
+          stopConfirmTitle: 'עצור שיבוץ',
+          stopConfirmMsg: 'האם אתה בטוח שברצונך לעצור את השיבוץ הפעיל? כל ההקצאות החלקיות יימחקו.',
+          stopSuccess: 'השיבוץ עוצר. ניקוי נתונים בתהליך...',
+          stopError: 'שגיאה בעצירת השיבוץ',
+          deleteResults: 'מחק תוצאות',
+          deletingResults: 'מוחק תוצאות...',
+          deleteConfirmTitle: 'מחיקת תוצאות שיבוץ',
+          deleteConfirmMsg: 'האם אתה בטוח שברצונך למחוק את תוצאות השיבוץ הנוכחיות? פעולה זו תבטל את כל ההקצאות שנוצרו בהרצה זו.',
+          deleteSuccess: 'תוצאות השיבוץ נמחקו בהצלחה',
+          deleteError: 'שגיאה במחיקת תוצאות השיבוץ',
+          approvedCannotDelete: 'לא ניתן למחוק הקצאה שאושרה סופית',
+          missingRunId: 'לא נמצא מזהה הרצה פעילה',
+          cancel: 'ביטול',
+          confirm: 'אישור',
+          stoppedStatus: 'השיבוץ עוצר',
         },
         en: {
           title: 'Student Allocation',
@@ -195,6 +224,23 @@ function AllocationPage({ language = 'he' }) {
           noResultsYet: 'No results are available yet. Run allocation to generate results.',
           resultsHint: 'The results button will be enabled after a successful run.',
           currentStatus: 'Current status',
+          stopAllocation: 'Stop Allocation',
+          stoppingStopping: 'Stopping and cleaning...',
+          stopConfirmTitle: 'Stop Allocation',
+          stopConfirmMsg: 'Are you sure you want to stop the active allocation? All partial assignments will be deleted.',
+          stopSuccess: 'Allocation stopping. Cleanup in progress...',
+          stopError: 'Failed to stop allocation',
+          deleteResults: 'Delete Results',
+          deletingResults: 'Deleting Results...',
+          deleteConfirmTitle: 'Delete Allocation Results',
+          deleteConfirmMsg: 'Are you sure you want to delete the current allocation results? This will cancel all assignments created in this run.',
+          deleteSuccess: 'Allocation results deleted successfully',
+          deleteError: 'Failed to delete allocation results',
+          approvedCannotDelete: 'Approved allocations cannot be deleted',
+          missingRunId: 'No active run identifier found',
+          cancel: 'Cancel',
+          confirm: 'Confirm',
+          stoppedStatus: 'Allocation stopped',
         },
       }[language] || {
         title: 'Student Allocation',
@@ -267,6 +313,23 @@ function AllocationPage({ language = 'he' }) {
         noResultsYet: 'No results are available yet. Run allocation to generate results.',
         resultsHint: 'The results button will be enabled after a successful run.',
         currentStatus: 'Current status',
+        stopAllocation: 'Stop Allocation',
+        stoppingStopping: 'Stopping and cleaning...',
+        stopConfirmTitle: 'Stop Allocation',
+        stopConfirmMsg: 'Are you sure you want to stop the active allocation? All partial assignments will be deleted.',
+        stopSuccess: 'Allocation stopping. Cleanup in progress...',
+        stopError: 'Failed to stop allocation',
+        deleteResults: 'Delete Results',
+        deletingResults: 'Deleting Results...',
+        deleteConfirmTitle: 'Delete Allocation Results',
+        deleteConfirmMsg: 'Are you sure you want to delete the current allocation results? This will cancel all assignments created in this run.',
+        deleteSuccess: 'Allocation results deleted successfully',
+        deleteError: 'Failed to delete allocation results',
+        approvedCannotDelete: 'Approved allocations cannot be deleted',
+        missingRunId: 'No active run identifier found',
+        cancel: 'Cancel',
+        confirm: 'Confirm',
+        stoppedStatus: 'Allocation stopped',
       }),
     [language]
   );
@@ -395,49 +458,6 @@ function AllocationPage({ language = 'he' }) {
     return summary?.region?.id || summary?.region?.name || null;
   }, [getUserRegion, summary]);
 
-  const loadPage = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const summaryRaw = await allocationAPI.getSummary();
-      const normalizedSummary = safeSummary(summaryRaw);
-      setSummary(normalizedSummary);
-
-      if (!central) {
-        try {
-          const inboxRaw = await inboxAPI.getLatest();
-          const inbox = safeInbox(inboxRaw);
-
-          if (inbox) {
-            setInboxItem(inbox);
-
-            if (inbox.status === 'pending' && inbox.id) {
-              Promise.resolve(inboxAPI.markViewed(inbox.id)).catch((err) => {
-                console.warn('markViewed failed:', err);
-              });
-            }
-          } else {
-            setInboxItem(null);
-          }
-        } catch (inboxErr) {
-          console.warn('inbox getLatest failed:', inboxErr);
-          setInboxItem(null);
-        }
-      } else {
-        setInboxItem(null);
-      }
-    } catch (err) {
-      setError(getErrorMessage(err));
-    } finally {
-      setLoading(false);
-    }
-  }, [central, getErrorMessage, safeInbox, safeSummary]);
-
-  useEffect(() => {
-    loadPage();
-  }, [loadPage]);
-
   const toggleConstraintEnabled = (key) => {
     setConstraints((prev) => {
       const current = prev[key];
@@ -483,6 +503,182 @@ function AllocationPage({ language = 'he' }) {
     return out;
   }, [constraints]);
 
+  const showToast = useCallback((message, type = 'info') => {
+    setToast({ message, type });
+    setTimeout(() => {
+      if (mountedRef.current) setToast(null);
+    }, 4000);
+  }, []);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  const loadPage = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    let normalizedSummary = null;
+
+    try {
+      const summaryRaw = await allocationAPI.getSummary();
+      normalizedSummary = safeSummary(summaryRaw);
+      setSummary(normalizedSummary);
+
+      if (!central) {
+        try {
+          const inboxRaw = await inboxAPI.getLatest();
+          const inbox = safeInbox(inboxRaw);
+
+          if (inbox) {
+            setInboxItem(inbox);
+
+            if (inbox.status === 'pending' && inbox.id) {
+              Promise.resolve(inboxAPI.markViewed(inbox.id)).catch((err) => {
+                console.warn('markViewed failed:', err);
+              });
+            }
+          } else {
+            setInboxItem(null);
+          }
+        } catch (inboxErr) {
+          console.warn('inbox getLatest failed:', inboxErr);
+          setInboxItem(null);
+        }
+      } else {
+        setInboxItem(null);
+      }
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+
+    return normalizedSummary;
+  }, [central, getErrorMessage, safeInbox, safeSummary]);
+
+  const startPolling = useCallback((id) => {
+    stopPolling();
+
+    pollRef.current = setInterval(async () => {
+      if (!mountedRef.current) {
+        stopPolling();
+        return;
+      }
+
+      try {
+        const data = await allocationAPI.getRunStatus(id);
+        const runData = data?.run;
+        const st = runData?.status;
+
+        if (!mountedRef.current) return;
+        setRunStatus(st);
+
+        if (st === 'completed') {
+          stopPolling();
+          setIsRunning(false);
+          setIsStopping(false);
+          setProgress(100);
+          setResult({
+            successful_assignments: data.successful_assignments ?? runData?.successful_assignments ?? 0,
+            roommate_matches: data.roommate_matches ?? runData?.roommate_matches ?? 0,
+            conflicts: data.conflicts ?? runData?.conflicts ?? 0,
+            assignments: data.assignments ?? [],
+            run: runData,
+          });
+          loadPage().catch(() => {});
+        } else if (st === 'stopped' || st === 'failed' || st === 'deleted') {
+          stopPolling();
+          setIsRunning(false);
+          setIsStopping(false);
+          setProgress(0);
+          setResult(null);
+          setRunId(null);
+          setRunStatus(null);
+          loadPage().catch(() => {});
+
+          if (st === 'stopped') {
+            showToast(t.stoppedStatus, 'info');
+          } else if (st === 'failed') {
+            showToast(runData?.error_message || t.unknownError, 'error');
+          }
+        } else if (st === 'cancellation_requested') {
+          setIsStopping(true);
+          setProgress((prev) => Math.min(prev + 2, 95));
+        } else if (st === 'running' || st === 'queued') {
+          setProgress((prev) => Math.min(prev + 3, 92));
+        }
+      } catch (err) {
+        console.warn('Polling error:', err);
+      }
+    }, 3000);
+  }, [stopPolling, loadPage, showToast, t.stoppedStatus, t.unknownError]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      stopPolling();
+    };
+  }, [stopPolling]);
+
+  const recoverActiveRun = useCallback(async (regionId) => {
+    try {
+      const data = await allocationAPI.getActiveRun(regionId || undefined);
+      const run = data?.run;
+
+      if (!run || !mountedRef.current) return;
+
+      setRunId(run.id);
+      setRunStatus(run.status);
+
+      if (['queued', 'running', 'cancellation_requested'].includes(run.status)) {
+        setIsRunning(true);
+        if (run.status === 'cancellation_requested') setIsStopping(true);
+        startPolling(run.id);
+      } else if (run.status === 'completed') {
+        try {
+          const detail = await allocationAPI.getRunStatus(run.id);
+          if (mountedRef.current && detail?.run?.status === 'completed') {
+            setResult({
+              successful_assignments: detail.successful_assignments ?? detail.run?.successful_assignments ?? 0,
+              roommate_matches: detail.roommate_matches ?? detail.run?.roommate_matches ?? 0,
+              conflicts: detail.conflicts ?? detail.run?.conflicts ?? 0,
+              assignments: detail.assignments ?? [],
+              run: detail.run,
+            });
+          }
+        } catch (e) {
+          console.warn('Failed to load completed run detail:', e);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to recover active run:', err);
+    }
+  }, [startPolling]);
+
+  const loadPageRef = useRef(loadPage);
+  const recoverActiveRunRef = useRef(recoverActiveRun);
+  useEffect(() => { loadPageRef.current = loadPage; }, [loadPage]);
+  useEffect(() => { recoverActiveRunRef.current = recoverActiveRun; }, [recoverActiveRun]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const init = async () => {
+      const loadedSummary = await loadPageRef.current();
+      if (cancelled || !mountedRef.current) return;
+      const regionId = loadedSummary?.region?.id || null;
+      await recoverActiveRunRef.current(regionId);
+    };
+
+    init().catch(console.warn);
+
+    return () => { cancelled = true; };
+  }, []);
+
   const handleViewResults = useCallback(() => {
     if (!result) return;
 
@@ -498,57 +694,107 @@ function AllocationPage({ language = 'he' }) {
   }, [navigate, result, summary, effectiveConfig]);
 
   const runAllocation = async () => {
+    if (isRunning || isStopping || isDeleting) return;
+
     setIsRunning(true);
     setProgress(0);
     setResult(null);
     setError(null);
+    setRunId(null);
+    setRunStatus(null);
 
-    const progressInterval = setInterval(() => {
-      setProgress((prev) => Math.min(prev + 5, 90));
-    }, 200);
+    const regionId = resolveRegionId();
+
+    if (!regionId) {
+      setIsRunning(false);
+      setError(t.noRegion);
+      return;
+    }
 
     try {
-      const regionId = resolveRegionId();
-
-      if (!regionId) {
-        clearInterval(progressInterval);
-        setProgress(0);
-        setIsRunning(false);
-        setError(t.noRegion);
-        return;
-      }
-
-      const responseRaw = await allocationAPI.run(regionId, { constraints: effectiveConfig });
+      const responseRaw = await allocationAPI.startRun(regionId, { constraints: effectiveConfig });
       const response = unwrapResponse(responseRaw);
 
-      clearInterval(progressInterval);
-      setProgress(100);
-      setResult(response?.result || response || null);
+      const id = response?.run_id || response?.run?.id;
+
+      if (!id) {
+        throw new Error(t.missingRunId);
+      }
+
+      setRunId(id);
+      setRunStatus('queued');
+      startPolling(id);
 
       if (inboxItem?.id) {
-        try {
-          await inboxAPI.markProcessed(inboxItem.id);
-        } catch (err) {
-          console.warn('markProcessed failed:', err);
-        }
-      }
-
-      try {
-        await loadPage();
-      } catch (err) {
-        console.warn('page refresh failed:', err);
+        inboxAPI.markProcessed(inboxItem.id).catch(() => {});
       }
     } catch (err) {
-      clearInterval(progressInterval);
       setError(getErrorMessage(err));
-    } finally {
       setIsRunning(false);
-      clearInterval(progressInterval);
+      setRunId(null);
+      setRunStatus(null);
     }
+  };
+
+  const requestStopAllocation = () => {
+    if (!runId) {
+      showToast(t.missingRunId, 'error');
+      return;
+    }
+
+    setConfirmModal({
+      title: t.stopConfirmTitle,
+      message: t.stopConfirmMsg,
+      onConfirm: async () => {
+        setConfirmModal(null);
+        setIsStopping(true);
+        try {
+          await allocationAPI.stopRun(runId);
+          showToast(t.stopSuccess, 'info');
+          setRunStatus('cancellation_requested');
+        } catch (err) {
+          showToast(getErrorMessage(err) || t.stopError, 'error');
+          setIsStopping(false);
+        }
+      },
+    });
+  };
+
+  const requestDeleteResults = () => {
+    if (!runId) {
+      showToast(t.missingRunId, 'error');
+      return;
+    }
+
+    setConfirmModal({
+      title: t.deleteConfirmTitle,
+      message: t.deleteConfirmMsg,
+      onConfirm: async () => {
+        setConfirmModal(null);
+        setIsDeleting(true);
+        try {
+          await allocationAPI.deleteResults(runId);
+          setResult(null);
+          setRunId(null);
+          setRunStatus(null);
+          showToast(t.deleteSuccess, 'success');
+          loadPage().catch(() => {});
+        } catch (err) {
+          const msg = getErrorMessage(err);
+          const isApproved = err?.response?.status === 409
+            || (typeof msg === 'string' && msg.toLowerCase().includes('approved'));
+          showToast(isApproved ? t.approvedCannotDelete : (msg || t.deleteError), 'error');
+        } finally {
+          if (mountedRef.current) setIsDeleting(false);
+        }
+      },
+    });
   };
 
   const canRun = typeof canRunAllocation === 'function' ? canRunAllocation() : false;
   const hasStudents = (summary?.unassigned_students || 0) > 0;
+  const showStopButton = isRunning && !isStopping && !!runId && canRun;
+  const showDeleteButton = runStatus === 'completed' && !isRunning && !!result && !!runId && canRun;
 
   if (loading) {
     return (
@@ -578,6 +824,38 @@ function AllocationPage({ language = 'he' }) {
 
   return (
     <div className="allocation-page">
+      {toast && (
+        <div className={`toast toast-${toast.type}`}>
+          {toast.type === 'success' && <Check size={16} />}
+          {toast.type === 'error' && <XCircle size={16} />}
+          {toast.type === 'info' && <AlertTriangle size={16} />}
+          <span>{toast.message}</span>
+        </div>
+      )}
+
+      {confirmModal && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="modal-box">
+            <h3 className="modal-title">{confirmModal.title}</h3>
+            <p className="modal-msg">{confirmModal.message}</p>
+            <div className="modal-actions">
+              <button
+                className="modal-cancel"
+                onClick={() => setConfirmModal(null)}
+              >
+                {t.cancel}
+              </button>
+              <button
+                className="modal-confirm"
+                onClick={confirmModal.onConfirm}
+              >
+                {t.confirm}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="shell">
         <div className="topbar">
           <div className="titleBlock">
@@ -597,13 +875,13 @@ function AllocationPage({ language = 'he' }) {
             <button
               className="run-btn"
               onClick={runAllocation}
-              disabled={isRunning || !canRun || !hasStudents}
+              disabled={isRunning || !canRun || !hasStudents || isDeleting}
               title={!hasStudents ? t.noStudents : ''}
             >
               {isRunning ? (
                 <>
                   <RefreshCw size={18} className="spin" />
-                  {t.running}
+                  {isStopping ? t.stoppingStopping : t.running}
                 </>
               ) : (
                 <>
@@ -613,7 +891,45 @@ function AllocationPage({ language = 'he' }) {
               )}
             </button>
 
-            {!hasStudents && (
+            {showStopButton && (
+              <button
+                className="stop-btn"
+                onClick={requestStopAllocation}
+                disabled={isStopping}
+              >
+                <Square size={16} />
+                {t.stopAllocation}
+              </button>
+            )}
+
+            {isStopping && (
+              <span className="status-chip warn">
+                <Loader size={14} className="spin" />
+                {t.stoppingStopping}
+              </span>
+            )}
+
+            {showDeleteButton && (
+              <button
+                className="delete-btn"
+                onClick={requestDeleteResults}
+                disabled={isDeleting}
+              >
+                {isDeleting ? (
+                  <>
+                    <Loader size={16} className="spin" />
+                    {t.deletingResults}
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={16} />
+                    {t.deleteResults}
+                  </>
+                )}
+              </button>
+            )}
+
+            {!hasStudents && !isRunning && (
               <span className="status-chip ok">
                 <Check size={16} />
                 {t.noStudents}
@@ -980,9 +1296,31 @@ function AllocationPage({ language = 'he' }) {
                 </div>
               )}
 
-              <button className="ghostBtn" onClick={handleViewResults} disabled={!result}>
-                {t.viewResults}
-              </button>
+              <div className="resultActions">
+                <button className="ghostBtn" onClick={handleViewResults} disabled={!result || runStatus !== 'completed'}>
+                  {t.viewResults}
+                </button>
+
+                {showDeleteButton && (
+                  <button
+                    className="ghostBtnDanger"
+                    onClick={requestDeleteResults}
+                    disabled={isDeleting}
+                  >
+                    {isDeleting ? (
+                      <>
+                        <Loader size={14} className="spin" />
+                        {t.deletingResults}
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 size={14} />
+                        {t.deleteResults}
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -1105,6 +1443,225 @@ const styles = `
     cursor: not-allowed;
     transform: none;
     box-shadow: none;
+  }
+
+  .stop-btn{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(185,28,28,0.30);
+    background: linear-gradient(135deg, #dc2626, #b91c1c);
+    color: white;
+    font-weight: 950;
+    font-size: 14px;
+    cursor: pointer;
+    box-shadow: 0 6px 16px rgba(185,28,28,0.28);
+    transition: transform 0.18s, filter 0.18s;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+
+  .stop-btn:hover{
+    transform: translateY(-1px);
+    filter: brightness(0.95);
+  }
+
+  .stop-btn:disabled{
+    opacity: 0.65;
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  .delete-btn{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(185,28,28,0.30);
+    background: linear-gradient(135deg, #dc2626, #b91c1c);
+    color: white;
+    font-weight: 950;
+    font-size: 14px;
+    cursor: pointer;
+    box-shadow: 0 6px 16px rgba(185,28,28,0.28);
+    transition: transform 0.18s, filter 0.18s;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+
+  .delete-btn:hover{
+    transform: translateY(-1px);
+    filter: brightness(0.95);
+  }
+
+  .delete-btn:disabled{
+    opacity: 0.65;
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  .resultActions{
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+  }
+
+  .resultActions .ghostBtn{
+    flex: 1;
+    margin-top: 0;
+  }
+
+  .resultActions .ghostBtnDanger{
+    flex: 1;
+    margin-top: 0;
+  }
+
+  .ghostBtnDanger{
+    margin-top: 12px;
+    width: 100%;
+    padding: 12px;
+    border-radius: 14px;
+    border: 1px solid rgba(185,28,28,0.22);
+    background: rgba(185,28,28,0.06);
+    color: var(--danger);
+    font-weight: 950;
+    cursor: pointer;
+    font-family: inherit;
+    transition: 0.18s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .ghostBtnDanger:hover:not(:disabled){
+    background: rgba(185,28,28,0.12);
+    border-color: rgba(185,28,28,0.35);
+  }
+
+  .ghostBtnDanger:disabled{
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  /* Confirmation modal */
+  .modal-overlay{
+    position: fixed;
+    inset: 0;
+    background: rgba(15,23,42,0.55);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: 16px;
+  }
+
+  .modal-box{
+    background: #fff;
+    border-radius: 20px;
+    box-shadow: 0 24px 60px rgba(15,23,42,0.22);
+    padding: 28px;
+    max-width: 420px;
+    width: 100%;
+  }
+
+  .modal-title{
+    margin: 0 0 10px;
+    font-size: 18px;
+    font-weight: 950;
+    color: var(--text);
+  }
+
+  .modal-msg{
+    margin: 0 0 20px;
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 800;
+    line-height: 1.55;
+  }
+
+  .modal-actions{
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+  }
+
+  .modal-cancel{
+    padding: 10px 18px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: rgba(15,23,42,0.04);
+    color: var(--text);
+    font-weight: 950;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 14px;
+  }
+
+  .modal-cancel:hover{
+    background: rgba(15,23,42,0.08);
+  }
+
+  .modal-confirm{
+    padding: 10px 18px;
+    border-radius: 12px;
+    border: 1px solid rgba(185,28,28,0.28);
+    background: linear-gradient(135deg, #dc2626, #b91c1c);
+    color: white;
+    font-weight: 950;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 14px;
+    box-shadow: 0 4px 12px rgba(185,28,28,0.28);
+  }
+
+  .modal-confirm:hover{
+    filter: brightness(0.95);
+  }
+
+  /* Toast notification */
+  .toast{
+    position: fixed;
+    top: 18px;
+    inset-inline-end: 18px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 18px;
+    border-radius: 14px;
+    font-size: 14px;
+    font-weight: 900;
+    box-shadow: 0 8px 24px rgba(15,23,42,0.18);
+    z-index: 200;
+    max-width: 380px;
+    animation: slideIn 0.2s ease;
+  }
+
+  @keyframes slideIn{
+    from{ transform: translateY(-12px); opacity: 0; }
+    to{ transform: translateY(0); opacity: 1; }
+  }
+
+  .toast-success{
+    background: linear-gradient(135deg, #059669, #047857);
+    color: white;
+  }
+
+  .toast-error{
+    background: linear-gradient(135deg, #dc2626, #b91c1c);
+    color: white;
+  }
+
+  .toast-info{
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    color: white;
   }
 
   .status-chip{

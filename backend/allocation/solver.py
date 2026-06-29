@@ -908,6 +908,7 @@ def run_improved_ortools_allocation(
     rooms,
     constraints_config,
     *,
+    allocation_run_id=None,
     max_seconds=None,
     solve_mode="best-effort",
     max_relative_gap=0.0,
@@ -1454,6 +1455,7 @@ def run_improved_ortools_allocation(
                         bed=bed,
                         status=BedAssignment.Status.ACTIVE,
                         assignment_type=BedAssignment.AssignmentType.INITIAL,
+                        allocation_run_id=allocation_run_id,
                     )
                 )
                 student.assigned_room_id = bed.room_id
