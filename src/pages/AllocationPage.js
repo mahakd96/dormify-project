@@ -1,25 +1,253 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { allocationAPI, inboxAPI } from '../services/api';
 import {
   Play,
-  Settings,
+  Square,
+  Trash2,
+  RefreshCw,
+  Loader,
   Check,
   AlertTriangle,
+  XCircle,
+  ChevronDown,
+  ChevronUp,
   Users,
   Home,
-  RefreshCw,
   Lock,
   Bell,
-  Mail,
   Calendar,
-  Loader,
-  XCircle,
   BarChart3,
   ShieldCheck,
   SlidersHorizontal,
+  Clock,
+  Mail,
+  Building2,
+  Activity,
+  ExternalLink,
+  Info,
 } from 'lucide-react';
+
+// ─────────────────────────────────────────────
+// Sub-components
+// ─────────────────────────────────────────────
+
+function StatusBadge({ statusKey, t }) {
+  const config = {
+    not_started: { label: t.statusNotStarted, cls: 'badge-gray', dot: false },
+    queued:      { label: t.statusQueued,      cls: 'badge-blue', dot: true },
+    running:     { label: t.statusRunning,     cls: 'badge-blue', dot: true, pulse: true },
+    cancellation_requested: { label: t.statusStopping, cls: 'badge-amber', dot: true, pulse: true },
+    stopped:     { label: t.statusStopped,    cls: 'badge-gray', dot: false },
+    completed:   { label: t.statusCompleted,  cls: 'badge-green', dot: false },
+    failed:      { label: t.statusFailed,     cls: 'badge-red', dot: false },
+    deleted:     { label: t.statusDeleted,    cls: 'badge-gray', dot: false },
+  };
+  const c = config[statusKey] || config.not_started;
+  return (
+    <span className={`ap-status-badge ${c.cls}`}>
+      {c.dot && <span className={`ap-badge-dot${c.pulse ? ' ap-badge-dot-pulse' : ''}`} />}
+      {c.label}
+    </span>
+  );
+}
+
+function ToastNotification({ toast }) {
+  if (!toast) return null;
+  const icons = {
+    success: <Check size={15} />,
+    error:   <XCircle size={15} />,
+    info:    <Info size={15} />,
+    warning: <AlertTriangle size={15} />,
+  };
+  return (
+    <div className={`ap-toast ap-toast-${toast.type}`} role="alert" aria-live="polite">
+      <span className="ap-toast-icon">{icons[toast.type] || icons.info}</span>
+      <span className="ap-toast-msg">{toast.message}</span>
+    </div>
+  );
+}
+
+function ConfirmDialog({ modal, t, onClose }) {
+  if (!modal) return null;
+  return (
+    <div className="ap-modal-overlay" role="dialog" aria-modal="true">
+      <div className="ap-modal-box">
+        <h3 className="ap-modal-title">{modal.title}</h3>
+        <p className="ap-modal-body">{modal.message}</p>
+        <div className="ap-modal-actions">
+          <button className="ap-modal-cancel" onClick={onClose}>{t.cancel}</button>
+          <button className="ap-modal-confirm" onClick={modal.onConfirm}>{t.confirm}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InventoryTypeRow({ typeKey, label, item, expandedType, onToggle, t }) {
+  const total = item.total_beds || 0;
+  const available = item.available_beds || 0;
+  const occupied = item.occupied_beds || 0;
+  const occupancyPct = total > 0 ? Math.round(((total - available) / total) * 100) : 0;
+  const isExpanded = expandedType === typeKey;
+
+  return (
+    <div className="ap-inv-row">
+      <button
+        className="ap-inv-row-header"
+        onClick={() => onToggle(typeKey)}
+        aria-expanded={isExpanded}
+      >
+        <div className="ap-inv-row-left">
+          <span className="ap-inv-type-icon">
+            <Home size={15} />
+          </span>
+          <span className="ap-inv-type-name">{label}</span>
+        </div>
+        <div className="ap-inv-row-right">
+          <div className="ap-inv-quick-stats">
+            <span className="ap-inv-quick-stat available">
+              <strong>{available}</strong> {t.freeBedsLabel}
+            </span>
+            <span className="ap-inv-sep">·</span>
+            <span className="ap-inv-quick-stat">{occupancyPct}% {t.occupied}</span>
+          </div>
+          <div className="ap-inv-progress-mini">
+            <div
+              className="ap-inv-progress-fill"
+              style={{ width: `${occupancyPct}%` }}
+            />
+          </div>
+          <span className="ap-inv-chevron">
+            {isExpanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+          </span>
+        </div>
+      </button>
+
+      {isExpanded && (
+        <div className="ap-inv-expanded">
+          <div className="ap-inv-metrics-grid">
+            <div className="ap-inv-metric">
+              <div className="ap-inv-metric-val">{item.apartments || 0}</div>
+              <div className="ap-inv-metric-lbl">{t.apartmentsLabel}</div>
+            </div>
+            <div className="ap-inv-metric">
+              <div className="ap-inv-metric-val">{item.rooms || 0}</div>
+              <div className="ap-inv-metric-lbl">{t.roomsLabel}</div>
+            </div>
+            <div className="ap-inv-metric">
+              <div className="ap-inv-metric-val">{total}</div>
+              <div className="ap-inv-metric-lbl">{t.totalBedsLabel}</div>
+            </div>
+            <div className="ap-inv-metric ap-inv-metric-highlight">
+              <div className="ap-inv-metric-val">{available}</div>
+              <div className="ap-inv-metric-lbl">{t.freeBedsLabel}</div>
+            </div>
+            <div className="ap-inv-metric">
+              <div className="ap-inv-metric-val">{occupied}</div>
+              <div className="ap-inv-metric-lbl">{t.occupiedBeds}</div>
+            </div>
+            <div className="ap-inv-metric">
+              <div className="ap-inv-metric-val ap-inv-metric-pct">{occupancyPct}%</div>
+              <div className="ap-inv-metric-lbl">{t.occupancyPct}</div>
+            </div>
+          </div>
+          <div className="ap-inv-occ-bar-wrap">
+            <div className="ap-inv-occ-bar">
+              <div
+                className="ap-inv-occ-fill"
+                style={{ width: `${occupancyPct}%` }}
+                title={`${occupancyPct}% occupied`}
+              />
+            </div>
+            <span className="ap-inv-occ-label">{occupancyPct}% {t.occupied}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CriticalConditionCard({ condKey, t }) {
+  return (
+    <div className="ap-cond-card ap-cond-critical">
+      <div className="ap-cond-icon-wrap ap-cond-icon-critical">
+        <Lock size={13} />
+      </div>
+      <div className="ap-cond-body">
+        <div className="ap-cond-name">{t[condKey] || condKey}</div>
+        {t[`${condKey}Desc`] && (
+          <div className="ap-cond-desc">{t[`${condKey}Desc`]}</div>
+        )}
+        <div className="ap-cond-meta">
+          <span className="ap-cond-badge ap-cond-badge-critical">
+            <ShieldCheck size={11} /> {t.hardConstraint}
+          </span>
+          <span className="ap-cond-always">{t.alwaysApplied}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FlexibleConditionCard({ condKey, value, t, onToggle, onWeightChange }) {
+  return (
+    <div className={`ap-cond-card ap-cond-flexible${!value.enabled ? ' ap-cond-off' : ''}`}>
+      <div className="ap-cond-flex-top">
+        <div className="ap-cond-icon-wrap ap-cond-icon-flex">
+          <SlidersHorizontal size={13} />
+        </div>
+        <div className="ap-cond-body">
+          <div className="ap-cond-name">{t[condKey] || condKey}</div>
+          {t[`${condKey}Desc`] && (
+            <div className="ap-cond-desc">{t[`${condKey}Desc`]}</div>
+          )}
+          <span className={`ap-cond-status-chip${value.enabled ? ' ap-cond-status-on' : ''}`}>
+            {value.enabled ? t.included : t.excluded}
+          </span>
+        </div>
+        <button
+          type="button"
+          className={`ap-switch${value.enabled ? ' ap-switch-on' : ''}`}
+          role="switch"
+          aria-checked={value.enabled}
+          aria-label={`${t[condKey] || condKey}: ${value.enabled ? t.included : t.excluded}`}
+          onClick={() => onToggle(condKey)}
+        >
+          <span className="ap-switch-thumb" />
+        </button>
+      </div>
+
+      {value.enabled && (
+        <div className="ap-cond-weight">
+          <div className="ap-cond-weight-header">
+            <span className="ap-cond-weight-lbl">{t.importance}</span>
+            <span className="ap-cond-weight-val">{value.weight}/10</span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="10"
+            step="1"
+            value={value.weight}
+            className="ap-range"
+            aria-label={`${t.importance}: ${t[condKey] || condKey}`}
+            onChange={(e) => onWeightChange(condKey, e.target.value)}
+          />
+          <div className="ap-range-scale">
+            <span>0</span>
+            <span>10</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// Main Component
+// ─────────────────────────────────────────────
 
 function AllocationPage({ language = 'he' }) {
   const navigate = useNavigate();
@@ -27,270 +255,301 @@ function AllocationPage({ language = 'he' }) {
 
   const central = typeof isCentralAdmin === 'function' ? isCentralAdmin() === true : false;
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-
-  const [summary, setSummary] = useState(null);
+  // ── Core State ──────────────────────────────
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState(null);
+  const [summary, setSummary]     = useState(null);
   const [inboxItem, setInboxItem] = useState(null);
 
-  const [isRunning, setIsRunning] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [result, setResult] = useState(null);
+  // ── Run State ───────────────────────────────
+  const [isRunning, setIsRunning]   = useState(false);
+  const [progress, setProgress]     = useState(0);
+  const [result, setResult]         = useState(null);
+  const [runId, setRunId]           = useState(null);
+  const [runStatus, setRunStatus]   = useState(null);
+  const [isStopping, setIsStopping] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
+  // ── UI State ────────────────────────────────
+  const [confirmModal, setConfirmModal] = useState(null);
+  const [toast, setToast]               = useState(null);
+  const [expandedType, setExpandedType] = useState(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  // ── Constraints State ────────────────────────
   const [constraints, setConstraints] = useState({
-    sameGender: { enabled: true, strict: true, critical: true, weight: 0 },
-    sameReligion: { enabled: true, strict: false, critical: false, weight: 6 },
-    roommateMatch: { enabled: true, strict: false, critical: false, weight: 8 },
-    priorityFirst: { enabled: true, strict: true, critical: true, weight: 0 },
-    roommatePositiveOnly: { enabled: true, strict: true, critical: true, weight: 0 },
-    ReligiousTogether: { enabled: true, strict: true, critical: true, weight: 0 },
-    sectorMatching: { enabled: true, strict: false, critical: false, weight: 7 },
-    avoidYearMix_1_with_3_4: { enabled: true, strict: false, critical: false, weight: 4 },
-    avoidAtudaimWithHasmaha: { enabled: true, strict: false, critical: false, weight: 4 },
+    sameGender:             { enabled: true, strict: true,  critical: true,  weight: 0 },
+    priorityFirst:          { enabled: true, strict: true,  critical: true,  weight: 0 },
+    roommatePositiveOnly:   { enabled: true, strict: true,  critical: true,  weight: 0 },
+    ReligiousTogether:      { enabled: true, strict: true,  critical: true,  weight: 0 },
+    sameReligion:           { enabled: true, strict: false, critical: false, weight: 6 },
+    roommateMatch:          { enabled: true, strict: false, critical: false, weight: 8 },
+    sectorMatching:         { enabled: true, strict: false, critical: false, weight: 7 },
+    avoidYearMix_1_with_3_4:{ enabled: true, strict: false, critical: false, weight: 4 },
+    avoidAtudaimWithHasmaha:{ enabled: true, strict: false, critical: false, weight: 4 },
   });
 
-  const t = useMemo(
-    () =>
-      ({
-        he: {
-          title: 'שיבוץ סטודנטים',
-          subtitle: 'הפעלת אלגוריתם השיבוץ החכם',
-          runAllocation: 'הפעל שיבוץ',
-          running: 'מריץ שיבוץ...',
-          constraints: 'כללי והעדפות השיבוץ',
-          constraintsIntro: '',
-          hardConstraints: 'אילוצים קשיחים',
-          hardConstraintsHint: 'כללים קבועים של האלגוריתם. הם מופעלים תמיד, אינם ניתנים לשינוי ואינם מקבלים משקל.',
-          hardConstraint: 'אילוץ קשיח',
-          alwaysApplied: 'מופעל תמיד',
-          noWeight: 'ללא משקל',
-          optimizationPreferences: 'העדפות לאופטימיזציה',
-          preferencesHint: 'אפשר לבחור אילו העדפות יילקחו בחשבון ולקבוע את רמת החשיבות שלהן.',
-          importance: 'רמת חשיבות',
-          included: 'נכלל בשיבוץ',
-          excluded: 'לא נכלל בשיבוץ',
-          studentsToAssign: 'סטודנטים לשיבוץ',
-          availableBeds: 'מיטות פנויות',
-          results: 'תוצאות השיבוץ',
-          assigned: 'שובצו בהצלחה',
-          roommateMatches: 'התאמות שותפים',
-          conflicts: 'התנגשויות',
-          viewResults: 'צפה בתוצאות',
-          noStudents: 'אין סטודנטים לשיבוץ',
-          loading: 'טוען נתונים...',
-          error: 'שגיאה בטעינת הנתונים',
-          retry: 'נסה שוב',
-          notification: 'הודעה מלשכת המעונות המרכזית',
-          receivedStudents: 'התקבלו סטודנטים לשיבוץ',
-          batchId: 'מספר קובץ',
-          receivedAt: 'התקבל בתאריך',
-          studentsBreakdown: 'פירוט סטודנטים לפי סטטוס',
-          housingDemand: 'סטודנטים לשיבוץ לפי סוג דיור',
-          inventoryBreakdown: 'מלאי דיור פנוי לפי סוג',
-          singleHousing: 'דירות רווקים/ות',
-          coupleHousing: 'דירות זוגות',
-          familyHousing: 'דירות משפחה',
-          singleMaleStudents: 'רווקים',
-          singleFemaleStudents: 'רווקות',
-          singleMixedStudents: 'רווקים/ות בדירת זוגות',
-          coupleStudents: 'זוגות',
-          familyStudents: 'משפחות',
-          unknownHousing: 'סוג דיור לא ידוע',
-          apartmentsLabel: 'דירות',
-          roomsLabel: 'חדרים/יחידות',
-          freeBedsLabel: 'מיטות פנויות',
-          totalBedsLabel: 'סה״כ מיטות',
-          newStudents: 'חדשים',
-          continuing: 'ממשיכים',
-          transfers: 'מעברים',
-          leaving: 'עוזבים',
-          priorityStudents: 'סטודנטים בעדיפות',
-          sameGender: 'אותו מגדר בדירה',
-          sameReligion: 'אותה דת בדירה',
-          roommateMatch: 'התאמת שותפים מבוקשים',
-          priorityFirst: 'סטודנטים בעדיפות קודם',
-          roommatePositiveOnly: '100% תשובות חיוביות למבקשים להיות יחד',
-          ReligiousTogether: '100% התאמות חיוביות דירת דתיים/ות',
-          sectorMatching: 'התאמה לפי שייכות',
-          avoidYearMix_1_with_3_4: 'לא לשבץ שנה א׳ עם שנה ג׳/ד׳',
-          avoidAtudaimWithHasmaha: 'לא לשבץ הסמכה עם עתודאים',
-          noRegion: 'לא נמצא אזור למשתמש.',
-          malformedSummary: 'התקבלו נתוני שיבוץ לא תקינים.',
-          noPermission: 'אין הרשאה להריץ שיבוץ בחשבון זה.',
-          pending: 'ממתין לטיפול',
-          viewed: 'נצפה',
-          unknownError: 'שגיאה לא ידועה',
-          noResultsYet: 'עדיין אין תוצאות זמינות. הריצי שיבוץ כדי להפיק תוצאות.',
-          resultsHint: 'כפתור התוצאות יופעל לאחר הרצת שיבוץ מוצלחת.',
-          currentStatus: 'סטטוס נוכחי',
-        },
-        en: {
-          title: 'Student Allocation',
-          subtitle: 'Run the smart allocation algorithm',
-          runAllocation: 'Run Allocation',
-          running: 'Running allocation...',
-          constraints: 'Allocation Rules and Preferences',
-          constraintsIntro: 'Review the fixed rules and configure the optimization preferences before running the allocation.',
-          hardConstraints: 'Hard Constraints',
-          hardConstraintsHint: 'Fixed algorithm rules. They are always applied, cannot be changed, and do not receive a weight.',
-          hardConstraint: 'Hard constraint',
-          alwaysApplied: 'Always applied',
-          noWeight: 'No weight',
-          optimizationPreferences: 'Optimization Preferences',
-          preferencesHint: 'Choose which preferences should be considered and set their importance level.',
-          importance: 'Importance level',
-          included: 'Included in allocation',
-          excluded: 'Not included in allocation',
-          studentsToAssign: 'Students to assign',
-          availableBeds: 'Available beds',
-          results: 'Allocation Results',
-          assigned: 'Successfully assigned',
-          roommateMatches: 'Roommate matches',
-          conflicts: 'Conflicts',
-          viewResults: 'View Results',
-          noStudents: 'No students to assign',
-          loading: 'Loading data...',
-          error: 'Error loading data',
-          retry: 'Try again',
-          notification: 'Notification from Central Housing Office',
-          receivedStudents: 'Students received for allocation',
-          batchId: 'Batch ID',
-          receivedAt: 'Received on',
-          studentsBreakdown: 'Students by status',
-          housingDemand: 'Students to allocate by housing type',
-          inventoryBreakdown: 'Available inventory by housing type',
-          singleHousing: 'Single housing',
-          coupleHousing: 'Couple housing',
-          familyHousing: 'Family housing',
-          singleMaleStudents: 'Single men',
-          singleFemaleStudents: 'Single women',
-          singleMixedStudents: 'Singles in couple apartments',
-          coupleStudents: 'Couples',
-          familyStudents: 'Families',
-          unknownHousing: 'Unknown housing type',
-          apartmentsLabel: 'Apartments',
-          roomsLabel: 'Rooms/units',
-          freeBedsLabel: 'Available beds',
-          totalBedsLabel: 'Total beds',
-          newStudents: 'New',
-          continuing: 'Continuing',
-          transfers: 'Transfers',
-          leaving: 'Leaving',
-          priorityStudents: 'Priority students',
-          sameGender: 'Same gender in apartment',
-          sameReligion: 'Same religion in apartment',
-          roommateMatch: 'Match roommate requests',
-          priorityFirst: 'Priority students first',
-          roommatePositiveOnly: '100% positive roommate matches',
-          ReligiousTogether: '100% positive religious apartment matches',
-          sectorMatching: 'Sector matching',
-          avoidYearMix_1_with_3_4: 'Avoid mixing 1st year with 3rd/4th',
-          avoidAtudaimWithHasmaha: 'Avoid mixing graduate with atudaim',
-          noRegion: 'User region was not found.',
-          malformedSummary: 'Malformed allocation summary response.',
-          noPermission: 'You do not have permission to run allocation on this account.',
-          pending: 'Pending',
-          viewed: 'Viewed',
-          unknownError: 'Unknown error',
-          noResultsYet: 'No results are available yet. Run allocation to generate results.',
-          resultsHint: 'The results button will be enabled after a successful run.',
-          currentStatus: 'Current status',
-        },
-      }[language] || {
-        title: 'Student Allocation',
-        subtitle: 'Run the smart allocation algorithm',
-        runAllocation: 'Run Allocation',
-        running: 'Running allocation...',
-        constraints: 'Allocation Rules and Preferences',
-        constraintsIntro: 'Review the fixed rules and configure the optimization preferences before running the allocation.',
-        hardConstraints: 'Hard Constraints',
-        hardConstraintsHint: 'Fixed algorithm rules. They are always applied, cannot be changed, and do not receive a weight.',
-        hardConstraint: 'Hard constraint',
-        alwaysApplied: 'Always applied',
-        noWeight: 'No weight',
-        optimizationPreferences: 'Optimization Preferences',
-        preferencesHint: 'Choose which preferences should be considered and set their importance level.',
-        importance: 'Importance level',
-        included: 'Included in allocation',
-        excluded: 'Not included in allocation',
-        studentsToAssign: 'Students to assign',
-        availableBeds: 'Available beds',
-        results: 'Allocation Results',
-        assigned: 'Successfully assigned',
-        roommateMatches: 'Roommate matches',
-        conflicts: 'Conflicts',
-        viewResults: 'View Results',
-        noStudents: 'No students to assign',
-        loading: 'Loading data...',
-        error: 'Error loading data',
-        retry: 'Try again',
-        notification: 'Notification from Central Housing Office',
-        receivedStudents: 'Students received for allocation',
-        batchId: 'Batch ID',
-        receivedAt: 'Received on',
-        studentsBreakdown: 'Students by status',
-        housingDemand: 'Students to allocate by housing type',
-        inventoryBreakdown: 'Available inventory by housing type',
-        singleHousing: 'Single housing',
-        coupleHousing: 'Couple housing',
-        familyHousing: 'Family housing',
-        singleMaleStudents: 'Single men',
-        singleFemaleStudents: 'Single women',
-        singleMixedStudents: 'Singles in couple apartments',
-        coupleStudents: 'Couples',
-        familyStudents: 'Families',
-        unknownHousing: 'Unknown housing type',
-        apartmentsLabel: 'Apartments',
-        roomsLabel: 'Rooms/units',
-        freeBedsLabel: 'Available beds',
-        totalBedsLabel: 'Total beds',
-        newStudents: 'New',
-        continuing: 'Continuing',
-        transfers: 'Transfers',
-        leaving: 'Leaving',
-        priorityStudents: 'Priority students',
-        sameGender: 'Same gender in apartment',
-        sameReligion: 'Same religion in apartment',
-        roommateMatch: 'Match roommate requests',
-        priorityFirst: 'Priority students first',
-        roommatePositiveOnly: '100% positive roommate matches',
-        ReligiousTogether: '100% positive religious apartment matches',
-        sectorMatching: 'Sector matching',
-        avoidYearMix_1_with_3_4: 'Avoid mixing 1st year with 3rd/4th',
-        avoidAtudaimWithHasmaha: 'Avoid mixing graduate with atudaim',
-        noRegion: 'User region was not found.',
-        malformedSummary: 'Malformed allocation summary response.',
-        noPermission: 'You do not have permission to run allocation on this account.',
-        pending: 'Pending',
-        viewed: 'Viewed',
-        unknownError: 'Unknown error',
-        noResultsYet: 'No results are available yet. Run allocation to generate results.',
-        resultsHint: 'The results button will be enabled after a successful run.',
-        currentStatus: 'Current status',
-      }),
-    [language]
-  );
+  // ── Refs ────────────────────────────────────
+  const pollRef       = useRef(null);
+  const mountedRef    = useRef(true);
+  const runStartRef   = useRef(null);
+  const timerRef      = useRef(null);
 
+  // ── Translations ────────────────────────────
+  const t = useMemo(() => {
+    const strings = {
+      he: {
+        title: 'ניהול שיבוץ',
+        subtitle: 'הפעלת אלגוריתם השיבוץ החכם וניהול תוצאות',
+        runAllocation: 'הפעל שיבוץ',
+        running: 'מריץ שיבוץ...',
+        stopAllocation: 'עצור שיבוץ',
+        stoppingStopping: 'עוצר...',
+        deleteResults: 'מחק תוצאות',
+        deletingResults: 'מוחק...',
+        viewResults: 'צפה בתוצאות',
+        // Status labels
+        statusNotStarted: 'לא הופעל',
+        statusQueued:     'בתור',
+        statusRunning:    'רץ',
+        statusStopping:   'עוצר',
+        statusStopped:    'עצר',
+        statusCompleted:  'הושלם',
+        statusFailed:     'נכשל',
+        statusDeleted:    'נמחק',
+        // Stats
+        totalStudents:     'סה״כ סטודנטים',
+        allocatedStudents: 'שובצו',
+        unallocatedStudents: 'לא שובצו',
+        lastRun:           'הרצה אחרונה',
+        neverRun:          'לא הורץ',
+        students:          'סטודנטים',
+        // Progress
+        progressTitle:     'הרצת שיבוץ בתהליך',
+        processed:         'עובדו',
+        allocated:         'שובצו',
+        remaining:         'נותרו',
+        elapsed:           'זמן חלף',
+        // Inventory
+        inventoryTitle:    'מלאי דיור לפי סוג',
+        singleHousing:     'דיור רווקים/ות',
+        coupleHousing:     'דיור זוגות',
+        familyHousing:     'דיור משפחה',
+        apartmentsLabel:   'דירות',
+        roomsLabel:        'חדרים',
+        freeBedsLabel:     'מיטות פנויות',
+        totalBedsLabel:    'סה״כ מיטות',
+        occupiedBeds:      'מיטות תפוסות',
+        occupancyPct:      'תפוסה',
+        occupied:          'תפוסה',
+        // Conditions
+        conditionsTitle:   'תנאי ואילוצי שיבוץ',
+        criticalTitle:     'אילוצים קריטיים',
+        criticalHint:      'חוקים קבועים המופעלים תמיד. לא ניתן לשנות אותם.',
+        flexibleTitle:     'העדפות לאופטימיזציה',
+        flexibleHint:      'העדפות שניתן להפעיל, לכבות ולכוונן את רמת חשיבותן.',
+        hardConstraint:    'אילוץ קשיח',
+        alwaysApplied:     'מופעל תמיד',
+        importance:        'רמת חשיבות',
+        included:          'פעיל',
+        excluded:          'כבוי',
+        noWeight:          'ללא משקל',
+        // Constraint names
+        sameGender:        'אותו מגדר בדירה',
+        sameGenderDesc:    'סטודנטים מוקצים לדירות מגדריות מתאימות',
+        priorityFirst:     'סטודנטים בעדיפות קודמים',
+        priorityFirstDesc: 'סטודנטים עם עדיפות מוקצים לפני שאר הסטודנטים',
+        roommatePositiveOnly: '100% תשובות חיוביות לשותפים',
+        roommatePositiveOnlyDesc: 'רק בקשות שותפים הדדיות מאושרות מלאות',
+        ReligiousTogether: '100% התאמות דתיות',
+        ReligiousTogetherDesc: 'סטודנטים דתיים מוקצים עם שותפים תואמים',
+        sameReligion:      'אותה דת בדירה',
+        sameReligionDesc:  'מקבץ סטודנטים עם אותה שייכות דתית',
+        roommateMatch:     'התאמת שותפים מבוקשים',
+        roommateMatchDesc: 'מנסה למלא בקשות שותפים כאשר אפשרי',
+        sectorMatching:    'התאמה לפי שייכות',
+        sectorMatchingDesc: 'מקבץ סטודנטים לפי שייכות קבוצתית',
+        avoidYearMix_1_with_3_4: 'לא לשבץ שנה א׳ עם שנה ג׳/ד׳',
+        avoidYearMix_1_with_3_4Desc: 'מונע שיבוץ של סטודנטי שנה ראשונה עם שנה שלישית/רביעית',
+        avoidAtudaimWithHasmaha: 'לא לשבץ הסמכה עם עתודאים',
+        avoidAtudaimWithHashmahaDesc: 'מונע שיבוץ משותף של סטודנטי הסמכה ועתודאים',
+        // Results
+        resultsTitle:      'תוצאות השיבוץ',
+        successfulAssign:  'שובצו בהצלחה',
+        roommateMatches:   'התאמות שותפים',
+        conflicts:         'התנגשויות',
+        viewFullResults:   'צפה בתוצאות המלאות',
+        noResultsTitle:    'אין תוצאות זמינות',
+        noResultsHint:     'הרץ שיבוץ כדי לראות תוצאות כאן.',
+        resultsReady:      'השיבוץ הושלם',
+        // Notifications
+        notification:    'הודעה ממשרד המעונות המרכזי',
+        receivedStudents: 'סטודנטים התקבלו לשיבוץ',
+        batchId:         'מספר קובץ',
+        receivedAt:      'התקבל בתאריך',
+        pending:         'ממתין',
+        viewed:          'נצפה',
+        // Error / misc
+        loading:         'טוען נתונים...',
+        error:           'שגיאה בטעינת הנתונים',
+        retry:           'נסה שוב',
+        noStudents:      'אין סטודנטים לשיבוץ',
+        noPermission:    'אין הרשאה להריץ שיבוץ',
+        noRegion:        'לא נמצא אזור למשתמש',
+        missingRunId:    'לא נמצא מזהה הרצה',
+        cancel:          'ביטול',
+        confirm:         'אישור',
+        stopConfirmTitle:'עצור שיבוץ',
+        stopConfirmMsg:  'האם לעצור את השיבוץ הפעיל? כל ההקצאות החלקיות יימחקו.',
+        deleteConfirmTitle: 'מחיקת תוצאות שיבוץ',
+        deleteConfirmMsg: 'האם למחוק את תוצאות השיבוץ? פעולה זו תבטל את כל ההקצאות שנוצרו.',
+        stopSuccess:     'השיבוץ עוצר. ניקוי נתונים בתהליך...',
+        stopError:       'שגיאה בעצירת השיבוץ',
+        deleteSuccess:   'תוצאות השיבוץ נמחקו בהצלחה',
+        deleteError:     'שגיאה במחיקת תוצאות השיבוץ',
+        approvedCannotDelete: 'לא ניתן למחוק הקצאה שאושרה סופית',
+        stoppedStatus:   'השיבוץ עצר',
+        unknownError:    'שגיאה לא ידועה',
+        malformedSummary: 'נתוני שיבוץ לא תקינים',
+        currentStatus:   'סטטוס נוכחי',
+        region:          'אזור',
+      },
+      en: {
+        title: 'Allocation Management',
+        subtitle: 'Run the smart allocation algorithm and manage results',
+        runAllocation: 'Run Allocation',
+        running: 'Running...',
+        stopAllocation: 'Stop Run',
+        stoppingStopping: 'Stopping...',
+        deleteResults: 'Delete Results',
+        deletingResults: 'Deleting...',
+        viewResults: 'View Results',
+        // Status labels
+        statusNotStarted: 'Not Started',
+        statusQueued:     'Queued',
+        statusRunning:    'Running',
+        statusStopping:   'Stopping',
+        statusStopped:    'Stopped',
+        statusCompleted:  'Completed',
+        statusFailed:     'Failed',
+        statusDeleted:    'Deleted',
+        // Stats
+        totalStudents:     'Total Students',
+        allocatedStudents: 'Allocated',
+        unallocatedStudents: 'Unallocated',
+        lastRun:           'Last Run',
+        neverRun:          'Never run',
+        students:          'Students',
+        // Progress
+        progressTitle:     'Allocation in Progress',
+        processed:         'Processed',
+        allocated:         'Allocated',
+        remaining:         'Remaining',
+        elapsed:           'Elapsed',
+        // Inventory
+        inventoryTitle:    'Inventory by Housing Type',
+        singleHousing:     'Single Housing',
+        coupleHousing:     'Couple Housing',
+        familyHousing:     'Family Housing',
+        apartmentsLabel:   'Apartments',
+        roomsLabel:        'Rooms',
+        freeBedsLabel:     'Available Beds',
+        totalBedsLabel:    'Total Beds',
+        occupiedBeds:      'Occupied Beds',
+        occupancyPct:      'Occupancy',
+        occupied:          'occupied',
+        // Conditions
+        conditionsTitle:   'Allocation Conditions',
+        criticalTitle:     'Critical Conditions',
+        criticalHint:      'Fixed rules always applied by the algorithm. Cannot be changed.',
+        flexibleTitle:     'Flexible Preferences',
+        flexibleHint:      'Optional preferences that can be toggled and weighted.',
+        hardConstraint:    'Hard Constraint',
+        alwaysApplied:     'Always active',
+        importance:        'Importance',
+        included:          'Active',
+        excluded:          'Inactive',
+        noWeight:          'No weight',
+        // Constraint names + descriptions
+        sameGender:        'Same gender in apartment',
+        sameGenderDesc:    'Students are assigned to gender-appropriate apartments',
+        priorityFirst:     'Priority students first',
+        priorityFirstDesc: 'Priority students are allocated before standard students',
+        roommatePositiveOnly: '100% positive roommate matches',
+        roommatePositiveOnlyDesc: 'Only confirmed mutual roommate requests are fulfilled',
+        ReligiousTogether: '100% religious apartment matches',
+        ReligiousTogetherDesc: 'Religious students are placed with compatible peers',
+        sameReligion:      'Same religion in apartment',
+        sameReligionDesc:  'Groups students with the same religious background',
+        roommateMatch:     'Match roommate requests',
+        roommateMatchDesc: 'Attempts to fulfill roommate preferences when possible',
+        sectorMatching:    'Sector matching',
+        sectorMatchingDesc: 'Groups students by sector affiliation',
+        avoidYearMix_1_with_3_4: 'Avoid mixing 1st year with 3rd/4th',
+        avoidYearMix_1_with_3_4Desc: 'Prevents placing first-year with third/fourth-year students',
+        avoidAtudaimWithHasmaha: 'Avoid mixing graduate with atudaim',
+        avoidAtudaimWithHashmahaDesc: 'Prevents co-locating graduate and atudaim students',
+        // Results
+        resultsTitle:      'Allocation Results',
+        successfulAssign:  'Successfully Assigned',
+        roommateMatches:   'Roommate Matches',
+        conflicts:         'Conflicts',
+        viewFullResults:   'View Full Results',
+        noResultsTitle:    'No Results Yet',
+        noResultsHint:     'Run an allocation to see results here.',
+        resultsReady:      'Allocation Completed',
+        // Notifications
+        notification:    'Notification from Housing Office',
+        receivedStudents: 'students received for allocation',
+        batchId:         'Batch ID',
+        receivedAt:      'Received on',
+        pending:         'Pending',
+        viewed:          'Viewed',
+        // Error / misc
+        loading:         'Loading...',
+        error:           'Error loading data',
+        retry:           'Try again',
+        noStudents:      'No students to assign',
+        noPermission:    'No permission to run allocation',
+        noRegion:        'User region not found',
+        missingRunId:    'No active run identifier found',
+        cancel:          'Cancel',
+        confirm:         'Confirm',
+        stopConfirmTitle:'Stop Allocation',
+        stopConfirmMsg:  'Stop the active allocation? All partial assignments will be deleted.',
+        deleteConfirmTitle: 'Delete Allocation Results',
+        deleteConfirmMsg: 'Delete the current allocation results? All assignments from this run will be cancelled.',
+        stopSuccess:     'Allocation stopping. Cleanup in progress...',
+        stopError:       'Failed to stop allocation',
+        deleteSuccess:   'Allocation results deleted successfully',
+        deleteError:     'Failed to delete allocation results',
+        approvedCannotDelete: 'Approved allocations cannot be deleted',
+        stoppedStatus:   'Allocation stopped',
+        unknownError:    'Unknown error',
+        malformedSummary: 'Malformed allocation summary response',
+        currentStatus:   'Current status',
+        region:          'Region',
+      },
+    };
+    return strings[language] || strings.en;
+  }, [language]);
+
+  // ── Helpers ─────────────────────────────────
   const unwrapResponse = useCallback((res) => {
     if (res && typeof res === 'object' && 'data' in res) return res.data;
     return res;
   }, []);
 
-  const getErrorMessage = useCallback(
-    (err) => {
-      if (!err) return t.unknownError;
-      if (typeof err === 'string') return err;
-
-      const data = err?.response?.data;
-      if (typeof data === 'string') return data;
-      if (data?.error) return data.error;
-      if (data?.message) return data.message;
-      if (err?.message) return err.message;
-
-      return t.unknownError;
-    },
-    [t.unknownError]
-  );
+  const getErrorMessage = useCallback((err) => {
+    if (!err) return t.unknownError;
+    if (typeof err === 'string') return err;
+    const data = err?.response?.data;
+    if (typeof data === 'string') return data;
+    if (data?.error) return data.error;
+    if (data?.message) return data.message;
+    if (err?.message) return err.message;
+    return t.unknownError;
+  }, [t.unknownError]);
 
   const normalizeInboxStatus = useCallback((statusValue) => {
     const s = String(statusValue || '').trim().toLowerCase();
@@ -300,144 +559,84 @@ function AllocationPage({ language = 'he' }) {
     return s;
   }, []);
 
-  const safeSummary = useCallback(
-    (raw) => {
-      const data = unwrapResponse(raw);
+  const safeSummary = useCallback((raw) => {
+    const data = unwrapResponse(raw);
+    if (!data || typeof data !== 'object') throw new Error(t.malformedSummary);
 
-      if (!data || typeof data !== 'object') {
-        throw new Error(t.malformedSummary);
-      }
+    return {
+      total_students:      Number(data.total_students) || 0,
+      unassigned_students: Number(data.unassigned_students) || 0,
+      assigned_students:   Number(data.assigned_students) || 0,
+      available_beds:      Number(data.available_beds) || 0,
+      priority_students:   Number(data.priority_students) || 0,
+      total_capacity:      Number(data.total_capacity) || 0,
+      occupancy_rate:      Number(data.occupancy_rate) || 0,
+      latest_inbox:        data.latest_inbox && typeof data.latest_inbox === 'object' ? data.latest_inbox : null,
+      students_by_category: data.students_by_category && typeof data.students_by_category === 'object'
+        ? {
+            new:        Number(data.students_by_category.new) || 0,
+            continuing: Number(data.students_by_category.continuing) || 0,
+            transfer:   Number(data.students_by_category.transfer) || 0,
+            leaving:    Number(data.students_by_category.leaving) || 0,
+          }
+        : null,
+      students_by_housing_type: data.students_by_housing_type || null,
+      inventory_by_type: data.inventory_by_type && typeof data.inventory_by_type === 'object'
+        ? Object.fromEntries(
+            ['single', 'couple', 'family'].map((key) => {
+              const item = data.inventory_by_type[key] || {};
+              return [key, {
+                apartments:    Number(item.apartments) || 0,
+                rooms:         Number(item.rooms) || 0,
+                total_beds:    Number(item.total_beds) || 0,
+                occupied_beds: Number(item.occupied_beds) || 0,
+                available_beds:Number(item.available_beds) || 0,
+              }];
+            })
+          )
+        : null,
+      region: data.region && typeof data.region === 'object' ? data.region : null,
+      ...data,
+    };
+  }, [t.malformedSummary, unwrapResponse]);
 
-      return {
-        total_students: Number(data.total_students) || 0,
-        unassigned_students: Number(data.unassigned_students) || 0,
-        assigned_students: Number(data.assigned_students) || 0,
-        available_beds: Number(data.available_beds) || 0,
-        priority_students: Number(data.priority_students) || 0,
-        total_capacity: Number(data.total_capacity) || 0,
-        occupancy_rate: Number(data.occupancy_rate) || 0,
-        latest_inbox: data.latest_inbox && typeof data.latest_inbox === 'object' ? data.latest_inbox : null,
-        students_by_category:
-          data.students_by_category && typeof data.students_by_category === 'object'
-            ? {
-                new: Number(data.students_by_category.new) || 0,
-                continuing: Number(data.students_by_category.continuing) || 0,
-                transfer: Number(data.students_by_category.transfer) || 0,
-                leaving: Number(data.students_by_category.leaving) || 0,
-              }
-            : null,
-        students_by_housing_type:
-          data.students_by_housing_type && typeof data.students_by_housing_type === 'object'
-            ? {
-                single_male: Number(data.students_by_housing_type.single_male) || 0,
-                single_female: Number(data.students_by_housing_type.single_female) || 0,
-                single_mixed: Number(data.students_by_housing_type.single_mixed) || 0,
-                couple: Number(data.students_by_housing_type.couple) || 0,
-                family: Number(data.students_by_housing_type.family) || 0,
-                unknown: Number(data.students_by_housing_type.unknown) || 0,
-              }
-            : null,
-        inventory_by_type:
-          data.inventory_by_type && typeof data.inventory_by_type === 'object'
-            ? Object.fromEntries(
-                ['single', 'couple', 'family'].map((key) => {
-                  const item = data.inventory_by_type[key] || {};
-                  return [
-                    key,
-                    {
-                      apartments: Number(item.apartments) || 0,
-                      rooms: Number(item.rooms) || 0,
-                      total_beds: Number(item.total_beds) || 0,
-                      occupied_beds: Number(item.occupied_beds) || 0,
-                      available_beds: Number(item.available_beds) || 0,
-                    },
-                  ];
-                })
-              )
-            : null,
-        region: data.region && typeof data.region === 'object' ? data.region : null,
-        ...data,
-      };
-    },
-    [t.malformedSummary, unwrapResponse]
-  );
-
-  const safeInbox = useCallback(
-    (raw) => {
-      const data = unwrapResponse(raw);
-
-      if (!data || typeof data !== 'object') return null;
-      if (!data.inbox || typeof data.inbox !== 'object') return null;
-
-      return {
-        ...data.inbox,
-        status: normalizeInboxStatus(data.inbox.status),
-      };
-    },
-    [normalizeInboxStatus, unwrapResponse]
-  );
+  const safeInbox = useCallback((raw) => {
+    const data = unwrapResponse(raw);
+    if (!data || typeof data !== 'object') return null;
+    if (!data.inbox || typeof data.inbox !== 'object') return null;
+    return {
+      ...data.inbox,
+      status: normalizeInboxStatus(data.inbox.status),
+    };
+  }, [normalizeInboxStatus, unwrapResponse]);
 
   const resolveRegionId = useCallback(() => {
     const regionValue = typeof getUserRegion === 'function' ? getUserRegion() : null;
-
-    if (!regionValue) {
-      return summary?.region?.id || summary?.region?.name || null;
-    }
-
-    if (typeof regionValue === 'string' || typeof regionValue === 'number') {
-      return regionValue;
-    }
-
-    if (typeof regionValue === 'object') {
-      return regionValue.id || regionValue.name || regionValue.region || null;
-    }
-
+    if (!regionValue) return summary?.region?.id || summary?.region?.name || null;
+    if (typeof regionValue === 'string' || typeof regionValue === 'number') return regionValue;
+    if (typeof regionValue === 'object') return regionValue.id || regionValue.name || regionValue.region || null;
     return summary?.region?.id || summary?.region?.name || null;
   }, [getUserRegion, summary]);
 
-  const loadPage = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const showToast = useCallback((message, type = 'info') => {
+    setToast({ message, type });
+    setTimeout(() => { if (mountedRef.current) setToast(null); }, 4500);
+  }, []);
 
-    try {
-      const summaryRaw = await allocationAPI.getSummary();
-      const normalizedSummary = safeSummary(summaryRaw);
-      setSummary(normalizedSummary);
-
-      if (!central) {
-        try {
-          const inboxRaw = await inboxAPI.getLatest();
-          const inbox = safeInbox(inboxRaw);
-
-          if (inbox) {
-            setInboxItem(inbox);
-
-            if (inbox.status === 'pending' && inbox.id) {
-              Promise.resolve(inboxAPI.markViewed(inbox.id)).catch((err) => {
-                console.warn('markViewed failed:', err);
-              });
-            }
-          } else {
-            setInboxItem(null);
-          }
-        } catch (inboxErr) {
-          console.warn('inbox getLatest failed:', inboxErr);
-          setInboxItem(null);
-        }
-      } else {
-        setInboxItem(null);
-      }
-    } catch (err) {
-      setError(getErrorMessage(err));
-    } finally {
-      setLoading(false);
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
     }
-  }, [central, getErrorMessage, safeInbox, safeSummary]);
+  }, []);
 
-  useEffect(() => {
-    loadPage();
-  }, [loadPage]);
+  const formatElapsed = (secs) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  };
 
+  // ── Constraint Handlers ──────────────────────
   const toggleConstraintEnabled = (key) => {
     setConstraints((prev) => {
       const current = prev[key];
@@ -449,7 +648,6 @@ function AllocationPage({ language = 'he' }) {
   const setConstraintWeight = (key, nextWeight) => {
     const parsed = Number(nextWeight);
     const w = Number.isFinite(parsed) ? Math.max(0, Math.min(10, parsed)) : 0;
-
     setConstraints((prev) => {
       const current = prev[key];
       if (!current || current.critical) return prev;
@@ -457,35 +655,206 @@ function AllocationPage({ language = 'he' }) {
     });
   };
 
+  // ── Derived State ────────────────────────────
   const hardConstraints = useMemo(
-    () => Object.entries(constraints).filter(([, value]) => value.critical),
+    () => Object.entries(constraints).filter(([, v]) => v.critical),
     [constraints]
   );
-
   const optimizationPreferences = useMemo(
-    () => Object.entries(constraints).filter(([, value]) => !value.critical),
+    () => Object.entries(constraints).filter(([, v]) => !v.critical),
     [constraints]
   );
-
   const effectiveConfig = useMemo(() => {
     const out = {};
     Object.entries(constraints).forEach(([k, v]) => {
-      const isHardConstraint = !!v.critical;
-
       out[k] = {
-        // Hard constraints are always active and never participate in weighting.
-        enabled: isHardConstraint ? true : !!v.enabled,
-        strict: !!v.strict,
-        critical: isHardConstraint,
-        weight: isHardConstraint ? 0 : Number(v.weight) || 0,
+        enabled: v.critical ? true : !!v.enabled,
+        strict:  !!v.strict,
+        critical: !!v.critical,
+        weight:  v.critical ? 0 : Number(v.weight) || 0,
       };
     });
     return out;
   }, [constraints]);
 
+  const currentStatusKey = useMemo(() => {
+    if (!runStatus && !isRunning && !result) return 'not_started';
+    if (isRunning && isStopping) return 'cancellation_requested';
+    if (runStatus) return runStatus;
+    return 'not_started';
+  }, [runStatus, isRunning, isStopping, result]);
+
+  const canRun      = typeof canRunAllocation === 'function' ? canRunAllocation() : false;
+  const hasStudents = (summary?.unassigned_students || 0) > 0;
+  const showStopBtn = isRunning && !isStopping && !!runId && canRun;
+  const showDelBtn  = runStatus === 'completed' && !isRunning && !!result && !!runId && canRun;
+
+  // ── Elapsed Timer ────────────────────────────
+  useEffect(() => {
+    if (isRunning) {
+      runStartRef.current = Date.now();
+      timerRef.current = setInterval(() => {
+        if (mountedRef.current) {
+          setElapsedSeconds(Math.floor((Date.now() - runStartRef.current) / 1000));
+        }
+      }, 1000);
+    } else {
+      clearInterval(timerRef.current);
+      if (!isRunning) setElapsedSeconds(0);
+      runStartRef.current = null;
+    }
+    return () => clearInterval(timerRef.current);
+  }, [isRunning]);
+
+  // ── Data Fetching ────────────────────────────
+  const loadPage = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    let normalizedSummary = null;
+
+    try {
+      const summaryRaw = await allocationAPI.getSummary();
+      normalizedSummary = safeSummary(summaryRaw);
+      setSummary(normalizedSummary);
+
+      if (!central) {
+        try {
+          const inboxRaw = await inboxAPI.getLatest();
+          const inbox = safeInbox(inboxRaw);
+          if (inbox) {
+            setInboxItem(inbox);
+            if (inbox.status === 'pending' && inbox.id) {
+              Promise.resolve(inboxAPI.markViewed(inbox.id)).catch(() => {});
+            }
+          } else {
+            setInboxItem(null);
+          }
+        } catch {
+          setInboxItem(null);
+        }
+      } else {
+        setInboxItem(null);
+      }
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+
+    return normalizedSummary;
+  }, [central, getErrorMessage, safeInbox, safeSummary]);
+
+  const startPolling = useCallback((id) => {
+    stopPolling();
+    pollRef.current = setInterval(async () => {
+      if (!mountedRef.current) { stopPolling(); return; }
+
+      try {
+        const data = await allocationAPI.getRunStatus(id);
+        const runData = data?.run;
+        const st = runData?.status;
+
+        if (!mountedRef.current) return;
+        setRunStatus(st);
+
+        if (st === 'completed') {
+          stopPolling();
+          setIsRunning(false);
+          setIsStopping(false);
+          setProgress(100);
+          setResult({
+            successful_assignments: data.successful_assignments ?? runData?.successful_assignments ?? 0,
+            roommate_matches:       data.roommate_matches ?? runData?.roommate_matches ?? 0,
+            conflicts:              data.conflicts ?? runData?.conflicts ?? 0,
+            assignments:            data.assignments ?? [],
+            run:                    runData,
+          });
+          loadPage().catch(() => {});
+        } else if (st === 'stopped' || st === 'failed' || st === 'deleted') {
+          stopPolling();
+          setIsRunning(false);
+          setIsStopping(false);
+          setProgress(0);
+          setResult(null);
+          setRunId(null);
+          setRunStatus(null);
+          loadPage().catch(() => {});
+          if (st === 'stopped')      showToast(t.stoppedStatus, 'info');
+          else if (st === 'failed')  showToast(runData?.error_message || t.unknownError, 'error');
+        } else if (st === 'cancellation_requested') {
+          setIsStopping(true);
+          setProgress((prev) => Math.min(prev + 2, 95));
+        } else if (st === 'running' || st === 'queued') {
+          setProgress((prev) => Math.min(prev + 3, 92));
+        }
+      } catch (err) {
+        console.warn('Polling error:', err);
+      }
+    }, 3000);
+  }, [stopPolling, loadPage, showToast, t.stoppedStatus, t.unknownError]);
+
+  const recoverActiveRun = useCallback(async (regionId) => {
+    try {
+      const data = await allocationAPI.getActiveRun(regionId || undefined);
+      const run = data?.run;
+      if (!run || !mountedRef.current) return;
+
+      setRunId(run.id);
+      setRunStatus(run.status);
+
+      if (['queued', 'running', 'cancellation_requested'].includes(run.status)) {
+        setIsRunning(true);
+        if (run.status === 'cancellation_requested') setIsStopping(true);
+        startPolling(run.id);
+      } else if (run.status === 'completed') {
+        try {
+          const detail = await allocationAPI.getRunStatus(run.id);
+          if (mountedRef.current && detail?.run?.status === 'completed') {
+            setResult({
+              successful_assignments: detail.successful_assignments ?? detail.run?.successful_assignments ?? 0,
+              roommate_matches:       detail.roommate_matches ?? detail.run?.roommate_matches ?? 0,
+              conflicts:              detail.conflicts ?? detail.run?.conflicts ?? 0,
+              assignments:            detail.assignments ?? [],
+              run:                    detail.run,
+            });
+          }
+        } catch (e) {
+          console.warn('Failed to load completed run detail:', e);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to recover active run:', err);
+    }
+  }, [startPolling]);
+
+  const loadPageRef = useRef(loadPage);
+  const recoverRef  = useRef(recoverActiveRun);
+  useEffect(() => { loadPageRef.current = loadPage; }, [loadPage]);
+  useEffect(() => { recoverRef.current = recoverActiveRun; }, [recoverActiveRun]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      stopPolling();
+    };
+  }, [stopPolling]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const init = async () => {
+      const loadedSummary = await loadPageRef.current();
+      if (cancelled || !mountedRef.current) return;
+      const regionId = loadedSummary?.region?.id || null;
+      await recoverRef.current(regionId);
+    };
+    init().catch(console.warn);
+    return () => { cancelled = true; };
+  }, []);
+
+  // ── Action Handlers ──────────────────────────
   const handleViewResults = useCallback(() => {
     if (!result) return;
-
     navigate('/allocation/results', {
       state: {
         result,
@@ -498,492 +867,553 @@ function AllocationPage({ language = 'he' }) {
   }, [navigate, result, summary, effectiveConfig]);
 
   const runAllocation = async () => {
+    if (isRunning || isStopping || isDeleting) return;
     setIsRunning(true);
     setProgress(0);
     setResult(null);
     setError(null);
+    setRunId(null);
+    setRunStatus(null);
 
-    const progressInterval = setInterval(() => {
-      setProgress((prev) => Math.min(prev + 5, 90));
-    }, 200);
+    const regionId = resolveRegionId();
+    if (!regionId) {
+      setIsRunning(false);
+      setError(t.noRegion);
+      return;
+    }
 
     try {
-      const regionId = resolveRegionId();
-
-      if (!regionId) {
-        clearInterval(progressInterval);
-        setProgress(0);
-        setIsRunning(false);
-        setError(t.noRegion);
-        return;
-      }
-
-      const responseRaw = await allocationAPI.run(regionId, { constraints: effectiveConfig });
+      const responseRaw = await allocationAPI.startRun(regionId, { constraints: effectiveConfig });
       const response = unwrapResponse(responseRaw);
+      const id = response?.run_id || response?.run?.id;
+      if (!id) throw new Error(t.missingRunId);
 
-      clearInterval(progressInterval);
-      setProgress(100);
-      setResult(response?.result || response || null);
+      setRunId(id);
+      setRunStatus('queued');
+      startPolling(id);
 
       if (inboxItem?.id) {
-        try {
-          await inboxAPI.markProcessed(inboxItem.id);
-        } catch (err) {
-          console.warn('markProcessed failed:', err);
-        }
-      }
-
-      try {
-        await loadPage();
-      } catch (err) {
-        console.warn('page refresh failed:', err);
+        inboxAPI.markProcessed(inboxItem.id).catch(() => {});
       }
     } catch (err) {
-      clearInterval(progressInterval);
       setError(getErrorMessage(err));
-    } finally {
       setIsRunning(false);
-      clearInterval(progressInterval);
+      setRunId(null);
+      setRunStatus(null);
     }
   };
 
-  const canRun = typeof canRunAllocation === 'function' ? canRunAllocation() : false;
-  const hasStudents = (summary?.unassigned_students || 0) > 0;
+  const requestStopAllocation = () => {
+    if (!runId) { showToast(t.missingRunId, 'error'); return; }
+    setConfirmModal({
+      title: t.stopConfirmTitle,
+      message: t.stopConfirmMsg,
+      onConfirm: async () => {
+        setConfirmModal(null);
+        setIsStopping(true);
+        try {
+          await allocationAPI.stopRun(runId);
+          showToast(t.stopSuccess, 'info');
+          setRunStatus('cancellation_requested');
+        } catch (err) {
+          showToast(getErrorMessage(err) || t.stopError, 'error');
+          setIsStopping(false);
+        }
+      },
+    });
+  };
 
+  const requestDeleteResults = () => {
+    if (!runId) { showToast(t.missingRunId, 'error'); return; }
+    setConfirmModal({
+      title: t.deleteConfirmTitle,
+      message: t.deleteConfirmMsg,
+      onConfirm: async () => {
+        setConfirmModal(null);
+        setIsDeleting(true);
+        try {
+          await allocationAPI.deleteResults(runId);
+          setResult(null);
+          setRunId(null);
+          setRunStatus(null);
+          showToast(t.deleteSuccess, 'success');
+          loadPage().catch(() => {});
+        } catch (err) {
+          const msg = getErrorMessage(err);
+          const isApproved = err?.response?.status === 409
+            || (typeof msg === 'string' && msg.toLowerCase().includes('approved'));
+          showToast(isApproved ? t.approvedCannotDelete : (msg || t.deleteError), 'error');
+        } finally {
+          if (mountedRef.current) setIsDeleting(false);
+        }
+      },
+    });
+  };
+
+  // ── Loading / Error States ───────────────────
   if (loading) {
     return (
-      <div className="allocation-page">
-        <div className="loading-state">
-          <Loader size={40} className="spin" />
-          <p>{t.loading}</p>
+      <div className="ap-page">
+        <div className="ap-loading-state">
+          <Loader size={36} className="ap-spin" />
+          <span>{t.loading}</span>
         </div>
         <style>{styles}</style>
       </div>
     );
   }
 
-  if (error) {
+  if (error && !summary) {
     return (
-      <div className="allocation-page">
-        <div className="error-state">
-          <XCircle size={40} />
-          <p>{t.error}</p>
-          <p className="error-message">{error}</p>
-          <button onClick={loadPage}>{t.retry}</button>
+      <div className="ap-page">
+        <div className="ap-error-state">
+          <XCircle size={36} />
+          <p className="ap-error-title">{t.error}</p>
+          <p className="ap-error-msg">{error}</p>
+          <button className="ap-retry-btn" onClick={loadPage}>{t.retry}</button>
         </div>
         <style>{styles}</style>
       </div>
     );
   }
 
+  // ── Last run date ────────────────────────────
+  const lastRunDate = result?.run?.completed_at || result?.run?.started_at
+    ? new Date(result.run.completed_at || result.run.started_at).toLocaleDateString(
+        language === 'he' ? 'he-IL' : 'en-US',
+        { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
+      )
+    : null;
+
+  // ── Inventory types ──────────────────────────
+  const inventoryTypes = [
+    ['single', t.singleHousing],
+    ['couple', t.coupleHousing],
+    ['family', t.familyHousing],
+  ];
+
+  // ── Region label ─────────────────────────────
+  const regionLabel = summary?.region
+    ? (language === 'he'
+        ? summary.region.name || summary.region.name_en || ''
+        : summary.region.name_en || summary.region.name || '')
+    : null;
+
+  // ── Render ───────────────────────────────────
   return (
-    <div className="allocation-page">
-      <div className="shell">
-        <div className="topbar">
-          <div className="titleBlock">
-            <h1>{t.title}</h1>
-            <p>{t.subtitle}</p>
+    <div className="ap-page">
+      <ToastNotification toast={toast} />
+      <ConfirmDialog modal={confirmModal} t={t} onClose={() => setConfirmModal(null)} />
+
+      <div className="ap-shell">
+
+        {/* ── 1. Page Header ─────────────────── */}
+        <div className="ap-header-card">
+          <div className="ap-header-top">
+            <div className="ap-header-title-block">
+              <h1 className="ap-page-title">{t.title}</h1>
+              <p className="ap-page-subtitle">{t.subtitle}</p>
+            </div>
+            <div className="ap-header-meta">
+              <StatusBadge statusKey={currentStatusKey} t={t} />
+              {regionLabel && (
+                <span className="ap-region-chip">{regionLabel}</span>
+              )}
+              {lastRunDate && (
+                <div className="ap-last-run">
+                  <Clock size={13} />
+                  <span>{lastRunDate}</span>
+                </div>
+              )}
+            </div>
           </div>
 
-          <div className="topbarRight">
-            {summary?.region && (
-              <span className="region-badge">
-                {language === 'he'
-                  ? summary.region.name || summary.region.name_en || ''
-                  : summary.region.name_en || summary.region.name || ''}
-              </span>
-            )}
+          <div className="ap-header-stats">
+            <div className="ap-stat-item">
+              <div className="ap-stat-icon ap-stat-blue"><Users size={16} /></div>
+              <div>
+                <div className="ap-stat-val">{summary?.total_students || 0}</div>
+                <div className="ap-stat-lbl">{t.totalStudents}</div>
+              </div>
+            </div>
+            <div className="ap-stat-divider" />
+            <div className="ap-stat-item">
+              <div className="ap-stat-icon ap-stat-green"><Check size={16} /></div>
+              <div>
+                <div className="ap-stat-val ap-stat-green-text">{summary?.assigned_students || 0}</div>
+                <div className="ap-stat-lbl">{t.allocatedStudents}</div>
+              </div>
+            </div>
+            <div className="ap-stat-divider" />
+            <div className="ap-stat-item">
+              <div className="ap-stat-icon ap-stat-amber"><AlertTriangle size={16} /></div>
+              <div>
+                <div className="ap-stat-val ap-stat-amber-text">{summary?.unassigned_students || 0}</div>
+                <div className="ap-stat-lbl">{t.unallocatedStudents}</div>
+              </div>
+            </div>
+            <div className="ap-stat-divider" />
+            <div className="ap-stat-item">
+              <div className="ap-stat-icon ap-stat-slate"><Home size={16} /></div>
+              <div>
+                <div className="ap-stat-val">{summary?.available_beds || 0}</div>
+                <div className="ap-stat-lbl">{t.freeBedsLabel}</div>
+              </div>
+            </div>
+          </div>
+        </div>
 
+        {/* ── 2. Controls Bar ────────────────── */}
+        <div className="ap-controls-bar">
+          <div className="ap-controls-left">
+            {/* Run */}
             <button
-              className="run-btn"
+              className="ap-btn ap-btn-primary"
               onClick={runAllocation}
-              disabled={isRunning || !canRun || !hasStudents}
-              title={!hasStudents ? t.noStudents : ''}
+              disabled={isRunning || !canRun || !hasStudents || isDeleting}
+              title={!hasStudents ? t.noStudents : !canRun ? t.noPermission : ''}
             >
               {isRunning ? (
-                <>
-                  <RefreshCw size={18} className="spin" />
-                  {t.running}
-                </>
+                <><RefreshCw size={15} className="ap-spin" /> {isStopping ? t.stoppingStopping : t.running}</>
               ) : (
-                <>
-                  <Play size={18} />
-                  {t.runAllocation}
-                </>
+                <><Play size={15} /> {t.runAllocation}</>
               )}
             </button>
 
-            {!hasStudents && (
-              <span className="status-chip ok">
-                <Check size={16} />
-                {t.noStudents}
-              </span>
+            {/* Stop */}
+            {showStopBtn && (
+              <button className="ap-btn ap-btn-danger" onClick={requestStopAllocation} disabled={isStopping}>
+                <Square size={15} />
+                {t.stopAllocation}
+              </button>
+            )}
+
+            {/* Stopping indicator */}
+            {isStopping && !showStopBtn && (
+              <div className="ap-inline-chip ap-chip-amber">
+                <Loader size={13} className="ap-spin" />
+                {t.stoppingStopping}
+              </div>
+            )}
+          </div>
+
+          <div className="ap-controls-right">
+            {/* View Results */}
+            <button
+              className="ap-btn ap-btn-ghost"
+              onClick={handleViewResults}
+              disabled={!result || runStatus !== 'completed'}
+            >
+              <ExternalLink size={15} />
+              {t.viewResults}
+            </button>
+
+            {/* Delete */}
+            {showDelBtn && (
+              <button
+                className="ap-btn ap-btn-ghost-danger"
+                onClick={requestDeleteResults}
+                disabled={isDeleting}
+              >
+                {isDeleting ? <><Loader size={13} className="ap-spin" /> {t.deletingResults}</> : <><Trash2 size={15} /> {t.deleteResults}</>}
+              </button>
             )}
           </div>
         </div>
 
+        {/* ── 3. Progress Card (when running) ── */}
         {isRunning && (
-          <div className="progressWrap">
-            <div className="progressBar">
-              <div className="progressFill" style={{ width: `${progress}%` }} />
-            </div>
-            <span className="progressPct">{progress}%</span>
-          </div>
-        )}
-
-        {inboxItem && (
-          <div className="banner">
-            <div className="bannerLeft">
-              <div className="bannerIcon">
-                <Bell size={20} />
+          <div className="ap-progress-card">
+            <div className="ap-progress-header">
+              <div className="ap-progress-status">
+                <Activity size={15} />
+                <span>{isStopping ? t.stoppingStopping : t.progressTitle}</span>
               </div>
-              <div className="bannerText">
-                <div className="bannerTitle">
-                  <span className="bannerHeading">{t.notification}</span>
-                  <span className="chip">
-                    {t.batchId}: #{inboxItem.batch || inboxItem.batch_id || '-'}
-                  </span>
-                </div>
-                <div className="bannerMain">
-                  <Mail size={16} />
-                  <span>
-                    <strong>{Number(inboxItem.students_count) || 0}</strong> {t.receivedStudents}
-                  </span>
-                </div>
-                <div className="bannerMeta">
-                  <Calendar size={14} />
-                  <span>
-                    {t.receivedAt}:{' '}
-                    {inboxItem.created_at
-                      ? new Date(inboxItem.created_at).toLocaleDateString(language === 'he' ? 'he-IL' : 'en-US')
-                      : '-'}
-                  </span>
-                </div>
+              <div className="ap-progress-timer">
+                <Clock size={13} />
+                <span>{formatElapsed(elapsedSeconds)}</span>
               </div>
             </div>
 
-            <div className="bannerRight">
-              <span className={`status-chip ${inboxItem.status === 'pending' ? 'warn' : 'neutral'}`}>
-                {inboxItem.status === 'pending' ? (
-                  <>
-                    <AlertTriangle size={16} /> {t.pending}
-                  </>
-                ) : (
-                  <>
-                    <Check size={16} /> {t.viewed}
-                  </>
-                )}
+            <div className="ap-progress-bar-wrap">
+              <div className="ap-progress-bar">
+                <div className="ap-progress-fill" style={{ width: `${progress}%` }} />
+              </div>
+              <span className="ap-progress-pct">{progress}%</span>
+            </div>
+
+            <div className="ap-progress-detail">
+              <span className="ap-progress-chip">
+                <Users size={12} />
+                {summary?.unassigned_students || 0} {t.students}
+              </span>
+              <span className="ap-progress-chip ap-chip-blue">
+                <BarChart3 size={12} />
+                {t.progressTitle}
               </span>
             </div>
           </div>
         )}
 
-        <div className="grid">
-          <div className="leftCol">
-            <div className="card">
-              <div className="cardHeader constraintsHeader">
-                <div>
-                  <div className="cardTitle">
-                    <Settings size={17} />
-                    <span>{t.constraints}</span>
-                  </div>
-                  <p className="cardDescription">{t.constraintsIntro}</p>
+        {/* ── 4. Inline error (non-fatal) ─────── */}
+        {error && summary && (
+          <div className="ap-inline-alert">
+            <AlertTriangle size={15} />
+            <span>{error}</span>
+            <button onClick={() => setError(null)}>×</button>
+          </div>
+        )}
+
+        {/* ── 5. Inbox Notice (compact) ────────── */}
+        {inboxItem && (
+          <div className="ap-inbox-notice">
+            <div className="ap-inbox-icon-wrap">
+              <Bell size={15} />
+            </div>
+            <div className="ap-inbox-body">
+              <span className="ap-inbox-title">{t.notification}</span>
+              <div className="ap-inbox-detail">
+                <Mail size={12} />
+                <strong>{Number(inboxItem.students_count) || 0}</strong>
+                <span>{t.receivedStudents}</span>
+                <span className="ap-inbox-meta-sep">·</span>
+                <Calendar size={12} />
+                <span>
+                  {inboxItem.created_at
+                    ? new Date(inboxItem.created_at).toLocaleDateString(
+                        language === 'he' ? 'he-IL' : 'en-US'
+                      )
+                    : '-'}
+                </span>
+              </div>
+            </div>
+            <span className={`ap-inbox-status${inboxItem.status === 'pending' ? ' ap-inbox-pending' : ''}`}>
+              {inboxItem.status === 'pending'
+                ? <><AlertTriangle size={12} /> {t.pending}</>
+                : <><Check size={12} /> {t.viewed}</>
+              }
+            </span>
+          </div>
+        )}
+
+        {/* ── 6. Main Content Grid ──────────── */}
+        <div className="ap-content-grid">
+
+          {/* Left Column */}
+          <div className="ap-left-col">
+
+            {/* Inventory by Housing Type */}
+            <div className="ap-card">
+              <div className="ap-card-header">
+                <div className="ap-card-title-row">
+                  <Building2 size={16} />
+                  <h2 className="ap-card-title">{t.inventoryTitle}</h2>
                 </div>
               </div>
 
-              <div className="constraintSections">
-                <section className="constraintSection hardSection">
-                  <div className="sectionHeader">
-                    <div className="sectionTitleWrap">
-                      <span className="sectionIcon hard">
-                        <ShieldCheck size={17} />
-                      </span>
-                      <div>
-                        <div className="sectionTitleLine">
-                          <h3>{t.hardConstraints}</h3>
-                          <span className="countBadge">{hardConstraints.length}</span>
-                        </div>
-                        <p>{t.hardConstraintsHint}</p>
-                      </div>
-                    </div>
-                  </div>
+              {summary?.inventory_by_type ? (
+                <div className="ap-inv-list">
+                  {inventoryTypes.map(([typeKey, label]) => (
+                    <InventoryTypeRow
+                      key={typeKey}
+                      typeKey={typeKey}
+                      label={label}
+                      item={summary.inventory_by_type[typeKey] || {}}
+                      expandedType={expandedType}
+                      onToggle={(k) => setExpandedType(prev => prev === k ? null : k)}
+                      t={t}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="ap-empty-hint">
+                  <Info size={14} />
+                  <span>{t.noResultsHint}</span>
+                </div>
+              )}
+            </div>
 
-                  <div className="hardRulesGrid">
+            {/* Allocation Conditions */}
+            <div className="ap-card">
+              <div className="ap-card-header">
+                <div className="ap-card-title-row">
+                  <SlidersHorizontal size={16} />
+                  <h2 className="ap-card-title">{t.conditionsTitle}</h2>
+                </div>
+              </div>
+
+              <div className="ap-conditions-grid">
+                {/* Critical Column */}
+                <div className="ap-conditions-col">
+                  <div className="ap-cond-col-header ap-cond-col-critical">
+                    <ShieldCheck size={14} />
+                    <div>
+                      <div className="ap-cond-col-title">{t.criticalTitle}</div>
+                      <div className="ap-cond-col-hint">{t.criticalHint}</div>
+                    </div>
+                    <span className="ap-count-badge">{hardConstraints.length}</span>
+                  </div>
+                  <div className="ap-cond-list">
                     {hardConstraints.map(([key]) => (
-                      <div key={key} className="hardRuleCard">
-                        <span className="hardRuleIcon">
-                          <Lock size={15} />
-                        </span>
-                        <div className="hardRuleContent">
-                          <div className="hardRuleName">{t[key] || key}</div>
-                          <div className="hardRuleMeta">
-                            <span className="hardBadge">
-                              <ShieldCheck size={12} /> {t.hardConstraint}
-                            </span>
-                            <span>{t.alwaysApplied}</span>
-                            <span className="metaDivider" aria-hidden="true">•</span>
-                            <span>{t.noWeight}</span>
-                          </div>
-                        </div>
-                      </div>
+                      <CriticalConditionCard key={key} condKey={key} t={t} />
                     ))}
                   </div>
-                </section>
+                </div>
 
-                <section className="constraintSection preferencesSection">
-                  <div className="sectionHeader">
-                    <div className="sectionTitleWrap">
-                      <span className="sectionIcon preferences">
-                        <SlidersHorizontal size={17} />
-                      </span>
-                      <div>
-                        <div className="sectionTitleLine">
-                          <h3>{t.optimizationPreferences}</h3>
-                          <span className="countBadge">{optimizationPreferences.length}</span>
-                        </div>
-                        <p>{t.preferencesHint}</p>
-                      </div>
+                {/* Flexible Column */}
+                <div className="ap-conditions-col">
+                  <div className="ap-cond-col-header ap-cond-col-flexible">
+                    <SlidersHorizontal size={14} />
+                    <div>
+                      <div className="ap-cond-col-title">{t.flexibleTitle}</div>
+                      <div className="ap-cond-col-hint">{t.flexibleHint}</div>
                     </div>
+                    <span className="ap-count-badge">{optimizationPreferences.length}</span>
                   </div>
-
-                  <div className="preferencesList">
+                  <div className="ap-cond-list">
                     {optimizationPreferences.map(([key, value]) => (
-                      <div key={key} className={`preferenceCard ${!value.enabled ? 'disabled' : ''}`}>
-                        <div className="preferenceTop">
-                          <div className="preferenceIdentity">
-                            <div className="preferenceName">{t[key] || key}</div>
-                            <div className={`preferenceStatus ${value.enabled ? 'active' : ''}`}>
-                              {value.enabled ? t.included : t.excluded}
-                            </div>
-                          </div>
-
-                          <button
-                            type="button"
-                            className={`switchControl ${value.enabled ? 'on' : ''}`}
-                            role="switch"
-                            aria-checked={value.enabled}
-                            aria-label={`${t[key] || key}: ${value.enabled ? t.included : t.excluded}`}
-                            onClick={() => toggleConstraintEnabled(key)}
-                          >
-                            <span className="switchThumb" />
-                          </button>
-                        </div>
-
-                        <div className="importanceControl">
-                          <div className="importanceHeader">
-                            <span>{t.importance}</span>
-                            <strong>{value.weight}/10</strong>
-                          </div>
-                          <input
-                            type="range"
-                            min="0"
-                            max="10"
-                            step="1"
-                            value={value.weight}
-                            disabled={!value.enabled}
-                            aria-label={`${t.importance}: ${t[key] || key}`}
-                            onChange={(e) => setConstraintWeight(key, e.target.value)}
-                          />
-                          <div className="rangeScale" aria-hidden="true">
-                            <span>0</span>
-                            <span>10</span>
-                          </div>
-                        </div>
-                      </div>
+                      <FlexibleConditionCard
+                        key={key}
+                        condKey={key}
+                        value={value}
+                        t={t}
+                        onToggle={toggleConstraintEnabled}
+                        onWeightChange={setConstraintWeight}
+                      />
                     ))}
                   </div>
-                </section>
+                </div>
               </div>
 
               {!canRun && (
-                <div className="lockNote">
-                  <Lock size={16} />
+                <div className="ap-lock-notice">
+                  <Lock size={14} />
                   <span>{t.noPermission}</span>
                 </div>
               )}
             </div>
           </div>
 
-          <div className="rightCol">
-            <div className="statsRow">
-              <div className="stat">
-                <div className="statIcon">
-                  <Users size={18} />
-                </div>
-                <div>
-                  <div className="statNum">{summary?.unassigned_students || 0}</div>
-                  <div className="statLbl">{t.studentsToAssign}</div>
-                </div>
-              </div>
+          {/* Right Column */}
+          <div className="ap-right-col">
 
-              <div className="stat">
-                <div className="statIcon">
-                  <Home size={18} />
-                </div>
-                <div>
-                  <div className="statNum">{summary?.available_beds || 0}</div>
-                  <div className="statLbl">{t.availableBeds}</div>
-                </div>
-              </div>
-            </div>
-
-            {summary?.inventory_by_type && (
-              <div className="card">
-                <div className="cardHeader compact">
-                  <div className="cardTitle">
-                    <Home size={16} />
-                    <span>{t.inventoryBreakdown}</span>
-                  </div>
-                </div>
-
-                <div className="inventoryGrid">
-                  {[
-                    ['single', t.singleHousing],
-                    ['couple', t.coupleHousing],
-                    ['family', t.familyHousing],
-                  ].map(([key, label]) => {
-                    const item = summary.inventory_by_type[key] || {};
-                    return (
-                      <div className="inventoryItem" key={key}>
-                        <div className="inventoryTitle">{label}</div>
-                        <div className="inventoryMetrics">
-                          <div className="metricRow">
-                            <span>{t.apartmentsLabel}</span>
-                            <strong>{item.apartments || 0}</strong>
-                          </div>
-                          <div className="metricRow">
-                            <span>{t.roomsLabel}</span>
-                            <strong>{item.rooms || 0}</strong>
-                          </div>
-                          <div className="metricRow highlight">
-                            <span>{t.freeBedsLabel}</span>
-                            <strong>{item.available_beds || 0}</strong>
-                          </div>
-                          <div className="metricRow">
-                            <span>{t.totalBedsLabel}</span>
-                            <strong>{item.total_beds || 0}</strong>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {summary?.students_by_housing_type && (
-              <div className="card">
-                <div className="cardHeader compact">
-                  <div className="cardTitle">
-                    <Users size={16} />
-                    <span>{t.housingDemand}</span>
-                  </div>
-                </div>
-
-                <div className="housingBreakdown">
-                  {[
-                    ['single_male', t.singleMaleStudents],
-                    ['single_female', t.singleFemaleStudents],
-                    ['single_mixed', t.singleMixedStudents],
-                    ['couple', t.coupleStudents],
-                    ['family', t.familyStudents],
-                    ['unknown', t.unknownHousing],
-                  ].map(([key, label]) => (
-                    <div className={`housingItem ${key === 'unknown' ? 'unknown' : ''}`} key={key}>
-                      <div className="housingNum">{summary.students_by_housing_type[key] || 0}</div>
-                      <div className="housingLbl">{label}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {summary?.students_by_category && (
-              <div className="card">
-                <div className="cardHeader compact">
-                  <div className="cardTitle">
-                    <Users size={16} />
-                    <span>{t.studentsBreakdown}</span>
-                  </div>
-                </div>
-
-                <div className="breakdown">
-                  <div className="bItem">
-                    <div className="bNum">{summary.students_by_category.new || 0}</div>
-                    <div className="bLbl">{t.newStudents}</div>
-                  </div>
-                  <div className="bItem">
-                    <div className="bNum">{summary.students_by_category.continuing || 0}</div>
-                    <div className="bLbl">{t.continuing}</div>
-                  </div>
-                  <div className="bItem">
-                    <div className="bNum">{summary.students_by_category.transfer || 0}</div>
-                    <div className="bLbl">{t.transfers}</div>
-                  </div>
-                  <div className="bItem">
-                    <div className="bNum">{summary.students_by_category.leaving || 0}</div>
-                    <div className="bLbl">{t.leaving}</div>
-                  </div>
-                  <div className="bItem priority">
-                    <div className="bNum">{summary.priority_students || 0}</div>
-                    <div className="bLbl">{t.priorityStudents}</div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div className="card">
-              <div className="cardHeader compact">
-                <div className="cardTitle">
+            {/* Results Card */}
+            <div className="ap-card ap-results-card">
+              <div className="ap-card-header">
+                <div className="ap-card-title-row">
                   <BarChart3 size={16} />
-                  <span>{t.results}</span>
+                  <h2 className="ap-card-title">{t.resultsTitle}</h2>
                 </div>
-                <span className="hint">{t.currentStatus}</span>
+                <StatusBadge statusKey={currentStatusKey} t={t} />
               </div>
 
               {result ? (
-                <div className="results">
-                  <div className="kpi ok">
-                    <div className="kpiIcon">
-                      <Check size={18} />
+                <div className="ap-results-body">
+                  <div className="ap-results-kpis">
+                    <div className="ap-kpi ap-kpi-green">
+                      <div className="ap-kpi-icon"><Check size={17} /></div>
+                      <div>
+                        <div className="ap-kpi-val">{result.successful_assignments || 0}</div>
+                        <div className="ap-kpi-lbl">{t.successfulAssign}</div>
+                      </div>
                     </div>
-                    <div>
-                      <div className="kpiNum">{result.successful_assignments || 0}</div>
-                      <div className="kpiLbl">{t.assigned}</div>
+                    <div className="ap-kpi ap-kpi-blue">
+                      <div className="ap-kpi-icon"><Users size={17} /></div>
+                      <div>
+                        <div className="ap-kpi-val">{result.roommate_matches || 0}</div>
+                        <div className="ap-kpi-lbl">{t.roommateMatches}</div>
+                      </div>
+                    </div>
+                    <div className="ap-kpi ap-kpi-amber">
+                      <div className="ap-kpi-icon"><AlertTriangle size={17} /></div>
+                      <div>
+                        <div className="ap-kpi-val">{result.conflicts || 0}</div>
+                        <div className="ap-kpi-lbl">{t.conflicts}</div>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="kpi info">
-                    <div className="kpiIcon">
-                      <Users size={18} />
+                  {result.run?.completed_at && (
+                    <div className="ap-results-meta">
+                      <Calendar size={13} />
+                      <span>
+                        {new Date(result.run.completed_at).toLocaleDateString(
+                          language === 'he' ? 'he-IL' : 'en-US',
+                          { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
+                        )}
+                      </span>
                     </div>
-                    <div>
-                      <div className="kpiNum">{result.roommate_matches || 0}</div>
-                      <div className="kpiLbl">{t.roommateMatches}</div>
-                    </div>
-                  </div>
+                  )}
 
-                  <div className="kpi warn">
-                    <div className="kpiIcon">
-                      <AlertTriangle size={18} />
-                    </div>
-                    <div>
-                      <div className="kpiNum">{result.conflicts || 0}</div>
-                      <div className="kpiLbl">{t.conflicts}</div>
-                    </div>
-                  </div>
+                  <button
+                    className="ap-view-results-btn"
+                    onClick={handleViewResults}
+                    disabled={runStatus !== 'completed'}
+                  >
+                    <ExternalLink size={15} />
+                    {t.viewFullResults}
+                  </button>
+
+                  {showDelBtn && (
+                    <button
+                      className="ap-delete-inline-btn"
+                      onClick={requestDeleteResults}
+                      disabled={isDeleting}
+                    >
+                      {isDeleting
+                        ? <><Loader size={13} className="ap-spin" /> {t.deletingResults}</>
+                        : <><Trash2 size={13} /> {t.deleteResults}</>
+                      }
+                    </button>
+                  )}
                 </div>
               ) : (
-                <div className="empty-results-state">
-                  <div className="empty-results-title">{t.noResultsYet}</div>
-                  <div className="empty-results-subtitle">{t.resultsHint}</div>
+                <div className="ap-no-results">
+                  <div className="ap-no-results-icon">
+                    <BarChart3 size={28} />
+                  </div>
+                  <div className="ap-no-results-title">{t.noResultsTitle}</div>
+                  <div className="ap-no-results-hint">{t.noResultsHint}</div>
+
+                  {!hasStudents && !isRunning && (
+                    <div className="ap-no-students-note">
+                      <Check size={14} />
+                      {t.noStudents}
+                    </div>
+                  )}
                 </div>
               )}
-
-              <button className="ghostBtn" onClick={handleViewResults} disabled={!result}>
-                {t.viewResults}
-              </button>
             </div>
+
+            {/* Student Breakdown (when available) */}
+            {summary?.students_by_category && (
+              <div className="ap-card">
+                <div className="ap-card-header">
+                  <div className="ap-card-title-row">
+                    <Users size={16} />
+                    <h2 className="ap-card-title">{t.totalStudents}</h2>
+                  </div>
+                </div>
+                <div className="ap-breakdown-grid">
+                  {[
+                    ['new',        t.newStudents || 'New'],
+                    ['continuing', t.continuing || 'Continuing'],
+                    ['transfer',   t.transfers || 'Transfers'],
+                    ['leaving',    t.leaving || 'Leaving'],
+                  ].map(([k, lbl]) => (
+                    <div key={k} className="ap-breakdown-item">
+                      <div className="ap-breakdown-val">{summary.students_by_category[k] || 0}</div>
+                      <div className="ap-breakdown-lbl">{lbl}</div>
+                    </div>
+                  ))}
+                  <div className="ap-breakdown-item ap-breakdown-priority">
+                    <div className="ap-breakdown-val">{summary.priority_students || 0}</div>
+                    <div className="ap-breakdown-lbl">{t.priorityStudents || 'Priority'}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
           </div>
         </div>
       </div>
@@ -993,71 +1423,160 @@ function AllocationPage({ language = 'he' }) {
   );
 }
 
+// ─────────────────────────────────────────────
+// Styles
+// ─────────────────────────────────────────────
+
 const styles = `
-  :root{
-    --bg: #f6f8fc;
-    --card: #ffffff;
-    --text: #0f172a;
-    --muted: #64748b;
-    --border: rgba(15,23,42,0.10);
-    --shadow: 0 10px 30px rgba(15,23,42,0.08);
-    --shadow2: 0 6px 18px rgba(15,23,42,0.08);
-    --primary: #2563eb;
-    --primarySoft: rgba(37,99,235,0.10);
-    --ok: #047857;
-    --okSoft: rgba(4,120,87,0.12);
-    --warn: #b45309;
-    --warnSoft: rgba(180,83,9,0.14);
-    --danger: #b91c1c;
-    --dangerSoft: rgba(185,28,28,0.12);
-    --radius: 18px;
-    --radius2: 14px;
+  /* ── Variables ────────────────────────────── */
+  .ap-page {
+    --ap-bg: #f0f2f5;
+    --ap-surface: #ffffff;
+    --ap-surface-2: #f8fafc;
+    --ap-border: rgba(15, 23, 42, 0.08);
+    --ap-border-m: rgba(15, 23, 42, 0.13);
+    --ap-text: #0f172a;
+    --ap-text-2: #475569;
+    --ap-muted: #94a3b8;
+    --ap-blue: #2563eb;
+    --ap-blue-soft: rgba(37, 99, 235, 0.08);
+    --ap-blue-border: rgba(37, 99, 235, 0.18);
+    --ap-green: #059669;
+    --ap-green-soft: rgba(5, 150, 105, 0.09);
+    --ap-green-border: rgba(5, 150, 105, 0.18);
+    --ap-amber: #d97706;
+    --ap-amber-soft: rgba(217, 119, 6, 0.09);
+    --ap-amber-border: rgba(217, 119, 6, 0.18);
+    --ap-red: #dc2626;
+    --ap-red-soft: rgba(220, 38, 38, 0.09);
+    --ap-red-border: rgba(220, 38, 38, 0.18);
+    --ap-shadow: 0 1px 3px rgba(15,23,42,0.06), 0 4px 12px rgba(15,23,42,0.04);
+    --ap-shadow-md: 0 4px 16px rgba(15,23,42,0.08);
+    --ap-radius: 14px;
+    --ap-radius-sm: 10px;
+    --ap-radius-xs: 7px;
+    min-height: calc(100vh - 64px);
+    padding: 20px;
+    background: var(--ap-bg);
+    font-family: inherit;
   }
 
-  .allocation-page{
-    padding: 18px;
-    background: var(--bg);
-    min-height: calc(100vh - 40px);
-  }
-
-  .shell{
-    max-width: 1180px;
+  /* ── Shell ───────────────────────────────── */
+  .ap-shell {
+    max-width: 1200px;
     margin: 0 auto;
     display: flex;
     flex-direction: column;
     gap: 14px;
   }
 
-  .topbar{
-    position: sticky;
-    top: 0;
-    z-index: 5;
-    background: linear-gradient(to bottom, rgba(246,248,252,1), rgba(246,248,252,0.88));
-    backdrop-filter: blur(8px);
-    border-radius: var(--radius);
-    padding: 14px;
+  /* ── Card base ──────────────────────────── */
+  .ap-card {
+    background: var(--ap-surface);
+    border: 1px solid var(--ap-border);
+    border-radius: var(--ap-radius);
+    box-shadow: var(--ap-shadow);
+    overflow: hidden;
+  }
+
+  .ap-card-header {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     justify-content: space-between;
     gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--ap-border);
   }
 
-  .titleBlock h1{
+  .ap-card-title-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    color: var(--ap-text);
+  }
+
+  .ap-card-title {
     margin: 0;
-    font-size: 24px;
-    font-weight: 900;
-    letter-spacing: -0.02em;
-    color: var(--text);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--ap-text);
   }
 
-  .titleBlock p{
-    margin: 6px 0 0;
-    color: var(--muted);
+  /* ── Loading / Error ─────────────────────── */
+  .ap-loading-state,
+  .ap-error-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    min-height: 360px;
+    background: var(--ap-surface);
+    border: 1px solid var(--ap-border);
+    border-radius: var(--ap-radius);
+    box-shadow: var(--ap-shadow);
+    max-width: 520px;
+    margin: 40px auto;
+    color: var(--ap-muted);
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .ap-error-state { color: var(--ap-red); }
+  .ap-error-title { margin: 0; font-size: 16px; font-weight: 700; }
+  .ap-error-msg   { margin: 0; font-size: 13px; color: var(--ap-muted); text-align: center; max-width: 360px; }
+
+  .ap-retry-btn {
+    padding: 9px 18px;
+    border-radius: var(--ap-radius-sm);
+    border: 1px solid var(--ap-blue-border);
+    background: var(--ap-blue-soft);
+    color: var(--ap-blue);
     font-weight: 700;
     font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.15s;
+  }
+  .ap-retry-btn:hover { background: rgba(37,99,235,0.14); }
+
+  /* ── Header Card ─────────────────────────── */
+  .ap-header-card {
+    background: var(--ap-surface);
+    border: 1px solid var(--ap-border);
+    border-radius: var(--ap-radius);
+    box-shadow: var(--ap-shadow);
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
   }
 
-  .topbarRight{
+  .ap-header-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .ap-page-title {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 800;
+    color: var(--ap-text);
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+  }
+
+  .ap-page-subtitle {
+    margin: 4px 0 0;
+    font-size: 13px;
+    color: var(--ap-text-2);
+    font-weight: 500;
+  }
+
+  .ap-header-meta {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -1065,934 +1584,1175 @@ const styles = `
     justify-content: flex-end;
   }
 
-  .region-badge{
-    background: var(--primarySoft);
-    border: 1px solid rgba(37,99,235,0.25);
-    color: #1d4ed8;
-    padding: 8px 12px;
-    border-radius: 999px;
-    font-size: 13px;
-    font-weight: 900;
+  .ap-last-run {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--ap-muted);
+    font-weight: 500;
     white-space: nowrap;
   }
 
-  .run-btn{
+  .ap-region-chip {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    gap: 10px;
-    padding: 10px 14px;
-    border-radius: 14px;
-    border: 1px solid rgba(4,120,87,0.25);
-    background: linear-gradient(135deg, #059669, #047857);
-    color: white;
-    font-weight: 950;
-    font-size: 14px;
-    cursor: pointer;
-    box-shadow: 0 10px 20px rgba(4,120,87,0.25);
-    transition: transform 0.18s, filter 0.18s;
-    font-family: inherit;
+    padding: 5px 11px;
+    border-radius: 999px;
+    background: var(--ap-blue-soft);
+    border: 1px solid var(--ap-blue-border);
+    color: var(--ap-blue);
+    font-size: 12px;
+    font-weight: 700;
     white-space: nowrap;
   }
 
-  .run-btn:hover{
-    transform: translateY(-1px);
-    filter: brightness(0.98);
-  }
-
-  .run-btn:disabled{
-    opacity: 0.65;
-    cursor: not-allowed;
-    transform: none;
-    box-shadow: none;
-  }
-
-  .status-chip{
-    display: inline-flex;
+  .ap-header-stats {
+    display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    border-radius: 999px;
-    font-size: 13px;
-    font-weight: 900;
-    border: 1px solid var(--border);
-    background: rgba(15,23,42,0.03);
-    color: var(--text);
-    white-space: nowrap;
+    gap: 0;
+    background: var(--ap-surface-2);
+    border: 1px solid var(--ap-border);
+    border-radius: var(--ap-radius-sm);
+    padding: 0;
+    overflow: hidden;
   }
 
-  .status-chip.ok{
-    background: var(--okSoft);
-    border-color: rgba(4,120,87,0.25);
-    color: var(--ok);
-  }
-
-  .status-chip.warn{
-    background: var(--warnSoft);
-    border-color: rgba(180,83,9,0.25);
-    color: var(--warn);
-  }
-
-  .status-chip.neutral{
-    background: rgba(15,23,42,0.03);
-    border-color: var(--border);
-    color: var(--text);
-  }
-
-  .progressWrap{
-    display:flex;
-    align-items:center;
+  .ap-stat-item {
+    display: flex;
+    align-items: center;
     gap: 10px;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius2);
-    padding: 10px 12px;
-    box-shadow: var(--shadow2);
-  }
-
-  .progressBar{
-    height: 10px;
-    border-radius: 999px;
-    background: rgba(15,23,42,0.08);
-    overflow:hidden;
+    padding: 12px 20px;
     flex: 1;
   }
 
-  .progressFill{
-    height: 100%;
-    background: linear-gradient(90deg, rgba(37,99,235,0.75), rgba(5,150,105,0.75));
-    transition: width 0.25s ease;
+  .ap-stat-divider {
+    width: 1px;
+    height: 36px;
+    background: var(--ap-border);
+    flex-shrink: 0;
+  }
+
+  .ap-stat-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: var(--ap-radius-xs);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .ap-stat-blue  { background: var(--ap-blue-soft);  border: 1px solid var(--ap-blue-border);  color: var(--ap-blue); }
+  .ap-stat-green { background: var(--ap-green-soft); border: 1px solid var(--ap-green-border); color: var(--ap-green); }
+  .ap-stat-amber { background: var(--ap-amber-soft); border: 1px solid var(--ap-amber-border); color: var(--ap-amber); }
+  .ap-stat-slate { background: rgba(100,116,139,0.09); border: 1px solid rgba(100,116,139,0.18); color: #475569; }
+
+  .ap-stat-val  { font-size: 20px; font-weight: 800; color: var(--ap-text); letter-spacing: -0.02em; }
+  .ap-stat-lbl  { font-size: 11.5px; font-weight: 600; color: var(--ap-muted); margin-top: 1px; }
+  .ap-stat-green-text { color: var(--ap-green); }
+  .ap-stat-amber-text { color: var(--ap-amber); }
+
+  /* ── Status Badge ─────────────────────────── */
+  .ap-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 11px;
     border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+    border: 1px solid transparent;
   }
 
-  .progressPct{
-    width: 52px;
-    text-align:right;
-    font-size: 13px;
-    font-weight: 950;
-    color: var(--muted);
+  .badge-gray  { background: rgba(100,116,139,0.09); border-color: rgba(100,116,139,0.18); color: #475569; }
+  .badge-blue  { background: var(--ap-blue-soft);  border-color: var(--ap-blue-border);  color: var(--ap-blue); }
+  .badge-green { background: var(--ap-green-soft); border-color: var(--ap-green-border); color: var(--ap-green); }
+  .badge-amber { background: var(--ap-amber-soft); border-color: var(--ap-amber-border); color: var(--ap-amber); }
+  .badge-red   { background: var(--ap-red-soft);   border-color: var(--ap-red-border);   color: var(--ap-red); }
+
+  .ap-badge-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+  }
+  .ap-badge-dot-pulse {
+    animation: ap-dot-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes ap-dot-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.85); }
   }
 
-  .banner{
-    display:flex;
+  /* ── Controls Bar ────────────────────────── */
+  .ap-controls-bar {
+    display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    background: linear-gradient(135deg, rgba(37,99,235,0.10), rgba(99,102,241,0.10));
-    border: 1px solid rgba(37,99,235,0.18);
-    border-radius: var(--radius);
-    padding: 14px;
+    background: var(--ap-surface);
+    border: 1px solid var(--ap-border);
+    border-radius: var(--ap-radius);
+    box-shadow: var(--ap-shadow);
+    padding: 12px 16px;
+    flex-wrap: wrap;
   }
 
-  .bannerLeft{
-    display:flex;
-    align-items: flex-start;
+  .ap-controls-left,
+  .ap-controls-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  /* ── Buttons ─────────────────────────────── */
+  .ap-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 16px;
+    border-radius: var(--ap-radius-sm);
+    font-size: 13.5px;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+    border: 1px solid transparent;
+    transition: transform 0.14s, filter 0.14s, background 0.14s, border-color 0.14s;
+    white-space: nowrap;
+    line-height: 1;
+  }
+  .ap-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none !important;
+    filter: none !important;
+  }
+
+  .ap-btn-primary {
+    background: linear-gradient(135deg, #10b981, #059669);
+    color: #fff;
+    border-color: rgba(5,150,105,0.25);
+    box-shadow: 0 4px 12px rgba(5,150,105,0.25);
+  }
+  .ap-btn-primary:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.04); }
+
+  .ap-btn-danger {
+    background: linear-gradient(135deg, #ef4444, #dc2626);
+    color: #fff;
+    border-color: rgba(220,38,38,0.25);
+    box-shadow: 0 4px 12px rgba(220,38,38,0.22);
+  }
+  .ap-btn-danger:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.04); }
+
+  .ap-btn-ghost {
+    background: rgba(15,23,42,0.03);
+    color: var(--ap-text);
+    border-color: var(--ap-border);
+  }
+  .ap-btn-ghost:hover:not(:disabled) {
+    background: var(--ap-blue-soft);
+    border-color: var(--ap-blue-border);
+    color: var(--ap-blue);
+  }
+
+  .ap-btn-ghost-danger {
+    background: var(--ap-red-soft);
+    color: var(--ap-red);
+    border-color: var(--ap-red-border);
+  }
+  .ap-btn-ghost-danger:hover:not(:disabled) { background: rgba(220,38,38,0.13); }
+
+  /* ── Inline Chip ─────────────────────────── */
+  .ap-inline-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 12px;
+    border-radius: 999px;
+    font-size: 12.5px;
+    font-weight: 700;
+    border: 1px solid transparent;
+  }
+  .ap-chip-amber {
+    background: var(--ap-amber-soft);
+    border-color: var(--ap-amber-border);
+    color: var(--ap-amber);
+  }
+  .ap-chip-blue {
+    background: var(--ap-blue-soft);
+    border-color: var(--ap-blue-border);
+    color: var(--ap-blue);
+  }
+
+  /* ── Progress Card ───────────────────────── */
+  .ap-progress-card {
+    background: linear-gradient(135deg, rgba(37,99,235,0.06), rgba(16,185,129,0.04));
+    border: 1px solid var(--ap-blue-border);
+    border-radius: var(--ap-radius);
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
     gap: 12px;
-    min-width: 0;
   }
 
-  .bannerIcon{
-    width: 40px;
-    height: 40px;
-    border-radius: 14px;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    background: rgba(255,255,255,0.85);
-    border: 1px solid rgba(255,255,255,0.6);
-    color: #1d4ed8;
-    flex-shrink: 0;
-  }
-
-  .bannerText{
-    min-width: 0;
-  }
-
-  .bannerTitle{
-    display:flex;
-    align-items:center;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-
-  .bannerHeading{
-    font-weight: 950;
-    color: #1e3a8a;
-    font-size: 13px;
-  }
-
-  .chip{
-    font-size: 12px;
-    font-weight: 950;
-    padding: 4px 10px;
-    border-radius: 999px;
-    background: rgba(255,255,255,0.85);
-    border: 1px solid rgba(15,23,42,0.10);
-    color: var(--text);
-  }
-
-  .bannerMain{
-    display:flex;
-    align-items:center;
-    gap: 8px;
-    margin-top: 8px;
-    font-weight: 800;
-    color: var(--text);
-  }
-
-  .bannerMeta{
-    display:flex;
-    align-items:center;
-    gap: 8px;
-    margin-top: 6px;
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 800;
-  }
-
-  .grid{
-    display:grid;
-    grid-template-columns: 1.2fr 0.95fr;
-    gap: 14px;
-    align-items:start;
-  }
-
-  .card{
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
-    padding: 14px;
-  }
-
-  .cardHeader{
-    display:flex;
-    align-items:flex-start;
+  .ap-progress-header {
+    display: flex;
+    align-items: center;
     justify-content: space-between;
-    gap: 10px;
-    padding-bottom: 10px;
-    margin-bottom: 10px;
-    border-bottom: 1px solid var(--border);
+    gap: 12px;
   }
 
-  .cardHeader.compact{
-    padding-bottom: 10px;
-    margin-bottom: 12px;
+  .ap-progress-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--ap-blue);
   }
 
-  .cardTitle{
-    display:flex;
-    align-items:center;
-    gap: 10px;
-    font-weight: 950;
-    color: var(--text);
+  .ap-progress-timer {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--ap-text-2);
+    font-variant-numeric: tabular-nums;
   }
 
-  .hint{
-    font-size: 12px;
-    color: var(--muted);
+  .ap-progress-bar-wrap {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .ap-progress-bar {
+    flex: 1;
+    height: 8px;
+    border-radius: 999px;
+    background: rgba(15,23,42,0.08);
+    overflow: hidden;
+  }
+
+  .ap-progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--ap-blue), var(--ap-green));
+    transition: width 0.4s ease;
+  }
+
+  .ap-progress-pct {
+    font-size: 12.5px;
     font-weight: 800;
+    color: var(--ap-text-2);
+    min-width: 38px;
     text-align: right;
+    font-variant-numeric: tabular-nums;
   }
 
-  .constraintsHeader{
-    align-items: flex-start;
-  }
-
-  .cardDescription{
-    margin: 7px 0 0;
-    max-width: 650px;
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 750;
-    line-height: 1.55;
-  }
-
-  .constraintSections{
-    display:flex;
-    flex-direction:column;
-    gap: 16px;
-  }
-
-  .constraintSection{
-    border-radius: 16px;
-    padding: 14px;
-    border: 1px solid var(--border);
-  }
-
-  .hardSection{
-    background: linear-gradient(145deg, rgba(15,118,110,0.07), rgba(37,99,235,0.04));
-    border-color: rgba(15,118,110,0.18);
-  }
-
-  .preferencesSection{
-    background: rgba(15,23,42,0.018);
-  }
-
-  .sectionHeader{
-    margin-bottom: 12px;
-  }
-
-  .sectionTitleWrap{
-    display:flex;
-    align-items:flex-start;
-    gap: 10px;
-  }
-
-  .sectionIcon{
-    width: 36px;
-    height: 36px;
-    border-radius: 12px;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    flex-shrink: 0;
-  }
-
-  .sectionIcon.hard{
-    color: #0f766e;
-    background: rgba(15,118,110,0.10);
-    border: 1px solid rgba(15,118,110,0.18);
-  }
-
-  .sectionIcon.preferences{
-    color: #1d4ed8;
-    background: var(--primarySoft);
-    border: 1px solid rgba(37,99,235,0.16);
-  }
-
-  .sectionTitleLine{
-    display:flex;
-    align-items:center;
+  .ap-progress-detail {
+    display: flex;
+    align-items: center;
     gap: 8px;
     flex-wrap: wrap;
   }
 
-  .sectionTitleLine h3{
-    margin: 0;
-    font-size: 14px;
-    font-weight: 950;
-    color: var(--text);
+  /* ── Inline Alert ────────────────────────── */
+  .ap-inline-alert {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 11px 14px;
+    border-radius: var(--ap-radius-sm);
+    background: var(--ap-amber-soft);
+    border: 1px solid var(--ap-amber-border);
+    color: var(--ap-amber);
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .ap-inline-alert button {
+    margin-left: auto;
+    border: none;
+    background: none;
+    cursor: pointer;
+    color: var(--ap-amber);
+    font-size: 16px;
+    line-height: 1;
+    padding: 0 4px;
+    font-weight: 700;
   }
 
-  .sectionHeader p{
-    margin: 5px 0 0;
-    color: var(--muted);
+  /* ── Inbox Notice ────────────────────────── */
+  .ap-inbox-notice {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, var(--ap-blue-soft), rgba(99,102,241,0.06));
+    border: 1px solid var(--ap-blue-border);
+    border-radius: var(--ap-radius-sm);
+    flex-wrap: wrap;
+  }
+
+  .ap-inbox-icon-wrap {
+    width: 34px;
+    height: 34px;
+    border-radius: var(--ap-radius-xs);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255,255,255,0.8);
+    border: 1px solid rgba(255,255,255,0.6);
+    color: var(--ap-blue);
+    flex-shrink: 0;
+  }
+
+  .ap-inbox-body {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .ap-inbox-title {
     font-size: 12px;
-    font-weight: 750;
-    line-height: 1.5;
+    font-weight: 700;
+    color: #1e3a8a;
+    display: block;
+    margin-bottom: 4px;
   }
 
-  .countBadge{
-    min-width: 24px;
-    height: 24px;
-    padding: 0 7px;
+  .ap-inbox-detail {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--ap-text-2);
+    font-weight: 500;
+    flex-wrap: wrap;
+  }
+  .ap-inbox-detail strong { color: var(--ap-text); font-weight: 800; }
+
+  .ap-inbox-meta-sep { color: var(--ap-muted); }
+
+  .ap-inbox-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
     border-radius: 999px;
-    display:inline-flex;
-    align-items:center;
-    justify-content:center;
-    background: rgba(255,255,255,0.82);
-    border: 1px solid var(--border);
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 950;
+    font-size: 11.5px;
+    font-weight: 700;
+    background: rgba(15,23,42,0.04);
+    border: 1px solid var(--ap-border);
+    color: var(--ap-text-2);
+    white-space: nowrap;
+  }
+  .ap-inbox-pending {
+    background: var(--ap-amber-soft);
+    border-color: var(--ap-amber-border);
+    color: var(--ap-amber);
   }
 
-  .hardRulesGrid{
-    display:grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* ── Content Grid ─────────────────────────── */
+  .ap-content-grid {
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    gap: 14px;
+    align-items: start;
+  }
+
+  .ap-left-col,
+  .ap-right-col {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  /* ── Inventory ────────────────────────────── */
+  .ap-inv-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .ap-inv-row {
+    border-bottom: 1px solid var(--ap-border);
+  }
+  .ap-inv-row:last-child { border-bottom: none; }
+
+  .ap-inv-row-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 13px 16px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    width: 100%;
+    text-align: start;
+    transition: background 0.14s;
+  }
+  .ap-inv-row-header:hover { background: var(--ap-surface-2); }
+
+  .ap-inv-row-left {
+    display: flex;
+    align-items: center;
     gap: 9px;
   }
 
-  .hardRuleCard{
-    display:flex;
-    align-items:flex-start;
-    gap: 10px;
-    min-width: 0;
-    padding: 11px;
-    border-radius: 14px;
-    background: rgba(255,255,255,0.82);
-    border: 1px solid rgba(15,118,110,0.13);
-  }
-
-  .hardRuleIcon{
-    width: 30px;
-    height: 30px;
-    border-radius: 10px;
-    display:flex;
-    align-items:center;
-    justify-content:center;
+  .ap-inv-type-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: var(--ap-radius-xs);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--ap-blue-soft);
+    border: 1px solid var(--ap-blue-border);
+    color: var(--ap-blue);
     flex-shrink: 0;
-    color: #0f766e;
-    background: rgba(15,118,110,0.09);
   }
 
-  .hardRuleContent{
+  .ap-inv-type-name {
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--ap-text);
+  }
+
+  .ap-inv-row-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+
+  .ap-inv-quick-stats {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--ap-muted);
+    font-weight: 600;
+  }
+
+  .ap-inv-quick-stat.available { color: var(--ap-green); }
+  .ap-inv-quick-stat strong { font-weight: 800; }
+  .ap-inv-sep { color: var(--ap-muted); opacity: 0.6; }
+
+  .ap-inv-progress-mini {
+    width: 70px;
+    height: 5px;
+    border-radius: 999px;
+    background: rgba(15,23,42,0.08);
+    overflow: hidden;
+  }
+
+  .ap-inv-progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--ap-blue);
+  }
+
+  .ap-inv-chevron {
+    color: var(--ap-muted);
+    display: flex;
+    align-items: center;
+  }
+
+  .ap-inv-expanded {
+    padding: 0 16px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    background: var(--ap-surface-2);
+    border-top: 1px solid var(--ap-border);
+  }
+
+  .ap-inv-metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    padding-top: 14px;
+  }
+
+  .ap-inv-metric {
+    border-radius: var(--ap-radius-xs);
+    border: 1px solid var(--ap-border);
+    background: var(--ap-surface);
+    padding: 10px;
+    text-align: center;
+  }
+
+  .ap-inv-metric-highlight {
+    background: var(--ap-green-soft);
+    border-color: var(--ap-green-border);
+  }
+
+  .ap-inv-metric-val {
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--ap-text);
+    letter-spacing: -0.02em;
+  }
+
+  .ap-inv-metric-highlight .ap-inv-metric-val { color: var(--ap-green); }
+
+  .ap-inv-metric-pct { font-size: 16px; }
+
+  .ap-inv-metric-lbl {
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--ap-muted);
+    margin-top: 2px;
+  }
+
+  .ap-inv-occ-bar-wrap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .ap-inv-occ-bar {
+    flex: 1;
+    height: 8px;
+    border-radius: 999px;
+    background: rgba(15,23,42,0.08);
+    overflow: hidden;
+  }
+
+  .ap-inv-occ-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--ap-blue), var(--ap-green));
+  }
+
+  .ap-inv-occ-label {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--ap-text-2);
+    white-space: nowrap;
+  }
+
+  /* ── Conditions ──────────────────────────── */
+  .ap-conditions-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    border-top: 1px solid var(--ap-border);
+  }
+
+  .ap-conditions-col {
+    padding: 16px;
     min-width: 0;
   }
 
-  .hardRuleName{
-    color: var(--text);
-    font-size: 12.5px;
-    font-weight: 900;
+  .ap-conditions-col:first-child {
+    border-right: 1px solid var(--ap-border);
+  }
+
+  .ap-cond-col-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--ap-border);
+  }
+
+  .ap-cond-col-critical { color: #0f766e; }
+  .ap-cond-col-flexible  { color: var(--ap-blue); }
+
+  .ap-cond-col-title {
+    font-size: 13px;
+    font-weight: 800;
+    color: var(--ap-text);
+    line-height: 1.2;
+    margin-bottom: 3px;
+  }
+
+  .ap-cond-col-hint {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--ap-muted);
     line-height: 1.45;
   }
 
-  .hardRuleMeta{
-    display:flex;
-    align-items:center;
+  .ap-count-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 22px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: rgba(15,23,42,0.06);
+    border: 1px solid var(--ap-border);
+    color: var(--ap-muted);
+    font-size: 11px;
+    font-weight: 800;
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .ap-cond-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  /* Condition Cards */
+  .ap-cond-card {
+    border-radius: var(--ap-radius-xs);
+    border: 1px solid var(--ap-border);
+    background: var(--ap-surface-2);
+    padding: 11px 12px;
+    transition: border-color 0.15s;
+  }
+
+  .ap-cond-critical {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    background: linear-gradient(135deg, rgba(15,118,110,0.04), rgba(16,185,129,0.02));
+    border-color: rgba(15,118,110,0.14);
+  }
+
+  .ap-cond-flexible {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .ap-cond-flexible.ap-cond-off { opacity: 0.6; background: rgba(15,23,42,0.018); }
+
+  .ap-cond-flex-top {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+  }
+
+  .ap-cond-icon-wrap {
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .ap-cond-icon-critical {
+    background: rgba(15,118,110,0.09);
+    border: 1px solid rgba(15,118,110,0.16);
+    color: #0f766e;
+  }
+
+  .ap-cond-icon-flex {
+    background: var(--ap-blue-soft);
+    border: 1px solid var(--ap-blue-border);
+    color: var(--ap-blue);
+  }
+
+  .ap-cond-body { flex: 1; min-width: 0; }
+
+  .ap-cond-name {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--ap-text);
+    line-height: 1.35;
+  }
+
+  .ap-cond-desc {
+    font-size: 11px;
+    color: var(--ap-muted);
+    margin-top: 2px;
+    line-height: 1.4;
+    font-weight: 500;
+  }
+
+  .ap-cond-meta {
+    display: flex;
+    align-items: center;
     gap: 6px;
     flex-wrap: wrap;
     margin-top: 7px;
-    color: var(--muted);
-    font-size: 10.5px;
-    font-weight: 800;
   }
 
-  .hardBadge{
-    display:inline-flex;
-    align-items:center;
-    gap: 5px;
-    padding: 4px 7px;
+  .ap-cond-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 7px;
     border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 800;
+    border: 1px solid transparent;
+  }
+
+  .ap-cond-badge-critical {
+    background: rgba(15,118,110,0.09);
+    border-color: rgba(15,118,110,0.16);
     color: #0f766e;
-    background: rgba(15,118,110,0.10);
-    border: 1px solid rgba(15,118,110,0.14);
-    font-weight: 950;
   }
 
-  .metaDivider{
-    opacity: 0.55;
-  }
-
-  .preferencesList{
-    display:flex;
-    flex-direction:column;
-    gap: 9px;
-  }
-
-  .preferenceCard{
-    padding: 12px;
-    border-radius: 14px;
-    background: #fff;
-    border: 1px solid rgba(15,23,42,0.08);
-    transition: border-color 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
-  }
-
-  .preferenceCard:hover{
-    border-color: rgba(37,99,235,0.20);
-    box-shadow: 0 6px 16px rgba(15,23,42,0.05);
-  }
-
-  .preferenceCard.disabled{
-    opacity: 0.62;
-    background: rgba(15,23,42,0.025);
-  }
-
-  .preferenceTop{
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-    gap: 12px;
-  }
-
-  .preferenceIdentity{
-    min-width: 0;
-  }
-
-  .preferenceName{
-    color: var(--text);
-    font-size: 13px;
-    font-weight: 900;
-    line-height: 1.4;
-  }
-
-  .preferenceStatus{
-    margin-top: 4px;
-    color: var(--muted);
+  .ap-cond-always {
     font-size: 10.5px;
-    font-weight: 800;
+    color: var(--ap-muted);
+    font-weight: 600;
   }
 
-  .preferenceStatus.active{
-    color: var(--ok);
+  .ap-cond-status-chip {
+    display: inline-flex;
+    align-items: center;
+    margin-top: 5px;
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--ap-muted);
   }
+  .ap-cond-status-chip.ap-cond-status-on { color: var(--ap-green); }
 
-  .switchControl{
+  /* ── Switch ──────────────────────────────── */
+  .ap-switch {
     position: relative;
-    width: 44px;
-    height: 25px;
-    padding: 0;
-    border: 0;
+    width: 40px;
+    height: 22px;
     border-radius: 999px;
-    background: rgba(100,116,139,0.28);
+    background: rgba(100,116,139,0.25);
+    border: none;
     cursor: pointer;
     flex-shrink: 0;
-    transition: background 0.18s ease;
+    transition: background 0.18s;
+    margin-top: 1px;
   }
+  .ap-switch-on { background: var(--ap-blue); }
+  .ap-switch:focus-visible { outline: 3px solid rgba(37,99,235,0.22); outline-offset: 2px; }
 
-  .switchControl.on{
-    background: var(--primary);
-  }
-
-  .switchControl:focus-visible{
-    outline: 3px solid rgba(37,99,235,0.22);
-    outline-offset: 2px;
-  }
-
-  .switchThumb{
-    position:absolute;
+  .ap-switch-thumb {
+    position: absolute;
     top: 3px;
     left: 3px;
-    width: 19px;
-    height: 19px;
+    width: 16px;
+    height: 16px;
     border-radius: 50%;
     background: #fff;
-    box-shadow: 0 2px 6px rgba(15,23,42,0.22);
-    transition: transform 0.18s ease;
+    box-shadow: 0 1px 4px rgba(15,23,42,0.2);
+    transition: transform 0.18s;
   }
+  .ap-switch-on .ap-switch-thumb { transform: translateX(18px); }
 
-  .switchControl.on .switchThumb{
-    transform: translateX(19px);
-  }
-
-  [dir="rtl"] .switchControl.on .switchThumb{
-    transform: translateX(19px);
-  }
-
-  .importanceControl{
-    margin-top: 11px;
+  /* ── Slider ──────────────────────────────── */
+  .ap-cond-weight {
+    margin-top: 10px;
     padding-top: 10px;
-    border-top: 1px solid rgba(15,23,42,0.07);
+    border-top: 1px dashed var(--ap-border);
   }
 
-  .importanceHeader{
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-    gap: 10px;
-    margin-bottom: 7px;
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 850;
-  }
-
-  .importanceHeader strong{
-    color: var(--text);
-    font-size: 11.5px;
-    font-weight: 950;
-    padding: 4px 8px;
-    border-radius: 9px;
-    background: var(--primarySoft);
-    border: 1px solid rgba(37,99,235,0.12);
-  }
-
-  .importanceControl input[type="range"]{
-    width: 100%;
-    accent-color: var(--primary);
-    cursor: pointer;
-  }
-
-  .importanceControl input[type="range"]:disabled{
-    cursor: not-allowed;
-    opacity: 0.45;
-  }
-
-  .rangeScale{
-    display:flex;
-    justify-content:space-between;
-    margin-top: 2px;
-    color: var(--muted);
-    font-size: 9.5px;
-    font-weight: 800;
-  }
-
-  .lockNote{
-    margin-top: 12px;
-    display:flex;
-    align-items:center;
-    gap: 10px;
-    padding: 10px 12px;
-    border-radius: var(--radius2);
-    background: rgba(15,23,42,0.03);
-    border: 1px solid var(--border);
-    color: var(--muted);
-    font-weight: 850;
-    font-size: 13px;
-  }
-
-  .statsRow{
-    display:grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-  }
-
-  .stat{
-    display:flex;
-    align-items:center;
-    gap: 12px;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow2);
-    padding: 14px;
-  }
-
-  .statIcon{
-    width: 38px;
-    height: 38px;
-    border-radius: 14px;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    background: rgba(37,99,235,0.10);
-    border: 1px solid rgba(37,99,235,0.16);
-    color: #1d4ed8;
-  }
-
-  .statNum{
-    font-size: 22px;
-    font-weight: 950;
-    color: var(--text);
-    letter-spacing: -0.02em;
-  }
-
-  .statLbl{
-    font-size: 12px;
-    font-weight: 900;
-    color: var(--muted);
-    margin-top: 2px;
-  }
-
-  .breakdown{
-    display:grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 10px;
-  }
-
-  .inventoryGrid{
-    display:grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 10px;
-  }
-
-  .inventoryItem{
-    border-radius: var(--radius2);
-    border: 1px solid rgba(37,99,235,0.14);
-    background: linear-gradient(145deg, rgba(37,99,235,0.06), rgba(255,255,255,0.95));
-    padding: 12px;
-    min-width: 0;
-  }
-
-  .inventoryTitle{
-    color: var(--text);
-    font-size: 13px;
-    font-weight: 950;
-    margin-bottom: 10px;
-  }
-
-  .inventoryMetrics{
-    display:flex;
-    flex-direction:column;
-    gap: 7px;
-  }
-
-  .metricRow{
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
+  .ap-cond-weight-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     gap: 8px;
-    color: var(--muted);
+    margin-bottom: 7px;
+  }
+
+  .ap-cond-weight-lbl {
     font-size: 11px;
-    font-weight: 850;
+    font-weight: 700;
+    color: var(--ap-muted);
   }
 
-  .metricRow strong{
-    color: var(--text);
-    font-size: 12px;
-    font-weight: 950;
-  }
-
-  .metricRow.highlight{
-    padding: 6px 8px;
-    margin: 1px -2px;
-    border-radius: 9px;
-    color: var(--ok);
-    background: var(--okSoft);
-  }
-
-  .metricRow.highlight strong{
-    color: var(--ok);
-  }
-
-  .housingBreakdown{
-    display:grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 9px;
-  }
-
-  .housingItem{
-    border-radius: var(--radius2);
-    border: 1px solid var(--border);
-    background: rgba(15,23,42,0.02);
-    padding: 11px;
-    text-align:center;
-    min-width: 0;
-  }
-
-  .housingItem.unknown{
-    border-style: dashed;
-    opacity: 0.78;
-  }
-
-  .housingNum{
-    font-size: 19px;
-    font-weight: 950;
-    color: #1d4ed8;
-  }
-
-  .housingLbl{
-    margin-top: 4px;
-    color: var(--muted);
-    font-size: 10.5px;
-    line-height: 1.35;
-    font-weight: 850;
-  }
-
-  .bItem{
-    border-radius: var(--radius2);
-    border: 1px solid var(--border);
-    background: rgba(15,23,42,0.02);
-    padding: 12px;
-    text-align:center;
-  }
-
-  .bItem.priority{
-    background: var(--warnSoft);
-    border-color: rgba(180,83,9,0.20);
-  }
-
-  .bNum{
-    font-size: 20px;
-    font-weight: 950;
-    color: var(--text);
-    letter-spacing: -0.02em;
-  }
-
-  .bItem.priority .bNum{
-    color: var(--warn);
-  }
-
-  .bLbl{
-    margin-top: 4px;
-    font-size: 12px;
-    font-weight: 900;
-    color: var(--muted);
-  }
-
-  .results{
-    display:grid;
-    grid-template-columns: 1fr;
-    gap: 10px;
-  }
-
-  .kpi{
-    display:flex;
-    align-items:center;
-    gap: 12px;
-    border-radius: var(--radius2);
-    border: 1px solid var(--border);
-    background: rgba(15,23,42,0.02);
-    padding: 12px;
-  }
-
-  .kpi.ok{
-    background: var(--okSoft);
-    border-color: rgba(4,120,87,0.20);
-  }
-
-  .kpi.info{
-    background: var(--primarySoft);
-    border-color: rgba(37,99,235,0.18);
-  }
-
-  .kpi.warn{
-    background: var(--warnSoft);
-    border-color: rgba(180,83,9,0.20);
-  }
-
-  .kpiIcon{
-    width: 36px;
-    height: 36px;
-    border-radius: 14px;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    background: rgba(255,255,255,0.75);
-    border: 1px solid rgba(255,255,255,0.6);
-  }
-
-  .kpi.ok .kpiIcon{ color: var(--ok); }
-  .kpi.info .kpiIcon{ color: #1d4ed8; }
-  .kpi.warn .kpiIcon{ color: var(--warn); }
-
-  .kpiNum{
-    font-size: 18px;
-    font-weight: 950;
-    color: var(--text);
-    letter-spacing: -0.02em;
-  }
-
-  .kpiLbl{
-    font-size: 12px;
-    font-weight: 900;
-    color: rgba(15,23,42,0.70);
-    margin-top: 2px;
-  }
-
-  .empty-results-state{
-    padding: 14px;
-    border-radius: 14px;
-    border: 1px dashed rgba(15,23,42,0.12);
-    background: rgba(15,23,42,0.03);
-  }
-
-  .empty-results-title{
-    color: var(--text);
-    font-size: 13px;
-    font-weight: 900;
-  }
-
-  .empty-results-subtitle{
-    margin-top: 6px;
-    color: var(--muted);
-    font-size: 12px;
+  .ap-cond-weight-val {
+    font-size: 11px;
     font-weight: 800;
+    color: var(--ap-text);
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: var(--ap-blue-soft);
+    border: 1px solid var(--ap-blue-border);
   }
 
-  .ghostBtn{
-    margin-top: 12px;
+  .ap-range {
     width: 100%;
-    padding: 12px;
-    border-radius: 14px;
-    border: 1px solid var(--border);
-    background: rgba(15,23,42,0.02);
-    color: var(--text);
-    font-weight: 950;
+    accent-color: var(--ap-blue);
+    cursor: pointer;
+    height: 4px;
+  }
+  .ap-range:disabled { cursor: not-allowed; opacity: 0.4; }
+
+  .ap-range-scale {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 3px;
+    font-size: 9.5px;
+    color: var(--ap-muted);
+    font-weight: 700;
+  }
+
+  /* ── Lock Notice ─────────────────────────── */
+  .ap-lock-notice {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 11px 16px;
+    border-top: 1px solid var(--ap-border);
+    color: var(--ap-muted);
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+
+  /* ── Results Card ────────────────────────── */
+  .ap-results-card { display: flex; flex-direction: column; }
+
+  .ap-results-body {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .ap-results-kpis {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .ap-kpi {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 13px;
+    border-radius: var(--ap-radius-sm);
+    border: 1px solid var(--ap-border);
+    background: var(--ap-surface-2);
+  }
+  .ap-kpi-green { background: var(--ap-green-soft); border-color: var(--ap-green-border); }
+  .ap-kpi-blue  { background: var(--ap-blue-soft);  border-color: var(--ap-blue-border); }
+  .ap-kpi-amber { background: var(--ap-amber-soft); border-color: var(--ap-amber-border); }
+
+  .ap-kpi-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: var(--ap-radius-xs);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255,255,255,0.7);
+    border: 1px solid rgba(255,255,255,0.6);
+    flex-shrink: 0;
+  }
+  .ap-kpi-green .ap-kpi-icon { color: var(--ap-green); }
+  .ap-kpi-blue  .ap-kpi-icon { color: var(--ap-blue);  }
+  .ap-kpi-amber .ap-kpi-icon { color: var(--ap-amber); }
+
+  .ap-kpi-val {
+    font-size: 20px;
+    font-weight: 800;
+    color: var(--ap-text);
+    letter-spacing: -0.02em;
+  }
+  .ap-kpi-lbl {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--ap-muted);
+    margin-top: 1px;
+  }
+
+  .ap-results-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--ap-muted);
+    font-weight: 500;
+  }
+
+  .ap-view-results-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 11px;
+    border-radius: var(--ap-radius-sm);
+    border: 1px solid var(--ap-blue-border);
+    background: var(--ap-blue-soft);
+    color: var(--ap-blue);
+    font-size: 13.5px;
+    font-weight: 700;
     cursor: pointer;
     font-family: inherit;
-    transition: 0.18s ease;
+    transition: background 0.14s, border-color 0.14s;
+    width: 100%;
   }
+  .ap-view-results-btn:hover:not(:disabled) { background: rgba(37,99,235,0.13); border-color: rgba(37,99,235,0.28); }
+  .ap-view-results-btn:disabled { opacity: 0.55; cursor: not-allowed; }
 
-  .ghostBtn:hover:not(:disabled){
-    background: rgba(37,99,235,0.06);
-    border-color: rgba(37,99,235,0.18);
-    color: #1d4ed8;
-  }
-
-  .ghostBtn:disabled{
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  .loading-state, .error-state{
-    display:flex;
-    flex-direction:column;
-    align-items:center;
-    justify-content:center;
-    height: 400px;
-    gap: 14px;
-    border-radius: var(--radius);
-    background: var(--card);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow2);
-    max-width: 720px;
-    margin: 0 auto;
-  }
-
-  .loading-state p{
-    margin: 0;
-    color: var(--muted);
-    font-weight: 900;
-  }
-
-  .error-state{
-    color: var(--danger);
-  }
-
-  .error-message{
+  .ap-delete-inline-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 9px;
+    border-radius: var(--ap-radius-sm);
+    border: 1px solid var(--ap-red-border);
+    background: var(--ap-red-soft);
+    color: var(--ap-red);
     font-size: 13px;
-    color: var(--muted);
-    max-width: 520px;
-    text-align:center;
-    margin: -6px 0 0;
-    font-weight: 800;
-  }
-
-  .error-state button{
-    padding: 10px 14px;
-    border-radius: 14px;
-    border: 1px solid rgba(37,99,235,0.18);
-    background: var(--primarySoft);
-    color: #1d4ed8;
-    font-weight: 950;
-    cursor:pointer;
+    font-weight: 700;
+    cursor: pointer;
     font-family: inherit;
+    transition: background 0.14s;
+    width: 100%;
+  }
+  .ap-delete-inline-btn:hover:not(:disabled) { background: rgba(220,38,38,0.14); }
+  .ap-delete-inline-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+  /* ── Empty State ─────────────────────────── */
+  .ap-no-results {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 32px 16px;
+    text-align: center;
   }
 
-  .error-state button:hover{
-    background: rgba(37,99,235,0.14);
+  .ap-no-results-icon {
+    width: 52px;
+    height: 52px;
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--ap-surface-2);
+    border: 1px solid var(--ap-border);
+    color: var(--ap-muted);
   }
 
-  .spin{
-    animation: spin 1s linear infinite;
+  .ap-no-results-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--ap-text);
   }
 
-  @keyframes spin{
-    from{ transform: rotate(0deg);}
-    to{ transform: rotate(360deg);}
+  .ap-no-results-hint {
+    font-size: 12.5px;
+    color: var(--ap-muted);
+    font-weight: 500;
+    line-height: 1.5;
   }
 
-  @media (max-width: 980px){
-    .topbar{
-      flex-direction: column;
-      align-items: flex-start;
-    }
+  .ap-no-students-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 12px;
+    border-radius: 999px;
+    background: var(--ap-green-soft);
+    border: 1px solid var(--ap-green-border);
+    color: var(--ap-green);
+    font-size: 12px;
+    font-weight: 700;
+    margin-top: 4px;
+  }
 
-    .topbarRight{
-      justify-content:flex-start;
-    }
+  /* ── Breakdown ───────────────────────────── */
+  .ap-breakdown-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    padding: 14px 16px;
+  }
 
-    .grid{
+  .ap-breakdown-item {
+    border-radius: var(--ap-radius-xs);
+    border: 1px solid var(--ap-border);
+    background: var(--ap-surface-2);
+    padding: 10px 6px;
+    text-align: center;
+  }
+
+  .ap-breakdown-priority {
+    background: var(--ap-amber-soft);
+    border-color: var(--ap-amber-border);
+  }
+
+  .ap-breakdown-val {
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--ap-text);
+    letter-spacing: -0.02em;
+  }
+  .ap-breakdown-priority .ap-breakdown-val { color: var(--ap-amber); }
+
+  .ap-breakdown-lbl {
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--ap-muted);
+    margin-top: 3px;
+  }
+
+  /* ── Empty hint ──────────────────────────── */
+  .ap-empty-hint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 16px;
+    color: var(--ap-muted);
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  /* ── Toast ───────────────────────────────── */
+  .ap-toast {
+    position: fixed;
+    top: 16px;
+    inset-inline-end: 16px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 12px 16px;
+    border-radius: var(--ap-radius-sm);
+    font-size: 13.5px;
+    font-weight: 700;
+    box-shadow: 0 8px 24px rgba(15,23,42,0.18);
+    z-index: 300;
+    max-width: 380px;
+    animation: ap-toast-in 0.22s ease;
+  }
+
+  @keyframes ap-toast-in {
+    from { transform: translateY(-10px); opacity: 0; }
+    to   { transform: translateY(0);    opacity: 1; }
+  }
+
+  .ap-toast-success { background: linear-gradient(135deg, #10b981, #059669); color: #fff; }
+  .ap-toast-error   { background: linear-gradient(135deg, #ef4444, #dc2626); color: #fff; }
+  .ap-toast-info    { background: linear-gradient(135deg, #3b82f6, #2563eb); color: #fff; }
+  .ap-toast-warning { background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; }
+
+  .ap-toast-icon { flex-shrink: 0; }
+  .ap-toast-msg  { line-height: 1.4; }
+
+  /* ── Confirm Modal ───────────────────────── */
+  .ap-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15,23,42,0.5);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    padding: 16px;
+  }
+
+  .ap-modal-box {
+    background: var(--ap-surface);
+    border-radius: 18px;
+    box-shadow: 0 20px 60px rgba(15,23,42,0.22);
+    padding: 28px;
+    max-width: 420px;
+    width: 100%;
+    animation: ap-modal-in 0.2s ease;
+  }
+
+  @keyframes ap-modal-in {
+    from { transform: scale(0.96) translateY(8px); opacity: 0; }
+    to   { transform: scale(1)    translateY(0);   opacity: 1; }
+  }
+
+  .ap-modal-title {
+    margin: 0 0 10px;
+    font-size: 17px;
+    font-weight: 800;
+    color: var(--ap-text);
+  }
+
+  .ap-modal-body {
+    margin: 0 0 22px;
+    font-size: 13.5px;
+    color: var(--ap-text-2);
+    line-height: 1.55;
+    font-weight: 500;
+  }
+
+  .ap-modal-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+  }
+
+  .ap-modal-cancel {
+    padding: 9px 18px;
+    border-radius: 10px;
+    border: 1px solid var(--ap-border);
+    background: rgba(15,23,42,0.04);
+    color: var(--ap-text);
+    font-size: 13.5px;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.14s;
+  }
+  .ap-modal-cancel:hover { background: rgba(15,23,42,0.08); }
+
+  .ap-modal-confirm {
+    padding: 9px 18px;
+    border-radius: 10px;
+    border: 1px solid rgba(220,38,38,0.28);
+    background: linear-gradient(135deg, #ef4444, #dc2626);
+    color: #fff;
+    font-size: 13.5px;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+    box-shadow: 0 4px 12px rgba(220,38,38,0.25);
+    transition: filter 0.14s;
+  }
+  .ap-modal-confirm:hover { filter: brightness(1.06); }
+
+  /* ── Spin ────────────────────────────────── */
+  .ap-spin {
+    animation: ap-spin 0.9s linear infinite;
+  }
+  @keyframes ap-spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+
+  /* ── Responsive ──────────────────────────── */
+  @media (max-width: 1024px) {
+    .ap-content-grid {
       grid-template-columns: 1fr;
     }
-
-    .breakdown{
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-
-    .inventoryGrid{
-      grid-template-columns: 1fr;
+    .ap-right-col {
+      order: -1;
     }
   }
 
-  @media (max-width: 640px){
-    .hardRulesGrid{
-      grid-template-columns: 1fr;
-    }
+  @media (max-width: 768px) {
+    .ap-page { padding: 12px; }
+    .ap-header-stats { flex-wrap: wrap; }
+    .ap-stat-item { flex: 0 1 calc(50% - 1px); }
+    .ap-conditions-grid { grid-template-columns: 1fr; }
+    .ap-conditions-col:first-child { border-right: none; border-bottom: 1px solid var(--ap-border); }
+    .ap-controls-bar { flex-direction: column; align-items: stretch; }
+    .ap-controls-left, .ap-controls-right { justify-content: stretch; }
+    .ap-controls-left .ap-btn, .ap-controls-right .ap-btn { flex: 1; justify-content: center; }
+    .ap-breakdown-grid { grid-template-columns: repeat(3, 1fr); }
+    .ap-inv-metrics-grid { grid-template-columns: repeat(2, 1fr); }
+  }
 
-    .constraintSection{
-      padding: 12px;
-    }
-
-    .statsRow{
-      grid-template-columns: 1fr;
-    }
-
-    .breakdown,
-    .housingBreakdown{
-      grid-template-columns: 1fr 1fr;
-    }
+  @media (max-width: 480px) {
+    .ap-header-top { flex-direction: column; }
+    .ap-header-meta { justify-content: flex-start; }
+    .ap-stat-item { flex: 1 1 100%; }
+    .ap-stat-divider { display: none; }
+    .ap-breakdown-grid { grid-template-columns: 1fr 1fr; }
+    .ap-inv-quick-stats { display: none; }
   }
 `;
 

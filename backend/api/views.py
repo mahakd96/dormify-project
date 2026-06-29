@@ -1,5 +1,6 @@
 from decimal import Decimal, InvalidOperation
 import re
+import threading
 import traceback
 import pandas as pd
 
@@ -10,7 +11,6 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.exceptions import ValidationError as DRFValidationError
 
-from django.http import HttpResponse
 from django.utils import timezone
 from django.db import transaction
 from django.db.models import Q, Count
@@ -1227,6 +1227,534 @@ def run_allocation(request):
             'error_type': e.__class__.__name__,
             'traceback': traceback.format_exc(),
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# =========================
+# Allocation lifecycle helpers
+# =========================
+
+def _build_assignment_rows_for_run(run):
+    """Build the assignment table rows for a completed allocation run."""
+    active_assignments = BedAssignment.objects.filter(
+        allocation_run=run,
+        status=BedAssignment.Status.ACTIVE,
+    ).select_related(
+        'student',
+        'student__accepted_dorm_type',
+        'bed',
+        'bed__room',
+        'bed__room__apartment',
+        'bed__room__apartment__building',
+        'bed__room__apartment__building__dorm_type',
+        'bed__room__apartment__building__dorm_type__region',
+    ).order_by(
+        'bed__room__apartment__building__number',
+        'bed__room__apartment__number',
+        'bed__room__name',
+        'bed__label',
+    )
+
+    rows = []
+    for assignment in active_assignments:
+        student = assignment.student
+        bed = assignment.bed
+        room = bed.room
+        apartment = room.apartment
+        building = apartment.building
+        dorm_type = building.dorm_type
+        assignment_region = dorm_type.region if dorm_type else None
+
+        rows.append({
+            'student_id': student.student_id,
+            'student_name': student.full_name,
+            'full_name': student.full_name,
+            'first_name': student.first_name,
+            'last_name': student.last_name,
+            'gender': student.gender,
+            'requested_religion': student.requested_religion,
+            'religion': student.requested_religion,
+            'religious': student.religious,
+            'placement_sector': student.placement_sector,
+            'sector': student.placement_sector,
+            'building': building.number,
+            'building_number': building.number,
+            'apartment': apartment.number,
+            'apartment_number': apartment.number,
+            'room': room.name,
+            'room_name': room.name,
+            'bed': bed.label,
+            'bed_label': bed.label,
+            'dorm_type': dorm_type.name if dorm_type else '',
+            'region': assignment_region.name if assignment_region else '',
+            'region_id': assignment_region.id if assignment_region else '',
+            'assignment_type': assignment.assignment_type,
+            'assignment_status': assignment.status,
+            'assigned_at': assignment.assigned_at.isoformat() if assignment.assigned_at else '',
+        })
+    return rows
+
+
+def _cleanup_run_assignments(run_id, mark_status):
+    """
+    Atomically cancel ACTIVE BedAssignments created by this run, restore
+    student records, and set the run to the given terminal status.
+    Returns the count of cancelled assignments.
+    """
+    from django.db import close_old_connections
+    close_old_connections()
+
+    with transaction.atomic():
+        now = timezone.now()
+
+        assignments_qs = BedAssignment.objects.filter(
+            allocation_run_id=run_id,
+            status=BedAssignment.Status.ACTIVE,
+        )
+
+        student_ids = list(assignments_qs.values_list('student_id', flat=True))
+        deleted_count = assignments_qs.count()
+
+        assignments_qs.update(
+            status=BedAssignment.Status.CANCELLED,
+            ended_at=now,
+        )
+
+        if student_ids:
+            Student.objects.filter(id__in=student_ids).update(assigned_room=None)
+
+        AllocationRun.objects.filter(pk=run_id).update(
+            status=mark_status,
+            completed_at=now,
+        )
+
+    return deleted_count
+
+
+def _execute_allocation_background(allocation_run_id, region_id, constraints_config,
+                                    include_assigned, allocation_scope):
+    """
+    Run the allocation solver in a background thread so the HTTP response
+    can return the run_id immediately.  The thread updates AllocationRun
+    status as it progresses and checks for cancellation_requested.
+    """
+    from django.db import close_old_connections, connection as db_conn
+
+    def _run():
+        try:
+            close_old_connections()
+
+            region = Region.objects.get(pk=region_id)
+            current_status = AllocationRun.objects.filter(
+                pk=allocation_run_id
+            ).values_list('status', flat=True).first()
+
+            if current_status == AllocationRun.Status.CANCELLATION_REQUESTED:
+                AllocationRun.objects.filter(pk=allocation_run_id).update(
+                    status=AllocationRun.Status.STOPPED,
+                    completed_at=timezone.now(),
+                )
+                return
+
+            AllocationRun.objects.filter(pk=allocation_run_id).update(
+                status=AllocationRun.Status.RUNNING,
+            )
+
+            student_fields = _get_model_field_names(Student)
+
+            students_base = Student.objects.filter(
+                accepted_dorm_type__region=region
+            ).select_related('accepted_dorm_type', 'accepted_dorm_type__region')
+
+            if 'category' in student_fields:
+                students_base = students_base.exclude(
+                    category=Student.StudentCategory.LEAVING
+                )
+
+            students_total_in_region = students_base.count()
+            students = students_base
+
+            if not include_assigned:
+                if 'assigned_bed' in student_fields:
+                    students = students.filter(assigned_bed__isnull=True)
+                elif 'assigned_room' in student_fields:
+                    students = students.filter(assigned_room__isnull=True)
+
+            if allocation_scope == 'new_transfer_only' and 'category' in student_fields:
+                students = students.filter(
+                    category__in=[
+                        Student.StudentCategory.NEW,
+                        Student.StudentCategory.TRANSFER,
+                    ]
+                )
+
+            rooms = Room.objects.filter(
+                apartment__building__dorm_type__region=region,
+                is_active=True,
+                apartment__is_active=True,
+                apartment__building__is_active=True,
+            ).select_related(
+                'apartment',
+                'apartment__building',
+                'apartment__building__dorm_type',
+            ).prefetch_related('beds')
+
+            students_count = students.count()
+            rooms_count = rooms.count()
+
+            if students_count == 0:
+                AllocationRun.objects.filter(pk=allocation_run_id).update(
+                    status=AllocationRun.Status.COMPLETED,
+                    students_processed=0,
+                    successful_assignments=0,
+                    roommate_matches=0,
+                    conflicts=0,
+                    completed_at=timezone.now(),
+                )
+                return
+
+            if rooms_count == 0:
+                AllocationRun.objects.filter(pk=allocation_run_id).update(
+                    status=AllocationRun.Status.FAILED,
+                    error_message='לא נמצאו חדרים פעילים באזור זה',
+                    completed_at=timezone.now(),
+                )
+                return
+
+            from allocation.solver import run_improved_ortools_allocation
+            close_old_connections()
+
+            result = run_improved_ortools_allocation(
+                students=students,
+                rooms=rooms,
+                constraints_config=constraints_config,
+                allocation_run_id=allocation_run_id,
+            ) or {}
+
+            # Check for cancellation after solver completes
+            post_status = AllocationRun.objects.filter(
+                pk=allocation_run_id
+            ).values_list('status', flat=True).first()
+
+            if post_status == AllocationRun.Status.CANCELLATION_REQUESTED:
+                _cleanup_run_assignments(
+                    allocation_run_id,
+                    mark_status=AllocationRun.Status.STOPPED,
+                )
+                return
+
+            roommate_matches = result.get('roommate_matches')
+            if roommate_matches is None:
+                roommate_matches = (
+                    result.get('mutual_roommate_matches', 0)
+                    + result.get('one_sided_roommate_matches', 0)
+                )
+
+            AllocationRun.objects.filter(pk=allocation_run_id).update(
+                status=AllocationRun.Status.COMPLETED,
+                students_processed=result.get('students_processed', students_count),
+                successful_assignments=result.get('successful_assignments', 0),
+                roommate_matches=roommate_matches,
+                conflicts=result.get('conflicts', 0),
+                completed_at=timezone.now(),
+            )
+
+            print(
+                f">>> ASYNC_ALLOCATION_DONE run_id={allocation_run_id} "
+                f"assignments={result.get('successful_assignments', 0)}",
+                flush=True,
+            )
+
+        except Exception as exc:
+            traceback.print_exc()
+            try:
+                AllocationRun.objects.filter(pk=allocation_run_id).update(
+                    status=AllocationRun.Status.FAILED,
+                    error_message=str(exc)[:5000],
+                    completed_at=timezone.now(),
+                )
+            except Exception:
+                traceback.print_exc()
+        finally:
+            try:
+                db_conn.close()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+
+# =========================
+# New async allocation views
+# =========================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def start_allocation_run(request):
+    """
+    Async allocation start.  Creates AllocationRun immediately (202) and
+    runs the solver in a background thread.  The caller polls
+    GET /api/allocation/runs/<run_id>/ for status and results.
+    """
+    refresh_db_connection()
+
+    if not (request.user.is_boss or request.user.is_central_admin):
+        return Response(
+            {'error': 'רק מנהל אזור או מנהל מרכזי יכולים להריץ שיבוץ'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    region_value = (
+        request.data.get('region')
+        or request.data.get('region_id')
+        or request.data.get('region_name')
+    )
+
+    if not region_value:
+        if request.user.is_central_admin:
+            return Response({'error': 'נדרש לבחור אזור'}, status=status.HTTP_400_BAD_REQUEST)
+        if not request.user.region:
+            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+        region = request.user.region
+    else:
+        region = _resolve_region(region_value)
+        if not region:
+            return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not request.user.is_central_admin:
+        if not request.user.region or request.user.region != region:
+            return Response(
+                {'error': 'אין הרשאה להריץ שיבוץ עבור אזור זה'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+    constraints_config = normalize_allocation_constraints(request.data.get('constraints'))
+    include_assigned = request.data.get('include_assigned') is True
+    allocation_scope = request.data.get('allocation_scope')
+
+    with transaction.atomic():
+        Region.objects.select_for_update().get(pk=region.pk)
+
+        active_run = AllocationRun.objects.filter(
+            region=region,
+            status__in=[
+                AllocationRun.Status.QUEUED,
+                AllocationRun.Status.RUNNING,
+                AllocationRun.Status.CANCELLATION_REQUESTED,
+            ],
+        ).order_by('-started_at').first()
+
+        if active_run is not None:
+            return Response({
+                'success': False,
+                'error': 'כבר רץ שיבוץ עבור אזור זה. נא להמתין לסיום ההרצה הקיימת.',
+                'error_code': 'ALLOCATION_ALREADY_RUNNING',
+                'region': region.id,
+                'run_id': active_run.id,
+                'run': AllocationRunSerializer(active_run).data,
+            }, status=status.HTTP_409_CONFLICT)
+
+        allocation_run = AllocationRun.objects.create(
+            region=region,
+            run_by=request.user,
+            status=AllocationRun.Status.QUEUED,
+        )
+
+    print(
+        f">>> ASYNC_ALLOCATION_START run_id={allocation_run.id} "
+        f"region={region.id} user={request.user.email}",
+        flush=True,
+    )
+
+    _execute_allocation_background(
+        allocation_run_id=allocation_run.id,
+        region_id=region.id,
+        constraints_config=constraints_config,
+        include_assigned=include_assigned,
+        allocation_scope=allocation_scope,
+    )
+
+    return Response({
+        'success': True,
+        'message': 'השיבוץ החל. עקבו אחר ההתקדמות.',
+        'run_id': allocation_run.id,
+        'run': AllocationRunSerializer(allocation_run).data,
+    }, status=status.HTTP_202_ACCEPTED)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_allocation_run_detail(request, run_id):
+    """
+    Return the current status of an allocation run plus assignment rows
+    once the run is COMPLETED.
+    """
+    try:
+        run = AllocationRun.objects.select_related('region', 'run_by').get(pk=run_id)
+    except AllocationRun.DoesNotExist:
+        return Response({'error': 'הרצה לא נמצאה'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not request.user.is_central_admin:
+        if request.user.region != run.region:
+            return Response({'error': 'אין גישה להרצה זו'}, status=status.HTTP_403_FORBIDDEN)
+
+    run_data = AllocationRunSerializer(run).data
+
+    assignment_rows = []
+    if run.status == AllocationRun.Status.COMPLETED:
+        refresh_db_connection()
+        assignment_rows = _build_assignment_rows_for_run(run)
+
+    return Response({
+        'run': run_data,
+        'assignments': assignment_rows,
+        'successful_assignments': run.successful_assignments,
+        'roommate_matches': run.roommate_matches,
+        'conflicts': run.conflicts,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def stop_allocation_run(request, run_id):
+    """
+    Request cancellation of an in-progress allocation run.
+    Idempotent: safe to call more than once.
+    """
+    if not (request.user.is_boss or request.user.is_central_admin):
+        return Response({'error': 'אין הרשאה לעצור שיבוץ'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        with transaction.atomic():
+            run = AllocationRun.objects.select_for_update().get(pk=run_id)
+
+            if not request.user.is_central_admin:
+                if request.user.region != run.region:
+                    return Response(
+                        {'error': 'אין הרשאה לעצור הרצה זו'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
+            terminal = {
+                AllocationRun.Status.STOPPED,
+                AllocationRun.Status.COMPLETED,
+                AllocationRun.Status.FAILED,
+                AllocationRun.Status.DELETED,
+                AllocationRun.Status.APPROVED,
+            }
+
+            if run.status in terminal:
+                return Response({
+                    'error': 'הרצה זו כבר הסתיימה',
+                    'status': run.status,
+                }, status=status.HTTP_409_CONFLICT)
+
+            if run.status == AllocationRun.Status.CANCELLATION_REQUESTED:
+                return Response({
+                    'message': 'בקשת עצירה כבר נשלחה',
+                    'run_id': run_id,
+                    'status': run.status,
+                }, status=status.HTTP_200_OK)
+
+            AllocationRun.objects.filter(pk=run_id).update(
+                status=AllocationRun.Status.CANCELLATION_REQUESTED,
+            )
+
+    except AllocationRun.DoesNotExist:
+        return Response({'error': 'הרצה לא נמצאה'}, status=status.HTTP_404_NOT_FOUND)
+
+    return Response({
+        'message': 'בקשת עצירה נשלחה. ניקוי נתונים יתבצע בסיום הסולבר.',
+        'run_id': run_id,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_allocation_run(request, run_id):
+    """
+    Delete the draft results of a COMPLETED (not APPROVED) allocation run.
+    Cancels all BedAssignments created by that run and restores students.
+    Returns 409 if the run is already approved.
+    """
+    if not (request.user.is_boss or request.user.is_central_admin):
+        return Response({'error': 'אין הרשאה למחוק תוצאות שיבוץ'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        run = AllocationRun.objects.select_related('region').get(pk=run_id)
+    except AllocationRun.DoesNotExist:
+        return Response({'error': 'הרצה לא נמצאה'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not request.user.is_central_admin:
+        if request.user.region != run.region:
+            return Response({'error': 'אין הרשאה למחוק הרצה זו'}, status=status.HTTP_403_FORBIDDEN)
+
+    if run.status == AllocationRun.Status.APPROVED:
+        return Response(
+            {'error': 'לא ניתן למחוק הקצאה שאושרה סופית'},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    if run.status != AllocationRun.Status.COMPLETED:
+        return Response({
+            'error': f'לא ניתן למחוק הרצה עם סטטוס: {run.status}',
+            'status': run.status,
+        }, status=status.HTTP_409_CONFLICT)
+
+    deleted_count = _cleanup_run_assignments(
+        run_id,
+        mark_status=AllocationRun.Status.DELETED,
+    )
+
+    return Response({
+        'message': 'תוצאות השיבוץ נמחקו בהצלחה',
+        'run_id': run_id,
+        'deleted_assignments': deleted_count,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_active_allocation_run(request):
+    """
+    Return the most recent QUEUED/RUNNING/CANCELLATION_REQUESTED/COMPLETED
+    AllocationRun for the user's region (or a supplied ?region=<id> param).
+    Used by the frontend on page load to recover UI state.
+    """
+    region_value = request.query_params.get('region')
+
+    if region_value:
+        region = _resolve_region(region_value)
+        if not region:
+            return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+    elif request.user.is_central_admin:
+        return Response({'run': None}, status=status.HTTP_200_OK)
+    elif request.user.region:
+        region = request.user.region
+    else:
+        return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+
+    recoverable_statuses = [
+        AllocationRun.Status.QUEUED,
+        AllocationRun.Status.RUNNING,
+        AllocationRun.Status.CANCELLATION_REQUESTED,
+        AllocationRun.Status.COMPLETED,
+    ]
+
+    run = AllocationRun.objects.filter(
+        region=region,
+        status__in=recoverable_statuses,
+    ).order_by('-started_at').first()
+
+    if not run:
+        return Response({'run': None}, status=status.HTTP_200_OK)
+
+    return Response(
+        {'run': AllocationRunSerializer(run).data},
+        status=status.HTTP_200_OK,
+    )
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def allocation_history(request):
@@ -4911,93 +5439,282 @@ def swap_students_rooms(request):
 
 
 # =========================
-# Reports
+# Allocation Status Endpoint
 # =========================
 
-def _excel_response(buffer, filename):
-    response = HttpResponse(
-        buffer.getvalue(),
-        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def allocation_status(request):
+    """
+    Returns the current allocation status for the user's region:
+    the most recent run (any status) plus active counts.
+    """
+    user = request.user
+    region_value = request.query_params.get('region')
+
+    if region_value:
+        region = _resolve_region(region_value)
+        if not region:
+            return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+    elif user.is_central_admin:
+        return Response({
+            'status': 'not_started',
+            'run': None,
+            'region': None,
+        }, status=status.HTTP_200_OK)
+    elif user.region:
+        region = user.region
+    else:
+        return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+
+    active_statuses = [
+        AllocationRun.Status.QUEUED,
+        AllocationRun.Status.RUNNING,
+        AllocationRun.Status.CANCELLATION_REQUESTED,
+    ]
+
+    active_run = AllocationRun.objects.filter(
+        region=region,
+        status__in=active_statuses,
+    ).order_by('-started_at').first()
+
+    if active_run:
+        return Response({
+            'status': active_run.status,
+            'run': AllocationRunSerializer(active_run).data,
+            'region': RegionSerializer(region).data,
+        }, status=status.HTTP_200_OK)
+
+    latest_run = AllocationRun.objects.filter(
+        region=region,
+    ).order_by('-started_at').first()
+
+    if not latest_run:
+        return Response({
+            'status': 'not_started',
+            'run': None,
+            'region': RegionSerializer(region).data,
+        }, status=status.HTTP_200_OK)
+
+    return Response({
+        'status': latest_run.status,
+        'run': AllocationRunSerializer(latest_run).data,
+        'region': RegionSerializer(region).data,
+    }, status=status.HTTP_200_OK)
+
+
+# =========================
+# Inventory by Housing Type
+# =========================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def inventory_by_housing_type(request):
+    """
+    Returns detailed inventory breakdown per housing type (DormType),
+    including building-level details.
+    """
+    user = request.user
+    region_value = request.query_params.get('region')
+
+    if region_value:
+        region = _resolve_region(region_value)
+        if not region:
+            return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+    elif user.is_central_admin:
+        region = None
+    elif user.region:
+        region = user.region
+    else:
+        return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+
+    dorm_types_qs = DormType.objects.prefetch_related(
+        'buildings',
+        'buildings__apartments',
+        'buildings__apartments__rooms',
+        'buildings__apartments__rooms__beds',
+    ).order_by('code', 'name')
+
+    if region:
+        dorm_types_qs = dorm_types_qs.filter(region=region)
+
+    active_assignment_bed_ids = set(
+        BedAssignment.objects.filter(
+            status=BedAssignment.Status.ACTIVE
+        ).values_list('bed_id', flat=True)
     )
-    response['Content-Disposition'] = f'attachment; filename="{filename}"'
-    return response
+
+    result = []
+
+    for dorm_type in dorm_types_qs:
+        buildings_data = []
+        dt_total_beds = 0
+        dt_occupied_beds = 0
+        dt_available_beds = 0
+        dt_total_rooms = 0
+        dt_total_apts = 0
+        dt_buildings = 0
+
+        for building in dorm_type.buildings.all():
+            if not building.is_active:
+                continue
+
+            b_total_beds = 0
+            b_occupied = 0
+            b_total_rooms = 0
+            b_active_apts = 0
+
+            for apartment in building.apartments.all():
+                if not apartment.is_active:
+                    continue
+
+                b_active_apts += 1
+
+                for room in apartment.rooms.all():
+                    if not room.is_active:
+                        continue
+
+                    b_total_rooms += 1
+                    room_beds = list(room.beds.all())
+                    b_total_beds += len(room_beds)
+
+                    for bed in room_beds:
+                        if bed.id in active_assignment_bed_ids:
+                            b_occupied += 1
+
+            b_available = max(b_total_beds - b_occupied, 0)
+            b_occupancy = round((b_occupied / b_total_beds) * 100, 1) if b_total_beds > 0 else 0
+
+            dt_buildings += 1
+            dt_total_apts += b_active_apts
+            dt_total_rooms += b_total_rooms
+            dt_total_beds += b_total_beds
+            dt_occupied_beds += b_occupied
+            dt_available_beds += b_available
+
+            buildings_data.append({
+                'id': building.id,
+                'number': building.number,
+                'is_active': building.is_active,
+                'total_beds': b_total_beds,
+                'occupied_beds': b_occupied,
+                'available_beds': b_available,
+                'total_rooms': b_total_rooms,
+                'apartments': b_active_apts,
+                'occupancy_pct': b_occupancy,
+            })
+
+        dt_occupancy = round(
+            (dt_occupied_beds / dt_total_beds) * 100, 1
+        ) if dt_total_beds > 0 else 0
+
+        result.append({
+            'id': dorm_type.id,
+            'code': dorm_type.code,
+            'name': dorm_type.name,
+            'buildings_count': dt_buildings,
+            'apartments': dt_total_apts,
+            'rooms': dt_total_rooms,
+            'total_beds': dt_total_beds,
+            'occupied_beds': dt_occupied_beds,
+            'available_beds': dt_available_beds,
+            'temporarily_unavailable_beds': 0,
+            'occupancy_pct': dt_occupancy,
+            'buildings': buildings_data,
+        })
+
+    return Response({
+        'region': RegionSerializer(region).data if region else None,
+        'inventory': result,
+    }, status=status.HTTP_200_OK)
 
 
-@api_view(['GET'])
+# =========================
+# Allocation Conditions
+# =========================
+
+# In-memory store for conditions per region (production would use DB/cache).
+# This is a simple approach; for persistence across restarts use a dedicated model.
+_CONDITIONS_STORE = {}
+
+DEFAULT_CONDITIONS = {
+    'sameGender':              {'enabled': True,  'strict': True,  'critical': True,  'weight': 0},
+    'priorityFirst':           {'enabled': True,  'strict': True,  'critical': True,  'weight': 0},
+    'roommatePositiveOnly':    {'enabled': True,  'strict': True,  'critical': True,  'weight': 0},
+    'ReligiousTogether':       {'enabled': True,  'strict': True,  'critical': True,  'weight': 0},
+    'sameReligion':            {'enabled': True,  'strict': False, 'critical': False, 'weight': 6},
+    'roommateMatch':           {'enabled': True,  'strict': False, 'critical': False, 'weight': 8},
+    'sectorMatching':          {'enabled': True,  'strict': False, 'critical': False, 'weight': 7},
+    'avoidYearMix_1_with_3_4': {'enabled': True,  'strict': False, 'critical': False, 'weight': 4},
+    'avoidAtudaimWithHasmaha': {'enabled': True,  'strict': False, 'critical': False, 'weight': 4},
+}
+
+
+@api_view(['GET', 'PUT'])
 @permission_classes([IsAuthenticated])
-def dormify_report(request):
-    from .report_exports import generate_dormify_report
-    try:
-        buffer = generate_dormify_report()
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    today = timezone.now().strftime('%Y-%m-%d')
-    return _excel_response(buffer, f'Dormify_Report_{today}.xlsx')
+def allocation_conditions(request):
+    """
+    GET  /api/allocation/conditions/ — return saved conditions for the region.
+    PUT  /api/allocation/conditions/ — update and persist conditions.
+    """
+    user = request.user
 
+    region_value = (
+        request.query_params.get('region')
+        or (request.data.get('region') if request.method == 'PUT' else None)
+    )
 
-def _resolve_region(request):
-    """Return (region_id, region_name) from ?region_id= query param, or (None, None)."""
-    region_id = request.query_params.get('region_id') or None
-    if not region_id:
-        return None, None
-    try:
-        region_obj = Region.objects.get(pk=region_id)
-        return region_id, region_obj.name
-    except Region.DoesNotExist:
-        return region_id, None
+    if region_value:
+        region = _resolve_region(region_value)
+        if not region:
+            return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        region_key = str(region.id)
+    elif not user.is_central_admin and user.region:
+        region = user.region
+        region_key = str(region.id)
+    else:
+        region = None
+        region_key = '__global__'
 
+    if request.method == 'GET':
+        saved = _CONDITIONS_STORE.get(region_key, DEFAULT_CONDITIONS.copy())
+        return Response({
+            'region': RegionSerializer(region).data if region else None,
+            'conditions': saved,
+        }, status=status.HTTP_200_OK)
 
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def student_allocation_report(request):
-    # Legacy endpoint kept for backward compatibility — delegates to student actions generator.
-    from .report_exports import generate_student_actions_report
-    try:
-        buffer = generate_student_actions_report()
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    today = timezone.now().strftime('%Y-%m-%d')
-    return _excel_response(buffer, f'Dormify_Student_Allocation_Report_{today}.xlsx')
+    # PUT
+    if not (user.is_boss or user.is_central_admin):
+        return Response(
+            {'error': 'אין הרשאה לשנות תנאי שיבוץ'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
+    incoming = request.data.get('conditions')
+    if not isinstance(incoming, dict):
+        return Response(
+            {'error': 'conditions must be a JSON object'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def student_actions_report(request):
-    from .report_exports import generate_student_actions_report
-    region_id, region_name = _resolve_region(request)
-    try:
-        buffer = generate_student_actions_report(region_id=region_id, region_name=region_name)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    today      = timezone.now().strftime('%Y-%m-%d')
-    file_part  = region_id or 'All_Regions'
-    return _excel_response(buffer, f'Dormify_Student_Actions_Report_{file_part}_{today}.xlsx')
+    validated = {}
+    for key, value in incoming.items():
+        if not isinstance(value, dict):
+            continue
+        is_critical = DEFAULT_CONDITIONS.get(key, {}).get('critical', False)
+        validated[key] = {
+            'enabled': True if is_critical else bool(value.get('enabled', True)),
+            'strict': bool(value.get('strict', is_critical)),
+            'critical': is_critical,
+            'weight': 0 if is_critical else max(0, min(10, int(value.get('weight', 5)))),
+        }
 
+    _CONDITIONS_STORE[region_key] = validated
 
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def capacity_report(request):
-    from .report_exports import generate_capacity_report
-    region_id, region_name = _resolve_region(request)
-    try:
-        buffer = generate_capacity_report(region_id=region_id, region_name=region_name)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    today     = timezone.now().strftime('%Y-%m-%d')
-    file_part = region_id or 'All_Regions'
-    return _excel_response(buffer, f'Dormify_Capacity_Report_{file_part}_{today}.xlsx')
+    return Response({
+        'message': 'Conditions updated successfully',
+        'region': RegionSerializer(region).data if region else None,
+        'conditions': validated,
+    }, status=status.HTTP_200_OK)
 
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def manual_review_report(request):
-    from .report_exports import generate_manual_review_report
-    region_id, region_name = _resolve_region(request)
-    try:
-        buffer = generate_manual_review_report(region_id=region_id, region_name=region_name)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    today     = timezone.now().strftime('%Y-%m-%d')
-    file_part = region_id or 'All_Regions'
-    return _excel_response(buffer, f'Dormify_Manual_Review_Report_{file_part}_{today}.xlsx')
 

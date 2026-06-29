@@ -597,6 +597,13 @@ class BedAssignment(models.Model):
         blank=True,
         related_name='created_bed_assignments'
     )
+    allocation_run = models.ForeignKey(
+        'AllocationRun',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bed_assignments',
+    )
     assigned_at = models.DateTimeField(auto_now_add=True)
     ended_at = models.DateTimeField(null=True, blank=True)
 
@@ -832,9 +839,14 @@ class Transfer(models.Model):
 # ===========================================
 class AllocationRun(models.Model):
     class Status(models.TextChoices):
+        QUEUED = 'queued', _('בתור')
         RUNNING = 'running', _('רץ')
+        CANCELLATION_REQUESTED = 'cancellation_requested', _('מבוקשת עצירה')
+        STOPPED = 'stopped', _('עצר')
         COMPLETED = 'completed', _('הושלם')
         FAILED = 'failed', _('נכשל')
+        DELETED = 'deleted', _('נמחק')
+        APPROVED = 'approved', _('אושר')
 
     region = models.ForeignKey(
         Region,
@@ -849,9 +861,9 @@ class AllocationRun(models.Model):
         related_name='allocation_runs'
     )
     status = models.CharField(
-        max_length=20,
+        max_length=30,
         choices=Status.choices,
-        default=Status.RUNNING
+        default=Status.QUEUED
     )
 
     students_processed = models.PositiveIntegerField(default=0)
@@ -872,23 +884,33 @@ class AllocationRun(models.Model):
     def __str__(self):
         return f"שיבוץ {self.region} - {self.started_at.strftime('%Y-%m-%d %H:%M')}"
     def clean(self):
-        if self.status == self.Status.RUNNING:
-            if self.completed_at is not None:
-                raise ValidationError('Running allocation cannot have completed_at.')
-            if self.error_message:
-                raise ValidationError('Running allocation cannot have error_message.')
+        in_progress = {
+            self.Status.QUEUED,
+            self.Status.RUNNING,
+            self.Status.CANCELLATION_REQUESTED,
+        }
 
-        if self.status == self.Status.COMPLETED:
+        if self.status in in_progress:
+            if self.completed_at is not None:
+                raise ValidationError(f'{self.status} allocation cannot have completed_at.')
+            if self.error_message:
+                raise ValidationError(f'{self.status} allocation cannot have error_message.')
+
+        elif self.status == self.Status.COMPLETED:
             if self.completed_at is None:
                 raise ValidationError('Completed allocation must have completed_at.')
             if self.error_message:
                 raise ValidationError('Completed allocation should not have error_message.')
 
-        if self.status == self.Status.FAILED:
+        elif self.status == self.Status.FAILED:
             if self.completed_at is None:
                 raise ValidationError('Failed allocation must have completed_at.')
             if not self.error_message:
                 raise ValidationError('Failed allocation should include error_message.')
+
+        elif self.status in {self.Status.STOPPED, self.Status.DELETED, self.Status.APPROVED}:
+            if self.completed_at is None:
+                raise ValidationError(f'{self.status} allocation must have completed_at.')
 
     def save(self, *args, **kwargs):
         self.full_clean()
