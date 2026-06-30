@@ -1,0 +1,67 @@
+{
+  "case_name": "case_16_no_access_mutual_roommate_vs_hard_gender",
+  "description": "Checks that hard gender policy overrides even a mutual roommate request. N16-S01 and N16-S09 request each other but have different genders. No accessibility involved.",
+  "constraints_config": {
+    "priorityFirst": {
+      "enabled": false,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "roommateMatch": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 9
+    },
+    "roommatePositiveOnly": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 10
+    },
+    "sameReligion": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "sectorMatching": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "ReligiousTogether": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 10
+    },
+    "avoidYearMix_1_with_3_4": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 8
+    },
+    "avoidAtudaimWithHasmaha": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 5
+    }
+  },
+  "expected_result": [
+    "successful_assignments should be 16.",
+    "N16-S01 and N16-S09 should NOT be placed in the same apartment.",
+    "There should be no gender violation.",
+    "mutual_roommate_matches should not count this cross-gender pair as matched.",
+    "No accessibility-related no_feasible warning should appear."
+  ],
+  "checklist": [
+    "Check successful_assignments == 16.",
+    "Check N16-S01 apartment != N16-S09 apartment.",
+    "Check gender violations == [].",
+    "Check students_with_no_feasible_beds == []."
+  ]
+}

@@ -134,6 +134,44 @@ export const authAPI = {
   },
 };
 
+export const settingsAPI = {
+  changePassword: async (payload) => {
+    try {
+      const body = {
+        current_password:
+          payload.current_password ?? payload.currentPassword,
+        new_password:
+          payload.new_password ?? payload.newPassword,
+        confirm_password:
+          payload.confirm_password ?? payload.confirmPassword,
+      };
+
+      const { data } = await api.put("/api/auth/change-password/", body);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to change password"));
+    }
+  },
+
+  changeEmail: async (payload) => {
+    try {
+      const body = {
+        current_email:
+          payload.current_email ?? payload.currentEmail,
+        new_email:
+          payload.new_email ?? payload.newEmail,
+        confirm_email:
+          payload.confirm_email ?? payload.confirmEmail,
+      };
+
+      const { data } = await api.put("/api/auth/change-email/", body);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to change email"));
+    }
+  },
+};
+
 export const allocationAPI = {
   getSummary: async () => {
     try {
@@ -167,13 +205,24 @@ export const allocationAPI = {
     }
   },
 
+  getResults: async (regionId = null) => {
+    try {
+      const { data } = await api.get("/api/allocation/results/", {
+        params: regionId ? { region: regionId } : {},
+      });
+
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load allocation results"));
+    }
+  },
+
   results: async (regionId = null) => {
     try {
-      const url = regionId
-        ? `/api/allocation/results/?region=${regionId}`
-        : "/api/allocation/results/";
+      const { data } = await api.get("/api/allocation/results/", {
+        params: regionId ? { region: regionId } : {},
+      });
 
-      const { data } = await api.get(url);
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to load allocation results"));
@@ -222,8 +271,6 @@ export const inboxAPI = {
 };
 
 export const uploadAPI = {
-  // Main Excel upload:
-  // עוזבים / מעברים / נכנסים חדשים / נשארים
   uploadExcel: async (file) => {
     try {
       const form = new FormData();
@@ -241,8 +288,6 @@ export const uploadAPI = {
     }
   },
 
-  // Additions Excel upload:
-  // מתווספים
   uploadAdditionsExcel: async (file) => {
     try {
       const form = new FormData();
@@ -280,7 +325,6 @@ export const studentsAPI = {
     }
   },
 };
-
 
 export const analysisAPI = {
   getData: async () => {
@@ -324,6 +368,7 @@ export const transfersAPI = {
     }
   },
 };
+
 export const apartmentsAPI = {
   getAll: async () => {
     try {
@@ -345,6 +390,7 @@ export const roomsAPI = {
     }
   },
 };
+
 export const whatIfAPI = {
   simulateBuildingInactivation: async (buildingIds) => {
     try {
@@ -384,7 +430,8 @@ export const whatIfAPI = {
       );
     }
   },
-    simulateAvailabilityChange: async ({
+
+  simulateAvailabilityChange: async ({
     targetType,
     targetIds,
     action = "inactivate",
@@ -425,8 +472,8 @@ export const whatIfAPI = {
       );
     }
   },
-
 };
+
 export const debugAuthAPI = {
   getAccessToken,
   getRefreshToken,

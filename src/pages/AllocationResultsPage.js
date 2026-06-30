@@ -1,62 +1,131 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { allocationAPI } from '../services/api';
 import {
-  CheckCircle2,
   AlertTriangle,
   Users,
-  BedDouble,
   ArrowRight,
   Clock3,
   MapPin,
-  SlidersHorizontal,
-  ShieldCheck,
   Info,
   Sparkles,
 } from 'lucide-react';
+
+const getValue = (item, keys) => {
+  for (const key of keys) {
+    if (item?.[key] !== undefined && item?.[key] !== null && item?.[key] !== '') {
+      return item[key];
+    }
+  }
+  return '';
+};
+
+const extractNumber = (value) => {
+  if (value === undefined || value === null) return 0;
+
+  const match = String(value).match(/\d+/);
+  return match ? parseInt(match[0], 10) : 0;
+};
+
+const getBuilding = (item) =>
+  getValue(item, ['building_number', 'building_name', 'building']);
+
+const getApartment = (item) =>
+  getValue(item, ['apartment_number', 'apartment']);
+
+const getRoom = (item) =>
+  getValue(item, ['room_number', 'room_name', 'room']);
+
+const getBed = (item) =>
+  getValue(item, ['bed_number', 'bed_label', 'bed']);
+
+const sortAssignmentsByLocation = (assignments) => {
+  return [...assignments].sort((a, b) => {
+    const buildingCompare =
+      extractNumber(getBuilding(a)) - extractNumber(getBuilding(b));
+
+    if (buildingCompare !== 0) return buildingCompare;
+
+    const apartmentCompare =
+      extractNumber(getApartment(a)) - extractNumber(getApartment(b));
+
+    if (apartmentCompare !== 0) return apartmentCompare;
+
+    const roomCompare =
+      extractNumber(getRoom(a)) - extractNumber(getRoom(b));
+
+    if (roomCompare !== 0) return roomCompare;
+
+    const bedCompare =
+      extractNumber(getBed(a)) - extractNumber(getBed(b));
+
+    if (bedCompare !== 0) return bedCompare;
+
+    return String(getBuilding(a)).localeCompare(String(getBuilding(b)), 'he', {
+      numeric: true,
+    });
+  });
+};
+
+const groupAssignmentsByBuilding = (assignments) => {
+  const sortedAssignments = sortAssignmentsByLocation(assignments);
+
+  return sortedAssignments.reduce((groups, item) => {
+    const building = getBuilding(item) || 'ללא בניין';
+
+    if (!groups[building]) {
+      groups[building] = [];
+    }
+
+    groups[building].push(item);
+    return groups;
+  }, {});
+};
 
 function AllocationResultsPage({ language = 'he' }) {
   const location = useLocation();
   const navigate = useNavigate();
 
   const {
-    result = null,
+    result: routeResult = null,
     summary = null,
-    constraints = {},
     region = null,
     generatedAt = null,
   } = location.state || {};
+
+  const [serverResult, setServerResult] = useState(
+    routeResult || {
+      assignments: [],
+      successful_assignments: 0,
+      roommate_matches: 0,
+      conflicts: 0,
+    }
+  );
+
+  const [resultsLoading, setResultsLoading] = useState(true);
+  const [resultsError, setResultsError] = useState(null);
+
+  const result = serverResult || {
+    assignments: [],
+    successful_assignments: 0,
+    roommate_matches: 0,
+    conflicts: 0,
+  };
 
   const t = useMemo(
     () =>
       ({
         he: {
           title: 'תוצאות השיבוץ',
-          subtitle: 'פירוט מלא של תוצאות הרצת האלגוריתם',
-          noDataTitle: 'אין נתוני תוצאות להצגה',
-          noDataText: 'נראה שהדף נפתח בלי נתוני שיבוץ. אפשר לחזור לעמוד השיבוץ ולהריץ שוב או לפתוח תוצאות מיד אחרי ההרצה.',
+          subtitle: 'תוצאות השיבוץ השמורות במערכת לפי אזור המשתמש',
           backToAllocation: 'חזרה לעמוד השיבוץ',
           region: 'אזור',
           generatedAt: 'זמן יצירה',
           assigned: 'שובצו בהצלחה',
           roommateMatches: 'התאמות שותפים',
           conflicts: 'התנגשויות',
-          studentsToAssign: 'סטודנטים לשיבוץ',
-          availableBeds: 'מיטות פנויות',
-          assignedStudents: 'סטודנטים ששובצו',
-          totalStudents: 'סה״כ סטודנטים',
-          occupancyRate: 'שיעור תפוסה',
-          activeConstraints: 'אילוצים פעילים',
-          systemSummary: 'תקציר מערכת',
-          runHighlights: 'תובנות מהריצה',
-          enabled: 'פעיל',
-          disabled: 'כבוי',
-          strict: 'חובה',
-          flexible: 'גמיש',
-          critical: 'קריטי',
-          weight: 'משקל',
-          yes: 'כן',
-          no: 'לא',
-          noAssignmentsTable: 'לא התקבלה טבלת שיבוצים מפורטת מהשרת.',
+          runHighlights: 'תוצאות מהמערכת',
+          noAssignmentsTable: 'אין תוצאות להצגה',
           assignmentsTitle: 'שיבוצים מפורטים',
           student: 'סטודנט',
           studentId: 'מספר סטודנט',
@@ -65,38 +134,22 @@ function AllocationResultsPage({ language = 'he' }) {
           apartment: 'דירה',
           building: 'בניין',
           status: 'סטטוס',
-          successMessage: 'ההרצה הושלמה והנתונים הבסיסיים זמינים להצגה.',
-          cautionMessage: 'כדי להציג טבלת שיבוצים מלאה, השרת צריך להחזיר גם רשימת assignments בתוך result.',
-          summaryBoxTitle: 'תמונת מצב',
+          loadingResults: 'טוען תוצאות...',
+          errorLoadingResults: 'שגיאה בטעינת תוצאות השיבוץ',
+          assignmentsCount: 'שיבוצים',
+          buildingStart: 'תחילת נתונים עבור',
         },
         en: {
           title: 'Allocation Results',
-          subtitle: 'Full details of the algorithm run results',
-          noDataTitle: 'No result data to display',
-          noDataText: 'It looks like this page was opened without allocation data. You can go back to the allocation page and run again, or open results right after a run.',
+          subtitle: 'Saved allocation results according to the user region',
           backToAllocation: 'Back to Allocation',
           region: 'Region',
           generatedAt: 'Generated At',
           assigned: 'Successfully Assigned',
           roommateMatches: 'Roommate Matches',
           conflicts: 'Conflicts',
-          studentsToAssign: 'Students To Assign',
-          availableBeds: 'Available Beds',
-          assignedStudents: 'Assigned Students',
-          totalStudents: 'Total Students',
-          occupancyRate: 'Occupancy Rate',
-          activeConstraints: 'Active Constraints',
-          systemSummary: 'System Summary',
-          runHighlights: 'Run Highlights',
-          enabled: 'Enabled',
-          disabled: 'Disabled',
-          strict: 'Strict',
-          flexible: 'Flexible',
-          critical: 'Critical',
-          weight: 'Weight',
-          yes: 'Yes',
-          no: 'No',
-          noAssignmentsTable: 'No detailed assignments table was returned from the server.',
+          runHighlights: 'System Results',
+          noAssignmentsTable: 'No results to display.',
           assignmentsTitle: 'Detailed Assignments',
           student: 'Student',
           studentId: 'Student ID',
@@ -105,38 +158,22 @@ function AllocationResultsPage({ language = 'he' }) {
           apartment: 'Apartment',
           building: 'Building',
           status: 'Status',
-          successMessage: 'The run completed and the main metrics are available.',
-          cautionMessage: 'To display a full assignments table, the backend should also return an assignments list inside result.',
-          summaryBoxTitle: 'Overview',
+          loadingResults: 'Loading results...',
+          errorLoadingResults: 'Error loading allocation results',
+          assignmentsCount: 'assignments',
+          buildingStart: 'Starting data for',
         },
       }[language] || {
         title: 'Allocation Results',
-        subtitle: 'Full details of the algorithm run results',
-        noDataTitle: 'No result data to display',
-        noDataText: 'It looks like this page was opened without allocation data.',
+        subtitle: 'Saved allocation results according to the user region',
         backToAllocation: 'Back to Allocation',
         region: 'Region',
         generatedAt: 'Generated At',
         assigned: 'Successfully Assigned',
         roommateMatches: 'Roommate Matches',
         conflicts: 'Conflicts',
-        studentsToAssign: 'Students To Assign',
-        availableBeds: 'Available Beds',
-        assignedStudents: 'Assigned Students',
-        totalStudents: 'Total Students',
-        occupancyRate: 'Occupancy Rate',
-        activeConstraints: 'Active Constraints',
-        systemSummary: 'System Summary',
-        runHighlights: 'Run Highlights',
-        enabled: 'Enabled',
-        disabled: 'Disabled',
-        strict: 'Strict',
-        flexible: 'Flexible',
-        critical: 'Critical',
-        weight: 'Weight',
-        yes: 'Yes',
-        no: 'No',
-        noAssignmentsTable: 'No detailed assignments table was returned from the server.',
+        runHighlights: 'System Results',
+        noAssignmentsTable: 'No results to display.',
         assignmentsTitle: 'Detailed Assignments',
         student: 'Student',
         studentId: 'Student ID',
@@ -145,61 +182,107 @@ function AllocationResultsPage({ language = 'he' }) {
         apartment: 'Apartment',
         building: 'Building',
         status: 'Status',
-        successMessage: 'The run completed and the main metrics are available.',
-        cautionMessage: 'To display a full assignments table, the backend should also return an assignments list inside result.',
-        summaryBoxTitle: 'Overview',
+        loadingResults: 'Loading results...',
+        errorLoadingResults: 'Error loading allocation results',
+        assignmentsCount: 'assignments',
+        buildingStart: 'Starting data for',
       }),
     [language]
   );
 
-  const assignments = Array.isArray(result?.assignments) ? result.assignments : [];
+  useEffect(() => {
+    const loadResults = async () => {
+      setResultsLoading(true);
+      setResultsError(null);
 
-  const constraintLabelMap = useMemo(
-    () => ({
-      sameGender: language === 'he' ? 'אותו מגדר בדירה' : 'Same gender in apartment',
-      sameReligion: language === 'he' ? 'אותה דת בדירה' : 'Same religion in apartment',
-      roommateMatch: language === 'he' ? 'התאמת שותפים מבוקשים' : 'Match roommate requests',
-      priorityFirst: language === 'he' ? 'סטודנטים בעדיפות קודם' : 'Priority students first',
-      roommatePositiveOnly: language === 'he' ? '100% תשובות חיוביות למבקשים להיות יחד' : '100% positive roommate matches',
-      ReligiousTogether: language === 'he' ? '100% התאמות חיוביות דירת דתיים/ות' : '100% positive religious apartment matches',
-      sectorMatching: language === 'he' ? 'התאמה לפי שייכות' : 'Sector matching',
-      avoidYearMix_1_with_3_4: language === 'he' ? 'לא לשבץ שנה א׳ עם שנה ג׳/ד׳' : 'Avoid mixing 1st year with 3rd/4th',
-      avoidAtudaimWithHasmaha: language === 'he' ? 'לא לשבץ הסמכה עם עתודאים' : 'Avoid mixing graduate with atudaim',
-    }),
-    [language]
+      try {
+        const regionId =
+          region?.id ||
+          summary?.region?.id ||
+          summary?.region_id ||
+          null;
+
+        const responseRaw = regionId
+          ? await allocationAPI.getResults(regionId)
+          : await allocationAPI.getResults();
+
+        const data = responseRaw?.data || responseRaw;
+
+        const assignmentsFromDb = Array.isArray(data?.assignments)
+          ? data.assignments
+          : [];
+
+        setServerResult({
+          ...(routeResult || {}),
+          assignments: assignmentsFromDb,
+          successful_assignments:
+            Number(data?.count ?? assignmentsFromDb.length) || 0,
+          roommate_matches: Number(routeResult?.roommate_matches) || 0,
+          conflicts: Number(routeResult?.conflicts) || 0,
+        });
+      } catch (err) {
+        console.error('Failed to load allocation results:', err);
+
+        setResultsError(
+          err?.response?.data?.error ||
+            err?.message ||
+            t.errorLoadingResults
+        );
+
+        setServerResult({
+          ...(routeResult || {}),
+          assignments: [],
+          successful_assignments: 0,
+          roommate_matches: Number(routeResult?.roommate_matches) || 0,
+          conflicts: Number(routeResult?.conflicts) || 0,
+        });
+      } finally {
+        setResultsLoading(false);
+      }
+    };
+
+    loadResults();
+  }, [
+    t.errorLoadingResults,
+    region?.id,
+    summary?.region?.id,
+    summary?.region_id,
+    routeResult,
+  ]);
+
+  const assignments = Array.isArray(result?.assignments)
+    ? result.assignments
+    : [];
+
+  const assignmentsByBuilding = useMemo(
+    () => groupAssignmentsByBuilding(assignments),
+    [assignments]
   );
 
-  const formattedGeneratedAt = generatedAt
-    ? new Date(generatedAt).toLocaleString(language === 'he' ? 'he-IL' : 'en-US')
+  const allocationCreatedAt =
+    generatedAt ||
+    result?.run?.completed_at ||
+    result?.run?.started_at ||
+    summary?.latest_run?.completed_at ||
+    summary?.latest_run?.started_at ||
+    assignments?.[0]?.assigned_at ||
+    null;
+
+  const formattedGeneratedAt = allocationCreatedAt
+    ? new Date(allocationCreatedAt).toLocaleString(
+        language === 'he' ? 'he-IL' : 'en-US'
+      )
     : '-';
 
-  const formattedOccupancy =
-    typeof summary?.occupancy_rate === 'number' || typeof summary?.occupancy_rate === 'string'
-      ? `${Number(summary.occupancy_rate || 0).toFixed(1)}%`
-      : '0%';
+  const displayRegion =
+    region?.name ||
+    region?.name_en ||
+    summary?.region?.name ||
+    summary?.region?.name_en ||
+    assignments?.[0]?.region ||
+    '-';
 
   const goBack = () => navigate('/allocation');
-
-  if (!result) {
-    return (
-      <div className="allocation-results-page">
-        <div className="results-shell">
-          <div className="empty-card">
-            <div className="empty-icon">
-              <Info size={28} />
-            </div>
-            <h1>{t.noDataTitle}</h1>
-            <p>{t.noDataText}</p>
-            <button className="primary-btn" onClick={goBack}>
-              <ArrowRight size={18} />
-              {t.backToAllocation}
-            </button>
-          </div>
-        </div>
-        <style>{styles}</style>
-      </div>
-    );
-  }
 
   return (
     <div className="allocation-results-page">
@@ -227,9 +310,7 @@ function AllocationResultsPage({ language = 'he' }) {
             </div>
             <div>
               <div className="meta-label">{t.region}</div>
-              <div className="meta-value">
-                {region?.name || region?.name_en || '-'}
-              </div>
+              <div className="meta-value">{displayRegion}</div>
             </div>
           </div>
 
@@ -244,167 +325,8 @@ function AllocationResultsPage({ language = 'he' }) {
           </div>
         </div>
 
-        <div className="hero-kpis">
-          <div className="hero-card success">
-            <div className="hero-icon">
-              <CheckCircle2 size={24} />
-            </div>
-            <div>
-              <div className="hero-number">{result?.successful_assignments || 0}</div>
-              <div className="hero-label">{t.assigned}</div>
-            </div>
-          </div>
-
-          <div className="hero-card info">
-            <div className="hero-icon">
-              <Users size={24} />
-            </div>
-            <div>
-              <div className="hero-number">{result?.roommate_matches || 0}</div>
-              <div className="hero-label">{t.roommateMatches}</div>
-            </div>
-          </div>
-
-          <div className="hero-card warning">
-            <div className="hero-icon">
-              <AlertTriangle size={24} />
-            </div>
-            <div>
-              <div className="hero-number">{result?.conflicts || 0}</div>
-              <div className="hero-label">{t.conflicts}</div>
-            </div>
-          </div>
-        </div>
-
         <div className="content-grid">
-          <div className="left-col">
-            <div className="panel">
-              <div className="panel-header">
-                <div className="panel-title">
-                  <ShieldCheck size={18} />
-                  <span>{t.summaryBoxTitle}</span>
-                </div>
-              </div>
-
-              <div className="summary-grid">
-                <div className="summary-item">
-                  <div className="summary-item-icon">
-                    <Users size={18} />
-                  </div>
-                  <div>
-                    <div className="summary-item-value">{summary?.unassigned_students || 0}</div>
-                    <div className="summary-item-label">{t.studentsToAssign}</div>
-                  </div>
-                </div>
-
-                <div className="summary-item">
-                  <div className="summary-item-icon">
-                    <BedDouble size={18} />
-                  </div>
-                  <div>
-                    <div className="summary-item-value">{summary?.available_beds || 0}</div>
-                    <div className="summary-item-label">{t.availableBeds}</div>
-                  </div>
-                </div>
-
-                <div className="summary-item">
-                  <div className="summary-item-icon">
-                    <CheckCircle2 size={18} />
-                  </div>
-                  <div>
-                    <div className="summary-item-value">{summary?.assigned_students || result?.successful_assignments || 0}</div>
-                    <div className="summary-item-label">{t.assignedStudents}</div>
-                  </div>
-                </div>
-
-                <div className="summary-item">
-                  <div className="summary-item-icon">
-                    <Users size={18} />
-                  </div>
-                  <div>
-                    <div className="summary-item-value">{summary?.total_students || 0}</div>
-                    <div className="summary-item-label">{t.totalStudents}</div>
-                  </div>
-                </div>
-
-                <div className="summary-item wide">
-                  <div className="summary-item-icon">
-                    <SlidersHorizontal size={18} />
-                  </div>
-                  <div>
-                    <div className="summary-item-value">{formattedOccupancy}</div>
-                    <div className="summary-item-label">{t.occupancyRate}</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="panel">
-              <div className="panel-header">
-                <div className="panel-title">
-                  <SlidersHorizontal size={18} />
-                  <span>{t.activeConstraints}</span>
-                </div>
-              </div>
-
-              <div className="constraints-list">
-                {Object.entries(constraints || {}).map(([key, value]) => (
-                  <div key={key} className="constraint-card">
-                    <div className="constraint-main">
-                      <div className="constraint-name">
-                        {constraintLabelMap[key] || key}
-                      </div>
-                      <div className="constraint-tags">
-                        <span className={`tag ${value?.enabled ? 'green' : 'gray'}`}>
-                          {value?.enabled ? t.enabled : t.disabled}
-                        </span>
-                        <span className={`tag ${value?.strict ? 'red' : 'blue'}`}>
-                          {value?.strict ? t.strict : t.flexible}
-                        </span>
-                        {value?.critical && (
-                          <span className="tag orange">{t.critical}</span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="constraint-weight">
-                      <span>{t.weight}</span>
-                      <div className="weight-track">
-                        <div
-                          className="weight-fill"
-                          style={{ width: `${Math.max(0, Math.min(10, Number(value?.weight || 0))) * 10}%` }}
-                        />
-                      </div>
-                      <strong>{Number(value?.weight || 0)}</strong>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
           <div className="right-col">
-            <div className="panel">
-              <div className="panel-header">
-                <div className="panel-title">
-                  <Info size={18} />
-                  <span>{t.systemSummary}</span>
-                </div>
-              </div>
-
-              <div className="message-stack">
-                <div className="message success-msg">
-                  <CheckCircle2 size={18} />
-                  <span>{t.successMessage}</span>
-                </div>
-
-                <div className="message warn-msg">
-                  <AlertTriangle size={18} />
-                  <span>{t.cautionMessage}</span>
-                </div>
-              </div>
-            </div>
-
             <div className="panel assignments-panel">
               <div className="panel-header">
                 <div className="panel-title">
@@ -413,43 +335,89 @@ function AllocationResultsPage({ language = 'he' }) {
                 </div>
               </div>
 
-              {assignments.length === 0 ? (
+              {resultsLoading ? (
                 <div className="empty-table-state">
+                  <Info size={18} />
+                  <span>{t.loadingResults}</span>
+                </div>
+              ) : resultsError ? (
+                <div className="empty-table-state error">
                   <AlertTriangle size={18} />
+                  <span>{resultsError}</span>
+                </div>
+              ) : assignments.length === 0 ? (
+                <div className="empty-table-state">
+                  <Info size={18} />
                   <span>{t.noAssignmentsTable}</span>
                 </div>
               ) : (
-                <div className="table-wrap">
-                  <table className="assignments-table">
-                    <thead>
-                      <tr>
-                        <th>{t.student}</th>
-                        <th>{t.studentId}</th>
-                        <th>{t.building}</th>
-                        <th>{t.apartment}</th>
-                        <th>{t.room}</th>
-                        <th>{t.bed}</th>
-                        <th>{t.status}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {assignments.map((item, index) => (
-                        <tr key={index}>
-                          <td>{item?.student_name || '-'}</td>
-                          <td>{item?.student_id || '-'}</td>
-                          <td>{item?.building_name || item?.building || '-'}</td>
-                          <td>{item?.apartment_number || item?.apartment || '-'}</td>
-                          <td>{item?.room_number || item?.room || '-'}</td>
-                          <td>{item?.bed_number || item?.bed || '-'}</td>
-                          <td>
-                            <span className="table-status">
-                              {item?.status || 'assigned'}
+                <div className="building-results-list">
+                  {Object.entries(assignmentsByBuilding).map(
+                    ([building, buildingAssignments], buildingIndex) => (
+                      <React.Fragment key={building}>
+                        {buildingIndex > 0 && (
+                          <div className="building-separator">
+                            <span>
+                              {t.buildingStart} {t.building} {building}
                             </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                          </div>
+                        )}
+
+                        <div className="building-results-card">
+                          <div className="building-results-header">
+                            <div>
+                              <div className="building-title">
+                                {t.building} {building}
+                              </div>
+                              <div className="building-subtitle">
+                                {buildingAssignments.length} {t.assignmentsCount}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="table-wrap">
+                            <table className="assignments-table">
+                              <thead>
+                                <tr>
+                                  <th>{t.student}</th>
+                                  <th>{t.studentId}</th>
+                                  <th>{t.building}</th>
+                                  <th>{t.apartment}</th>
+                                  <th>{t.room}</th>
+                                  <th>{t.bed}</th>
+                                  <th>{t.status}</th>
+                                </tr>
+                              </thead>
+
+                              <tbody>
+                                {buildingAssignments.map((item, index) => (
+                                  <tr
+                                    key={`${item?.student_id || 'student'}-${building}-${index}`}
+                                  >
+                                    <td>
+                                      {item?.student_name || item?.full_name || '-'}
+                                    </td>
+                                    <td>{item?.student_id || '-'}</td>
+                                    <td>{getBuilding(item) || '-'}</td>
+                                    <td>{getApartment(item) || '-'}</td>
+                                    <td>{getRoom(item) || '-'}</td>
+                                    <td>{getBed(item) || '-'}</td>
+                                    <td>
+                                      <span className="table-status">
+                                        {item?.assignment_status ||
+                                          item?.status ||
+                                          'assigned'}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </React.Fragment>
+                    )
+                  )}
                 </div>
               )}
             </div>
@@ -475,15 +443,12 @@ const styles = `
     --blue-soft: rgba(37,99,235,0.10);
     --green: #059669;
     --green-soft: rgba(5,150,105,0.10);
-    --orange: #d97706;
-    --orange-soft: rgba(217,119,6,0.12);
     --red: #dc2626;
     --red-soft: rgba(220,38,38,0.10);
     --purple: #7c3aed;
     --purple-soft: rgba(124,58,237,0.10);
     --radius-xl: 24px;
     --radius-lg: 18px;
-    --radius-md: 14px;
   }
 
   .allocation-results-page{
@@ -546,7 +511,6 @@ const styles = `
     margin-bottom: 12px;
   }
 
-  .primary-btn,
   .secondary-btn{
     display: inline-flex;
     align-items: center;
@@ -560,23 +524,12 @@ const styles = `
     cursor: pointer;
     transition: 0.18s ease;
     white-space: nowrap;
-  }
-
-  .primary-btn{
-    background: linear-gradient(135deg, #2563eb, #1d4ed8);
-    color: white;
-    border: 1px solid rgba(37,99,235,0.25);
-    box-shadow: 0 10px 20px rgba(37,99,235,0.20);
-  }
-
-  .secondary-btn{
     background: white;
     color: var(--text);
     border: 1px solid var(--border);
     box-shadow: var(--shadow-soft);
   }
 
-  .primary-btn:hover,
   .secondary-btn:hover{
     transform: translateY(-1px);
   }
@@ -631,73 +584,13 @@ const styles = `
     font-weight: 900;
   }
 
-  .hero-kpis{
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0,1fr));
-    gap: 14px;
-  }
-
-  .hero-card{
-    border-radius: var(--radius-xl);
-    padding: 20px;
-    border: 1px solid transparent;
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    box-shadow: var(--shadow-soft);
-    min-height: 110px;
-  }
-
-  .hero-card.success{
-    background: linear-gradient(135deg, rgba(5,150,105,0.12), rgba(5,150,105,0.06));
-    border-color: rgba(5,150,105,0.18);
-  }
-
-  .hero-card.info{
-    background: linear-gradient(135deg, rgba(37,99,235,0.12), rgba(37,99,235,0.06));
-    border-color: rgba(37,99,235,0.18);
-  }
-
-  .hero-card.warning{
-    background: linear-gradient(135deg, rgba(217,119,6,0.14), rgba(217,119,6,0.06));
-    border-color: rgba(217,119,6,0.18);
-  }
-
-  .hero-icon{
-    width: 52px;
-    height: 52px;
-    border-radius: 18px;
-    background: rgba(255,255,255,0.85);
-    border: 1px solid rgba(255,255,255,0.7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-  }
-
-  .hero-number{
-    font-size: 30px;
-    line-height: 1;
-    font-weight: 950;
-    letter-spacing: -0.03em;
-    color: var(--text);
-  }
-
-  .hero-label{
-    margin-top: 6px;
-    color: #334155;
-    font-size: 13px;
-    font-weight: 800;
-  }
-
   .content-grid{
     display: grid;
-    grid-template-columns: 1.1fr 1fr;
+    grid-template-columns: 1fr;
     gap: 16px;
     align-items: start;
   }
 
-  .left-col,
   .right-col{
     display: flex;
     flex-direction: column;
@@ -730,187 +623,86 @@ const styles = `
     font-weight: 950;
   }
 
-  .summary-grid{
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0,1fr));
-    gap: 12px;
+  .assignments-panel{
+    min-height: 420px;
   }
 
-  .summary-item{
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--border);
-    background: rgba(15,23,42,0.02);
-    padding: 14px;
+  .building-results-list{
     display: flex;
-    align-items: center;
-    gap: 12px;
+    flex-direction: column;
+    gap: 28px;
   }
 
-  .summary-item.wide{
-    grid-column: span 2;
+  .building-results-card{
+    background: #ffffff;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    overflow: hidden;
+    box-shadow: var(--shadow-soft);
   }
 
-  .summary-item-icon{
-    width: 40px;
-    height: 40px;
-    border-radius: 14px;
-    background: rgba(37,99,235,0.08);
-    color: var(--blue);
+  .building-separator{
     display: flex;
     align-items: center;
     justify-content: center;
-    flex-shrink: 0;
+    margin: 10px 0 0;
+    position: relative;
   }
 
-  .summary-item-value{
-    font-size: 22px;
+  .building-separator::before{
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(
+      to left,
+      transparent,
+      rgba(37, 99, 235, 0.85),
+      transparent
+    );
+  }
+
+  .building-separator span{
+    position: relative;
+    z-index: 1;
+    background: #eff6ff;
+    color: #1d4ed8;
+    border: 1px solid rgba(37, 99, 235, 0.30);
+    border-radius: 999px;
+    padding: 10px 24px;
+    font-size: 13px;
     font-weight: 950;
-    color: var(--text);
-    letter-spacing: -0.02em;
+    box-shadow: 0 8px 20px rgba(37, 99, 235, 0.14);
   }
 
-  .summary-item-label{
-    margin-top: 3px;
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 800;
-  }
-
-  .constraints-list{
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .constraint-card{
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--border);
-    background: rgba(15,23,42,0.02);
-    padding: 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .constraint-main{
+  .building-results-header{
     display: flex;
     justify-content: space-between;
+    align-items: center;
     gap: 12px;
-    align-items: flex-start;
+    padding: 18px 22px;
+    background: linear-gradient(135deg, #eaf2ff, #f8fbff);
+    border-bottom: 2px solid rgba(37, 99, 235, 0.18);
+    border-right: 6px solid #2563eb;
   }
 
-  .constraint-name{
+  .building-title{
     color: var(--text);
-    font-weight: 900;
-    font-size: 14px;
-    line-height: 1.5;
+    font-size: 18px;
+    font-weight: 950;
   }
 
-  .constraint-tags{
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-
-  .tag{
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 900;
-    border: 1px solid transparent;
-    white-space: nowrap;
-  }
-
-  .tag.green{
-    background: var(--green-soft);
-    color: var(--green);
-    border-color: rgba(5,150,105,0.16);
-  }
-
-  .tag.gray{
-    background: rgba(15,23,42,0.05);
-    color: #475569;
-    border-color: rgba(15,23,42,0.08);
-  }
-
-  .tag.red{
-    background: var(--red-soft);
-    color: var(--red);
-    border-color: rgba(220,38,38,0.16);
-  }
-
-  .tag.blue{
-    background: var(--blue-soft);
-    color: var(--blue);
-    border-color: rgba(37,99,235,0.16);
-  }
-
-  .tag.orange{
-    background: var(--orange-soft);
-    color: var(--orange);
-    border-color: rgba(217,119,6,0.16);
-  }
-
-  .constraint-weight{
-    display: grid;
-    grid-template-columns: 52px 1fr 32px;
-    gap: 10px;
-    align-items: center;
+  .building-subtitle{
+    margin-top: 4px;
     color: var(--muted);
     font-size: 12px;
     font-weight: 800;
   }
 
-  .weight-track{
-    position: relative;
-    height: 10px;
-    border-radius: 999px;
-    background: rgba(15,23,42,0.08);
-    overflow: hidden;
-  }
-
-  .weight-fill{
-    height: 100%;
-    border-radius: 999px;
-    background: linear-gradient(90deg, #2563eb, #7c3aed);
-  }
-
-  .message-stack{
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .message{
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    border-radius: var(--radius-lg);
-    padding: 14px;
-    font-size: 13px;
-    font-weight: 800;
-    line-height: 1.6;
-    border: 1px solid transparent;
-  }
-
-  .success-msg{
-    background: var(--green-soft);
-    color: var(--green);
-    border-color: rgba(5,150,105,0.16);
-  }
-
-  .warn-msg{
-    background: var(--orange-soft);
-    color: var(--orange);
-    border-color: rgba(217,119,6,0.16);
-  }
-
-  .assignments-panel{
-    min-height: 420px;
+  .building-results-card .table-wrap{
+    border: none;
+    border-radius: 0;
   }
 
   .empty-table-state{
@@ -923,6 +715,12 @@ const styles = `
     border: 1px dashed rgba(15,23,42,0.12);
     color: var(--muted);
     font-weight: 800;
+  }
+
+  .empty-table-state.error{
+    background: var(--red-soft);
+    color: var(--red);
+    border-color: rgba(220,38,38,0.18);
   }
 
   .table-wrap{
@@ -975,78 +773,14 @@ const styles = `
     border: 1px solid rgba(5,150,105,0.16);
   }
 
-  .empty-card{
-    max-width: 760px;
-    margin: 80px auto 0;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 28px;
-    box-shadow: var(--shadow);
-    padding: 34px;
-    text-align: center;
-  }
-
-  .empty-icon{
-    width: 64px;
-    height: 64px;
-    margin: 0 auto 16px;
-    border-radius: 20px;
-    background: var(--blue-soft);
-    color: var(--blue);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .empty-card h1{
-    margin: 0;
-    color: var(--text);
-    font-size: 28px;
-    font-weight: 950;
-    letter-spacing: -0.03em;
-  }
-
-  .empty-card p{
-    max-width: 560px;
-    margin: 12px auto 0;
-    color: var(--muted);
-    font-size: 14px;
-    line-height: 1.8;
-    font-weight: 700;
-  }
-
-  .empty-card .primary-btn{
-    margin-top: 20px;
-  }
-
-  @media (max-width: 1100px){
-    .content-grid{
-      grid-template-columns: 1fr;
-    }
-  }
-
   @media (max-width: 860px){
-    .hero-kpis,
-    .meta-row,
-    .summary-grid{
+    .meta-row{
       grid-template-columns: 1fr;
-    }
-
-    .summary-item.wide{
-      grid-column: span 1;
     }
 
     .results-topbar{
       flex-direction: column;
       align-items: stretch;
-    }
-
-    .constraint-main{
-      flex-direction: column;
-    }
-
-    .constraint-tags{
-      justify-content: flex-start;
     }
   }
 
@@ -1056,10 +790,6 @@ const styles = `
     }
 
     .title-block h1{
-      font-size: 26px;
-    }
-
-    .hero-number{
       font-size: 26px;
     }
   }

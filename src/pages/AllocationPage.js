@@ -120,8 +120,8 @@ function AllocationPage({ language = 'he' }) {
           pending: 'ממתין לטיפול',
           viewed: 'נצפה',
           unknownError: 'שגיאה לא ידועה',
-          noResultsYet: 'עדיין אין תוצאות זמינות. הריצי שיבוץ כדי להפיק תוצאות.',
-          resultsHint: 'כפתור התוצאות יופעל לאחר הרצת שיבוץ מוצלחת.',
+          noResultsYet: 'אין תוצאות שיבוץ זמינות כרגע.',
+          resultsHint: 'אפשר להיכנס למסך התוצאות. אם לא קיימות תוצאות, תופיע שם הודעה מתאימה.',
           currentStatus: 'סטטוס נוכחי',
         },
         en: {
@@ -192,8 +192,8 @@ function AllocationPage({ language = 'he' }) {
           pending: 'Pending',
           viewed: 'Viewed',
           unknownError: 'Unknown error',
-          noResultsYet: 'No results are available yet. Run allocation to generate results.',
-          resultsHint: 'The results button will be enabled after a successful run.',
+          noResultsYet: 'No allocation results are available right now.',
+          resultsHint: 'You can open the results page. If there are no results, an empty-state message will be shown.',
           currentStatus: 'Current status',
         },
       }[language] || {
@@ -484,17 +484,15 @@ function AllocationPage({ language = 'he' }) {
   }, [constraints]);
 
   const handleViewResults = useCallback(() => {
-    if (!result) return;
-
-    navigate('/allocation/results', {
-      state: {
-        result,
-        summary,
-        constraints: effectiveConfig,
-        region: summary?.region || null,
-        generatedAt: new Date().toISOString(),
-      },
-    });
+  navigate('/allocation/results', {
+    state: {
+      result: result || null,
+      summary,
+      constraints: effectiveConfig,
+      region: summary?.region || null,
+      generatedAt: result ? new Date().toISOString() : null,
+    },
+  });
   }, [navigate, result, summary, effectiveConfig]);
 
   const runAllocation = async () => {
@@ -935,52 +933,52 @@ function AllocationPage({ language = 'he' }) {
             <div className="card">
               <div className="cardHeader compact">
                 <div className="cardTitle">
-                  <BarChart3 size={16} />
+                  <BarChart3 size={16}/>
                   <span>{t.results}</span>
                 </div>
                 <span className="hint">{t.currentStatus}</span>
               </div>
 
               {result ? (
-                <div className="results">
-                  <div className="kpi ok">
-                    <div className="kpiIcon">
-                      <Check size={18} />
+                  <div className="results">
+                    <div className="kpi ok">
+                      <div className="kpiIcon">
+                        <Check size={18}/>
+                      </div>
+                      <div>
+                        <div className="kpiNum">{result.successful_assignments || 0}</div>
+                        <div className="kpiLbl">{t.assigned}</div>
+                      </div>
                     </div>
-                    <div>
-                      <div className="kpiNum">{result.successful_assignments || 0}</div>
-                      <div className="kpiLbl">{t.assigned}</div>
-                    </div>
-                  </div>
 
-                  <div className="kpi info">
-                    <div className="kpiIcon">
-                      <Users size={18} />
+                    <div className="kpi info">
+                      <div className="kpiIcon">
+                        <Users size={18}/>
+                      </div>
+                      <div>
+                        <div className="kpiNum">{result.roommate_matches || 0}</div>
+                        <div className="kpiLbl">{t.roommateMatches}</div>
+                      </div>
                     </div>
-                    <div>
-                      <div className="kpiNum">{result.roommate_matches || 0}</div>
-                      <div className="kpiLbl">{t.roommateMatches}</div>
-                    </div>
-                  </div>
 
-                  <div className="kpi warn">
-                    <div className="kpiIcon">
-                      <AlertTriangle size={18} />
-                    </div>
-                    <div>
-                      <div className="kpiNum">{result.conflicts || 0}</div>
-                      <div className="kpiLbl">{t.conflicts}</div>
+                    <div className="kpi warn">
+                      <div className="kpiIcon">
+                        <AlertTriangle size={18}/>
+                      </div>
+                      <div>
+                        <div className="kpiNum">{result.conflicts || 0}</div>
+                        <div className="kpiLbl">{t.conflicts}</div>
+                      </div>
                     </div>
                   </div>
-                </div>
               ) : (
-                <div className="empty-results-state">
-                  <div className="empty-results-title">{t.noResultsYet}</div>
-                  <div className="empty-results-subtitle">{t.resultsHint}</div>
-                </div>
+                  <div className="empty-results-state">
+                    <div className="empty-results-title">{t.noResultsYet}</div>
+                    <div className="empty-results-subtitle">{t.resultsHint}</div>
+                  </div>
               )}
 
-              <button className="ghostBtn" onClick={handleViewResults} disabled={!result}>
+              <button className="ghostBtn" onClick={handleViewResults}>
                 {t.viewResults}
               </button>
             </div>
