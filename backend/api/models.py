@@ -597,6 +597,13 @@ class BedAssignment(models.Model):
         blank=True,
         related_name='created_bed_assignments'
     )
+    allocation_run = models.ForeignKey(
+        'AllocationRun',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bed_assignments',
+    )
     assigned_at = models.DateTimeField(auto_now_add=True)
     ended_at = models.DateTimeField(null=True, blank=True)
 
@@ -832,9 +839,14 @@ class Transfer(models.Model):
 # ===========================================
 class AllocationRun(models.Model):
     class Status(models.TextChoices):
+        QUEUED = 'queued', _('בתור')
         RUNNING = 'running', _('רץ')
+        CANCELLATION_REQUESTED = 'cancellation_requested', _('מבוקשת עצירה')
+        STOPPED = 'stopped', _('עצר')
         COMPLETED = 'completed', _('הושלם')
         FAILED = 'failed', _('נכשל')
+        DELETED = 'deleted', _('נמחק')
+        APPROVED = 'approved', _('אושר')
 
     region = models.ForeignKey(
         Region,
@@ -849,9 +861,9 @@ class AllocationRun(models.Model):
         related_name='allocation_runs'
     )
     status = models.CharField(
-        max_length=20,
+        max_length=30,
         choices=Status.choices,
-        default=Status.RUNNING
+        default=Status.QUEUED
     )
 
     students_processed = models.PositiveIntegerField(default=0)
@@ -872,23 +884,33 @@ class AllocationRun(models.Model):
     def __str__(self):
         return f"שיבוץ {self.region} - {self.started_at.strftime('%Y-%m-%d %H:%M')}"
     def clean(self):
-        if self.status == self.Status.RUNNING:
-            if self.completed_at is not None:
-                raise ValidationError('Running allocation cannot have completed_at.')
-            if self.error_message:
-                raise ValidationError('Running allocation cannot have error_message.')
+        in_progress = {
+            self.Status.QUEUED,
+            self.Status.RUNNING,
+            self.Status.CANCELLATION_REQUESTED,
+        }
 
-        if self.status == self.Status.COMPLETED:
+        if self.status in in_progress:
+            if self.completed_at is not None:
+                raise ValidationError(f'{self.status} allocation cannot have completed_at.')
+            if self.error_message:
+                raise ValidationError(f'{self.status} allocation cannot have error_message.')
+
+        elif self.status == self.Status.COMPLETED:
             if self.completed_at is None:
                 raise ValidationError('Completed allocation must have completed_at.')
             if self.error_message:
                 raise ValidationError('Completed allocation should not have error_message.')
 
-        if self.status == self.Status.FAILED:
+        elif self.status == self.Status.FAILED:
             if self.completed_at is None:
                 raise ValidationError('Failed allocation must have completed_at.')
             if not self.error_message:
                 raise ValidationError('Failed allocation should include error_message.')
+
+        elif self.status in {self.Status.STOPPED, self.Status.DELETED, self.Status.APPROVED}:
+            if self.completed_at is None:
+                raise ValidationError(f'{self.status} allocation must have completed_at.')
 
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -991,3 +1013,95 @@ class RegionInbox(models.Model):
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
+
+
+class StudentRequest(models.Model):
+    class RequestType(models.TextChoices):
+        ADD_STUDENT    = 'add_student',    _('הוספת סטודנט')
+        REMOVE_STUDENT = 'remove_student', _('הסרת סטודנט מהמעונות')
+        ROOM           = 'room',           _('שינוי חדר')
+        APARTMENT      = 'apartment',      _('מעבר מהדירה')
+        OTHER          = 'other',          _('בקשה אחרת')
+
+    class Status(models.TextChoices):
+        PENDING  = 'pending',  _('ממתין')
+        APPROVED = 'approved', _('אושר')
+        REJECTED = 'rejected', _('נדחה')
+
+    class Priority(models.TextChoices):
+        LOW    = 'low',    _('Low')
+        NORMAL = 'normal', _('Normal')
+        HIGH   = 'high',   _('High')
+        URGENT = 'urgent', _('Urgent')
+
+    request_type = models.CharField(max_length=20, choices=RequestType.choices)
+    reason = models.TextField(blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    requested_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='created_student_requests',
+    )
+    reviewed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_student_requests',
+    )
+    student = models.ForeignKey(
+        Student,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='requests',
+    )
+
+    other_description = models.TextField(
+        blank=True,
+        default='',
+        help_text='Description text for "other" request type',
+    )
+    same_apartment = models.BooleanField(
+        null=True,
+        blank=True,
+        help_text='For room change: True = same apartment, False = different apartment',
+    )
+
+    removal_notes = models.TextField(blank=True)
+    removal_reason = models.CharField(max_length=100, blank=True)
+    target_room = models.ForeignKey(
+        Room,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='student_requests_target_room',
+        help_text='For add student request: room selected during approval',
+    )
+
+    student_data = models.JSONField(blank=True, default=dict)
+
+    priority = models.CharField(
+        max_length=20,
+        choices=Priority.choices,
+        default=Priority.NORMAL,
+    )
+    request_number = models.CharField(max_length=30, unique=True, null=True, blank=True)
+
+    class Meta:
+        verbose_name = _('בקשת סטודנט')
+        verbose_name_plural = _('בקשות סטודנט')
+        ordering = ['-created_at']
+
+    def __str__(self):
+        student_label = self.student.full_name if self.student else '(no student)'
+        return f"{self.get_request_type_display()} - {student_label} - {self.get_status_display()}"

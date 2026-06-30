@@ -183,6 +183,15 @@ function formatPercent(value) {
   return `${Math.round(n)}%`;
 }
 
+// Keep the map from being dragged entirely out of the viewport.
+// At scale=1 the range is ±margin px; at higher scales it grows proportionally.
+function clampPan(newPan, newScale, cW, cH, margin = 80) {
+  return {
+    x: Math.min(Math.max(newPan.x, -(cW * (newScale - 1) + margin)), margin),
+    y: Math.min(Math.max(newPan.y, -(cH * (newScale - 1) + margin)), margin),
+  };
+}
+
 export default function MapPage({ language = "he" }) {
   const { canAccessRegion, isCentralAdmin } = useAuth();
 
@@ -197,14 +206,19 @@ export default function MapPage({ language = "he" }) {
   const [loadError, setLoadError] = useState("");
 
   const canvasRef = useRef(null);
+  const imgRef = useRef(null);
+  const [imgRenderedBounds, setImgRenderedBounds] = useState(null);
   const [scale, setScale] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
+  const [layerAnimated, setLayerAnimated] = useState(false);
   const dragStart = useRef({ x: 0, y: 0 });
   const panStart = useRef({ x: 0, y: 0 });
+  const isPotentialDrag = useRef(false);
+  const wheelEndTimer = useRef(null);
 
   const ZOOM_MIN = 0.8;
-  const ZOOM_MAX = 3.2;
+  const ZOOM_MAX = 2.0;
   const ZOOM_STEP = 0.15;
 
   const t =
@@ -301,6 +315,7 @@ export default function MapPage({ language = "he" }) {
   );
 
   const resetView = () => {
+    setLayerAnimated(true);
     setScale(1);
     setPan({ x: 0, y: 0 });
   };
@@ -324,17 +339,14 @@ export default function MapPage({ language = "he" }) {
     const nextPanY = cy - worldY * nextScale;
 
     setScale(nextScale);
-    setPan({ x: nextPanX, y: nextPanY });
+    setPan(clampPan({ x: nextPanX, y: nextPanY }, nextScale, rect.width, rect.height));
   };
 
   const zoomIn = () => {
     const next = Math.min(ZOOM_MAX, Number((scale + ZOOM_STEP).toFixed(2)));
     const el = canvasRef.current;
 
-    if (!el) {
-      setScale(next);
-      return;
-    }
+    if (!el) { setScale(next); return; }
 
     const rect = el.getBoundingClientRect();
     zoomAt(next, rect.left + rect.width / 2, rect.top + rect.height / 2);
@@ -344,10 +356,7 @@ export default function MapPage({ language = "he" }) {
     const next = Math.max(ZOOM_MIN, Number((scale - ZOOM_STEP).toFixed(2)));
     const el = canvasRef.current;
 
-    if (!el) {
-      setScale(next);
-      return;
-    }
+    if (!el) { setScale(next); return; }
 
     const rect = el.getBoundingClientRect();
     zoomAt(next, rect.left + rect.width / 2, rect.top + rect.height / 2);
@@ -355,30 +364,45 @@ export default function MapPage({ language = "he" }) {
 
   const onMouseDown = (e) => {
     if (calibrateMode || e.button !== 0) return;
-
-    setIsDragging(true);
+    isPotentialDrag.current = true;
+    setLayerAnimated(false);
     dragStart.current = { x: e.clientX, y: e.clientY };
     panStart.current = { ...pan };
   };
 
   const onMouseMove = (e) => {
-    if (!isDragging) return;
+    if (!isPotentialDrag.current) return;
 
     const dx = e.clientX - dragStart.current.x;
     const dy = e.clientY - dragStart.current.y;
 
-    setPan({
-      x: panStart.current.x + dx,
-      y: panStart.current.y + dy,
-    });
+    // Only commit to a drag after moving 5 px — preserves clean single clicks.
+    if (!isDragging && Math.hypot(dx, dy) < 5) return;
+    if (!isDragging) setIsDragging(true);
+
+    const newPan = { x: panStart.current.x + dx, y: panStart.current.y + dy };
+    const canvas = canvasRef.current;
+
+    if (canvas) {
+      const { width, height } = canvas.getBoundingClientRect();
+      setPan(clampPan(newPan, scale, width, height));
+    } else {
+      setPan(newPan);
+    }
   };
 
   const onMouseUp = () => {
+    isPotentialDrag.current = false;
     setIsDragging(false);
+    setLayerAnimated(true);
   };
 
   const onWheel = (e) => {
     e.preventDefault();
+    // Disable transition during rapid scroll; re-enable shortly after it stops.
+    setLayerAnimated(false);
+    clearTimeout(wheelEndTimer.current);
+    wheelEndTimer.current = setTimeout(() => setLayerAnimated(true), 180);
 
     const delta = e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
     const next = Math.min(
@@ -552,6 +576,55 @@ export default function MapPage({ language = "he" }) {
   useEffect(() => {
     loadMapData();
   }, [loadMapData]);
+
+  // Compute where object-fit:contain places the image inside the canvas.
+  // Called on image load and whenever the canvas is resized.
+  const updateImgBounds = useCallback(() => {
+    const img = imgRef.current;
+    const canvas = canvasRef.current;
+    if (!img || !canvas || !img.naturalWidth || !img.naturalHeight) return;
+
+    const cW = canvas.clientWidth;
+    const cH = canvas.clientHeight;
+    const s = Math.min(cW / img.naturalWidth, cH / img.naturalHeight);
+    const rW = img.naturalWidth * s;
+    const rH = img.naturalHeight * s;
+
+    setImgRenderedBounds({
+      left: (cW - rW) / 2,
+      top: (cH - rH) / 2,
+      width: rW,
+      height: rH,
+    });
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ro = new ResizeObserver(updateImgBounds);
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, [updateImgBounds]);
+
+  // Smoothly pan so the selected dorm is centered in the viewport.
+  const centerOnDorm = useCallback((key) => {
+    const area = clickableDormAreas[key];
+    const bounds = imgRenderedBounds;
+    const canvas = canvasRef.current;
+    if (!area || !bounds || !canvas) return;
+
+    const { width: cW, height: cH } = canvas.getBoundingClientRect();
+    const dormX = bounds.left + (parseFloat(area.left) / 100) * bounds.width;
+    const dormY = bounds.top + (parseFloat(area.top) / 100) * bounds.height;
+
+    const targetPan = {
+      x: cW / 2 - dormX * scale,
+      y: cH / 2 - dormY * scale,
+    };
+
+    setLayerAnimated(true);
+    setPan(clampPan(targetPan, scale, cW, cH));
+  }, [imgRenderedBounds, scale]);
 
   const dormStats = useMemo(() => {
     const result = {};
@@ -736,8 +809,15 @@ export default function MapPage({ language = "he" }) {
     const worldX = (cx - pan.x) / scale;
     const worldY = (cy - pan.y) / scale;
 
-    const leftPct = (worldX / rect.width) * 100;
-    const topPct = (worldY / rect.height) * 100;
+    // Coordinates relative to the rendered image area (not the full canvas).
+    const b = imgRenderedBounds;
+    const imgX = worldX - (b ? b.left : 0);
+    const imgY = worldY - (b ? b.top : 0);
+    const imgW = b ? b.width : rect.width;
+    const imgH = b ? b.height : rect.height;
+
+    const leftPct = (imgX / imgW) * 100;
+    const topPct = (imgY / imgH) * 100;
 
     console.log(
       `CLICK AREA POSITION => top: "${topPct.toFixed(1)}%", left: "${leftPct.toFixed(1)}%"`
@@ -877,72 +957,85 @@ export default function MapPage({ language = "he" }) {
                 style={{
                   transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
                   transformOrigin: "0 0",
+                  transition: layerAnimated ? "transform 0.25s ease" : "none",
                 }}
               >
                 <img
+                  ref={imgRef}
                   className="map-img"
                   src={MAP_SRC}
                   alt="Technion dormitory map"
                   draggable={false}
+                  onLoad={updateImgBounds}
                 />
 
-                {filteredDormKeys.map((key) => {
-                  const area = clickableDormAreas[key];
-                  const dorm = dormStats[key];
+                {imgRenderedBounds && (
+                  <div
+                    className="map-overlay"
+                    style={{
+                      left: imgRenderedBounds.left,
+                      top: imgRenderedBounds.top,
+                      width: imgRenderedBounds.width,
+                      height: imgRenderedBounds.height,
+                    }}
+                  >
+                    {filteredDormKeys.map((key) => {
+                      const area = clickableDormAreas[key];
+                      const dorm = dormStats[key];
 
-                  if (!area || !dorm) return null;
+                      if (!area || !dorm) return null;
 
-                  const cls = occupancyClass(
-                    dorm.occupancy,
-                    dorm.availableBeds,
-                    dorm.totalCapacity
-                  );
+                      const cls = occupancyClass(
+                        dorm.occupancy,
+                        dorm.availableBeds,
+                        dorm.totalCapacity
+                      );
 
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      className={`click-area ${cls} ${
-                        selectedDormKey === key ? "selected" : ""
-                      }`}
-                      style={{
-                        top: area.top,
-                        left: area.left,
-                        width: area.width,
-                        height: area.height,
-                      }}
-                      title={`${
-                        language === "he" ? dorm.labelHe : dorm.labelEn
-                      } — ${t.occupancy}: ${formatPercent(dorm.occupancy)}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedDormKey(key);
-                      }}
-                    >
-                      <span className="sr-only">
-                        {language === "he" ? dorm.labelHe : dorm.labelEn}
-                      </span>
-                    </button>
-                  );
-                })}
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          className={`click-area ${cls} ${
+                            selectedDormKey === key ? "selected" : ""
+                          }`}
+                          style={{
+                            top: area.top,
+                            left: area.left,
+                            width: area.width,
+                            height: area.height,
+                          }}
+                          title={`${
+                            language === "he" ? dorm.labelHe : dorm.labelEn
+                          } — ${t.occupancy}: ${formatPercent(dorm.occupancy)}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedDormKey(key);
+                            centerOnDorm(key);
+                          }}
+                        >
+                          <span className="sr-only">
+                            {language === "he" ? dorm.labelHe : dorm.labelEn}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
 
             <div className="legend">
-              <div className="legend-item">
-                <span className="legend-dot good" />
-                <span>{t.available}</span>
-              </div>
-
-              <div className="legend-item">
-                <span className="legend-dot warn" />
-                <span>{t.almostFull}</span>
-              </div>
-
-              <div className="legend-item">
-                <span className="legend-dot full" />
-                <span>{t.full}</span>
-              </div>
+              <span className="legend-map-note">
+                {language === "he"
+                  ? "צבעי המפה = אזורי מגורים"
+                  : "Map colors = dorm regions"}
+              </span>
+              <div className="legend-divider" />
+              <span className="legend-map-note">
+                {language === "he"
+                  ? "לחצי על מעון לפרטי תפוסה"
+                  : "Click a dorm for occupancy details"}
+              </span>
             </div>
           </div>
 
@@ -1351,6 +1444,8 @@ export default function MapPage({ language = "he" }) {
           overflow: hidden;
           background: #f8fafc;
           cursor: grab;
+          user-select: none;
+          -webkit-user-select: none;
         }
 
         .map-canvas.dragging {
@@ -1364,7 +1459,10 @@ export default function MapPage({ language = "he" }) {
         .map-layer {
           position: absolute;
           inset: 0;
-          will-change: transform;
+        }
+
+        .map-overlay {
+          position: absolute;
         }
 
         .map-img {
@@ -1380,40 +1478,28 @@ export default function MapPage({ language = "he" }) {
         .click-area {
           position: absolute;
           transform: translate(-50%, -50%);
-          border-radius: 14px;
-          border: 2px solid transparent;
-          background: rgba(255, 255, 255, 0.01);
+          border-radius: 8px;
+          border: 1.5px solid transparent;
+          background: transparent;
           cursor: pointer;
           z-index: 20;
-          transition: all 0.18s ease;
+          transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
         }
 
         .click-area:hover {
-          background: rgba(37, 99, 235, 0.16);
-          border-color: rgba(37, 99, 235, 0.85);
-          box-shadow: 0 0 0 6px rgba(37, 99, 235, 0.12);
+          background: rgba(255, 255, 255, 0.22);
+          border-color: rgba(255, 255, 255, 0.6);
+          box-shadow: 0 2px 12px rgba(0, 0, 0, 0.14);
         }
 
         .click-area.selected {
-          background: rgba(37, 99, 235, 0.22);
-          border-color: #2563eb;
-          box-shadow: 0 0 0 7px rgba(37, 99, 235, 0.16);
+          background: rgba(37, 99, 235, 0.14);
+          border-color: rgba(37, 99, 235, 0.6);
+          box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
         }
 
-        .click-area.full {
-          border-color: rgba(239, 68, 68, 0.7);
-        }
-
-        .click-area.danger {
-          border-color: rgba(249, 115, 22, 0.65);
-        }
-
-        .click-area.warn {
-          border-color: rgba(245, 158, 11, 0.65);
-        }
-
-        .click-area.good {
-          border-color: rgba(16, 185, 129, 0.55);
+        .click-area.selected:hover {
+          background: rgba(37, 99, 235, 0.20);
         }
 
         .sr-only {
@@ -1444,32 +1530,18 @@ export default function MapPage({ language = "he" }) {
           backdrop-filter: blur(8px);
         }
 
-        .legend-item {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          color: #334155;
-          font-size: 12px;
-          font-weight: 900;
+        .legend-divider {
+          width: 1px;
+          height: 14px;
+          background: #cbd5e1;
+          flex-shrink: 0;
+        }
+
+        .legend-map-note {
+          font-size: 11px;
+          font-weight: 700;
+          color: #64748b;
           white-space: nowrap;
-        }
-
-        .legend-dot {
-          width: 11px;
-          height: 11px;
-          border-radius: 50%;
-        }
-
-        .legend-dot.good {
-          background: #10b981;
-        }
-
-        .legend-dot.warn {
-          background: #f59e0b;
-        }
-
-        .legend-dot.full {
-          background: #ef4444;
         }
 
         .info-panel {

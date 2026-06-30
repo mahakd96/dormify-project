@@ -1,4 +1,4 @@
-import axios from "axios";
+﻿import axios from "axios";
 
 const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:8000";
 
@@ -44,7 +44,7 @@ const getErrorMessage = (err, fallback = "Request failed") => {
 
   if (typeof data === "string" && data.trim()) {
     return data.length > 400
-      ? `${status || ""} ${data.slice(0, 400)}…`
+      ? `${status || ""} ${data.slice(0, 400)}ג€¦`
       : data;
   }
 
@@ -55,7 +55,7 @@ const getErrorMessage = (err, fallback = "Request failed") => {
 
   if (!err?.response) {
     const code = err?.code ? ` [${err.code}]` : "";
-    return `${fallback}: no response from server${code} — ${
+    return `${fallback}: no response from server${code} ג€” ${
       err?.message || "Network Error"
     }`;
   }
@@ -66,7 +66,6 @@ const getErrorMessage = (err, fallback = "Request failed") => {
 api.interceptors.request.use(
   (config) => {
     const token = getAccessToken();
-
     config.headers = config.headers || {};
 
     if (token) {
@@ -80,9 +79,7 @@ api.interceptors.request.use(
 
 api.interceptors.response.use(
   (response) => response,
-  async (error) => {
-    return Promise.reject(error);
-  }
+  async (error) => Promise.reject(error)
 );
 
 export const authAPI = {
@@ -184,15 +181,60 @@ export const allocationAPI = {
 
   run: async (regionId, payload = {}) => {
     try {
-      const body = {
-        region: regionId,
-        ...payload,
-      };
-
+      const body = { region: regionId, ...payload };
       const { data } = await api.post("/api/allocation/run/", body);
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Allocation run failed"));
+    }
+  },
+
+  startRun: async (regionId, payload = {}) => {
+    try {
+      const body = { region: regionId, ...payload };
+      const { data } = await api.post("/api/allocation/start/", body);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to start allocation run"));
+    }
+  },
+
+  getRunStatus: async (runId) => {
+    try {
+      const { data } = await api.get(`/api/allocation/runs/${runId}/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to get run status"));
+    }
+  },
+
+  stopRun: async (runId) => {
+    try {
+      const { data } = await api.post(`/api/allocation/runs/${runId}/stop/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to stop allocation run"));
+    }
+  },
+
+  deleteResults: async (runId) => {
+    try {
+      const { data } = await api.delete(`/api/allocation/runs/${runId}/delete/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to delete allocation results"));
+    }
+  },
+
+  getActiveRun: async (regionId = null) => {
+    try {
+      const url = regionId
+        ? `/api/allocation/runs/active/?region=${regionId}`
+        : "/api/allocation/runs/active/";
+      const { data } = await api.get(url);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to get active run"));
     }
   },
 
@@ -222,10 +264,57 @@ export const allocationAPI = {
       const { data } = await api.get("/api/allocation/results/", {
         params: regionId ? { region: regionId } : {},
       });
-
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to load allocation results"));
+    }
+  },
+
+  getConditions: async (regionId = null) => {
+    try {
+      const url = regionId
+        ? `/api/allocation/conditions/?region=${regionId}`
+        : "/api/allocation/conditions/";
+      const { data } = await api.get(url);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load allocation conditions"));
+    }
+  },
+
+  updateConditions: async (conditions, regionId = null) => {
+    try {
+      const payload = regionId ? { conditions, region: regionId } : { conditions };
+      const { data } = await api.put("/api/allocation/conditions/", payload);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to update allocation conditions"));
+    }
+  },
+
+  getStatus: async (regionId = null) => {
+    try {
+      const url = regionId
+        ? `/api/allocation/status/?region=${regionId}`
+        : "/api/allocation/status/";
+      const { data } = await api.get(url);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to get allocation status"));
+    }
+  },
+};
+
+export const inventoryAPI = {
+  getByHousingType: async (regionId = null) => {
+    try {
+      const url = regionId
+        ? `/api/inventory/by-housing-type/?region=${regionId}`
+        : "/api/inventory/by-housing-type/";
+      const { data } = await api.get(url);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load inventory by housing type"));
     }
   },
 };
@@ -316,12 +405,123 @@ export const studentsAPI = {
     }
   },
 
+  getStudents: async (params = {}) => {
+    try {
+      const { data } = await api.get("/api/students/", { params });
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load students"));
+    }
+  },
+
   getById: async (id) => {
     try {
       const { data } = await api.get(`/api/students/${id}/`);
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to load student"));
+    }
+  },
+
+    getCounts: async () => {
+    try {
+      const { data } = await api.get("/api/students/counts/");
+      return data;
+    } catch (err) {
+      console.warn(
+        "studentsAPI.getCounts failed, computing from students list:",
+        err?.response?.data || err.message
+      );
+
+      try {
+        const { data } = await api.get("/api/students/");
+        const list = Array.isArray(data) ? data : data.results || [];
+
+        const isStatus = (student, words) => {
+          const text = [
+            student.status,
+            student.student_status,
+            student.type,
+            student.student_type,
+            student.category,
+            student.assignment_status,
+            student.sap_status,
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+
+          return words.some((word) => text.includes(word));
+        };
+
+        const total = list.length;
+
+        const staying = list.filter((s) =>
+          isStatus(s, ["staying", "stay", "׳ ׳©׳׳¨"])
+        ).length;
+
+        const newStudents = list.filter((s) =>
+          isStatus(s, ["new", "incoming", "׳—׳“׳©", "׳ ׳›׳ ׳¡"])
+        ).length;
+
+        const transferring = list.filter((s) =>
+          isStatus(s, ["transferring", "transfer", "׳׳¢׳‘׳¨", "׳¢׳•׳‘׳¨"])
+        ).length;
+
+        const leaving = list.filter((s) =>
+          isStatus(s, ["leaving", "leave", "׳¢׳–׳™׳‘׳”", "׳¢׳•׳–׳‘"])
+        ).length;
+
+        return {
+          total,
+          all: total,
+          all_students: total,
+          total_students: total,
+
+          staying,
+          staying_students: staying,
+
+          new: newStudents,
+          new_students: newStudents,
+          incoming: newStudents,
+
+          transferring,
+          transferring_students: transferring,
+
+          leaving,
+          leaving_students: leaving,
+        };
+      } catch (fallbackErr) {
+        console.warn(
+          "studentsAPI.getCounts fallback failed:",
+          fallbackErr?.response?.data || fallbackErr.message
+        );
+
+        return {
+          total: 0,
+          all: 0,
+          all_students: 0,
+          total_students: 0,
+          staying: 0,
+          new: 0,
+          new_students: 0,
+          transferring: 0,
+          leaving: 0,
+        };
+      }
+    }
+  },
+
+  getFilterOptions: async () => {
+    try {
+      const { data } = await api.get("/api/students/filter-options/");
+      return data;
+    } catch (err) {
+      console.warn(
+        "studentsAPI.getFilterOptions failed:",
+        err?.response?.data || err.message
+      );
+      return {};
     }
   },
 };
@@ -361,10 +561,86 @@ export const transfersAPI = {
       const { data } = await api.put(`/api/transfers/${id}/reject/`, {
         reason,
       });
-
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to reject transfer"));
+    }
+  },
+};
+
+export const requestsAPI = {
+  getAll: async (params = {}) => {
+    try {
+      const { data } = await api.get("/api/transfers/", { params });
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load requests"));
+    }
+  },
+
+  create: async (payload) => {
+    try {
+      const { data } = await api.post("/api/transfers/", payload);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to create request"));
+    }
+  },
+
+  approve: async (id, payload = {}) => {
+    try {
+      const { data } = await api.put(`/api/transfers/${id}/approve/`, payload);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to approve request"));
+    }
+  },
+
+  reject: async (id, reason = "") => {
+    try {
+      const { data } = await api.put(`/api/transfers/${id}/reject/`, {
+        reason,
+      });
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to reject request"));
+    }
+  },
+
+  checkFeasibility: async (id) => {
+    try {
+      const { data } = await api.get(`/api/transfers/${id}/feasibility/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to check feasibility"));
+    }
+  },
+
+  checkFeasibilityForStudent: async (
+    studentId,
+    requestType,
+    sameApartment = false
+  ) => {
+    try {
+      const { data } = await api.get("/api/transfers/check-feasibility/", {
+        params: {
+          student_id: studentId,
+          request_type: requestType,
+          same_apartment: sameApartment,
+        },
+      });
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to check feasibility"));
+    }
+  },
+
+  getAddStudentBeds: async (id) => {
+    try {
+      const { data } = await api.get(`/api/transfers/${id}/add-student-beds/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load available beds"));
     }
   },
 };
@@ -471,6 +747,43 @@ export const whatIfAPI = {
         getErrorMessage(err, "Failed to confirm availability change")
       );
     }
+  },
+};
+
+export const regionsAPI = {
+  getAll: async () => {
+    try {
+      const { data } = await api.get('/api/regions/');
+      return Array.isArray(data) ? data : (data.results || []);
+    } catch (err) {
+      throw new Error(getErrorMessage(err, 'Failed to load regions'));
+    }
+  },
+};
+
+export const reportsAPI = {
+  downloadDormifyReport: async () => {
+    return api.get('/api/reports/dormify-report/', { responseType: 'blob' });
+  },
+
+  // Legacy: kept for backward compat
+  downloadStudentAllocationReport: async () => {
+    return api.get('/api/reports/student-allocation-report/', { responseType: 'blob' });
+  },
+
+  downloadStudentActionsReport: async (regionId = null) => {
+    const params = regionId ? { region_id: regionId } : {};
+    return api.get('/api/reports/student-actions-report/', { responseType: 'blob', params });
+  },
+
+  downloadCapacityReport: async (regionId = null) => {
+    const params = regionId ? { region_id: regionId } : {};
+    return api.get('/api/reports/capacity-report/', { responseType: 'blob', params });
+  },
+
+  downloadManualReviewReport: async (regionId = null) => {
+    const params = regionId ? { region_id: regionId } : {};
+    return api.get('/api/reports/manual-review-report/', { responseType: 'blob', params });
   },
 };
 
