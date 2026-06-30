@@ -1,0 +1,5 @@
+﻿room_code,apartment_code,capacity,is_active,bed_label
+N19-A1-R1,N19-A1,2,True,
+N19-A1-R2,N19-A1,2,True,
+N19-A2-R1,N19-A2,2,True,
+N19-A2-R2,N19-A2,2,True,
