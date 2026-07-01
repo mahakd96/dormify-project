@@ -1,0 +1,68 @@
+{
+  "case_name": "case_17_no_access_room_capacity_two_beds",
+  "description": "Fixed version for the current importer. The previous version used 8 rooms with capacity=2, but run_allocation_case created only one bed per room row. This version represents 16 bed-slots explicitly as 16 room rows with capacity=1, so it tests the allocation behavior using the DB structure currently supported.",
+  "constraints_config": {
+    "priorityFirst": {
+      "enabled": false,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "roommateMatch": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 9
+    },
+    "roommatePositiveOnly": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 10
+    },
+    "sameReligion": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "sectorMatching": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "ReligiousTogether": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 10
+    },
+    "avoidYearMix_1_with_3_4": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 8
+    },
+    "avoidAtudaimWithHasmaha": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 5
+    }
+  },
+  "expected_result": [
+    "successful_assignments should be 16.",
+    "No student should remain unassigned.",
+    "Beds loaded should be 16 because the current importer creates one bed per rooms.csv row.",
+    "No room/bed-slot should have more than one student assigned.",
+    "No accessibility-related no_feasible warning should appear."
+  ],
+  "checklist": [
+    "Check Beds loaded == 16.",
+    "Check successful_assignments == 16.",
+    "Check Unassigned students says No unassigned students.",
+    "Check students_with_no_feasible_beds == [].",
+    "Check no capacity or gender violation."
+  ]
+}

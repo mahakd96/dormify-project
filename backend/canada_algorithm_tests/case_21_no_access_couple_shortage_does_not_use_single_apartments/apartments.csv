@@ -1,0 +1,4 @@
+﻿apartment_code,category,apartment_type,is_active,inactive_reason,is_accessible,is_reserved
+N21-SF,female,single,True,,False,False
+N21-SM,male,single,True,,False,False
+N21-C1,mixed,couple,True,,False,False
