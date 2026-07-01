@@ -15,6 +15,7 @@ from django.utils import timezone
 from django.db import transaction
 from django.db.models import Q, Count
 from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.db import connection
 
 from .models import (
@@ -93,31 +94,102 @@ def me_view(request):
         'user': UserSerializer(request.user).data
     })
 
-
-@api_view(['PUT'])
+@api_view(['PUT', 'POST'])
 @permission_classes([IsAuthenticated])
 def change_password_view(request):
     user = request.user
+
     current_password = request.data.get('current_password')
     new_password = request.data.get('new_password')
+    confirm_password = request.data.get('confirm_password')
 
-    if not current_password or not new_password:
+    if not current_password or not new_password or not confirm_password:
         return Response({
-            'error': 'נדרשת סיסמה נוכחית וסיסמה חדשה'
+            'success': False,
+            'error': 'יש למלא את כל השדות'
         }, status=status.HTTP_400_BAD_REQUEST)
 
     if not user.check_password(current_password):
         return Response({
-            'error': 'סיסמה נוכחית שגויה'
-        }, status=status.HTTP_401_UNAUTHORIZED)
+            'success': False,
+            'error': 'הסיסמה הנוכחית אינה נכונה'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    if new_password != confirm_password:
+        return Response({
+            'success': False,
+            'error': 'הסיסמאות החדשות אינן תואמות'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    if len(new_password) < 8:
+        return Response({
+            'success': False,
+            'error': 'הסיסמה החדשה חייבת להכיל לפחות 8 תווים'
+        }, status=status.HTTP_400_BAD_REQUEST)
 
     user.set_password(new_password)
     user.save()
 
     return Response({
-        'message': 'סיסמה שונתה בהצלחה'
-    })
+        'success': True,
+        'message': 'הסיסמה עודכנה בהצלחה'
+    }, status=status.HTTP_200_OK)
 
+@api_view(['PUT', 'POST'])
+@permission_classes([IsAuthenticated])
+def change_email_view(request):
+    user = request.user
+
+    current_email = request.data.get('current_email')
+    new_email = request.data.get('new_email')
+    confirm_email = request.data.get('confirm_email')
+
+    if not current_email or not new_email or not confirm_email:
+        return Response({
+            'success': False,
+            'error': 'יש למלא את כל השדות'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    if not user.email or user.email.lower() != current_email.lower():
+        return Response({
+            'success': False,
+            'error': 'האימייל הנוכחי אינו תואם לחשבון'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    if new_email.lower() != confirm_email.lower():
+        return Response({
+            'success': False,
+            'error': 'כתובות האימייל אינן תואמות'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        validate_email(new_email)
+    except ValidationError:
+        return Response({
+            'success': False,
+            'error': 'כתובת האימייל החדשה אינה תקינה'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    if User.objects.filter(email__iexact=new_email).exclude(id=user.id).exists():
+        return Response({
+            'success': False,
+            'error': 'כתובת האימייל כבר קיימת במערכת'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    user.email = new_email
+
+    # אצלכם לפי הנתונים שראינו קודם, username הוא בדרך כלל האימייל.
+    # לכן נעדכן גם אותו כדי שהתחברות עם האימייל החדש תמשיך לעבוד.
+    if hasattr(user, 'username'):
+        user.username = new_email
+
+    user.save()
+
+    return Response({
+        'success': True,
+        'message': 'האימייל עודכן בהצלחה',
+        'user': UserSerializer(user).data
+    }, status=status.HTTP_200_OK)
 
 # =========================
 # Permissions / Helpers

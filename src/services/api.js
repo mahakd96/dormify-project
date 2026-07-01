@@ -1,4 +1,4 @@
-import axios from "axios";
+﻿import axios from "axios";
 
 const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:8000";
 
@@ -44,7 +44,7 @@ const getErrorMessage = (err, fallback = "Request failed") => {
 
   if (typeof data === "string" && data.trim()) {
     return data.length > 400
-      ? `${status || ""} ${data.slice(0, 400)}…`
+      ? `${status || ""} ${data.slice(0, 400)}ג€¦`
       : data;
   }
 
@@ -55,7 +55,7 @@ const getErrorMessage = (err, fallback = "Request failed") => {
 
   if (!err?.response) {
     const code = err?.code ? ` [${err.code}]` : "";
-    return `${fallback}: no response from server${code} — ${
+    return `${fallback}: no response from server${code} ג€” ${
       err?.message || "Network Error"
     }`;
   }
@@ -128,6 +128,44 @@ export const authAPI = {
 
   logout: async () => {
     clearStoredAuth();
+  },
+};
+
+export const settingsAPI = {
+  changePassword: async (payload) => {
+    try {
+      const body = {
+        current_password:
+          payload.current_password ?? payload.currentPassword,
+        new_password:
+          payload.new_password ?? payload.newPassword,
+        confirm_password:
+          payload.confirm_password ?? payload.confirmPassword,
+      };
+
+      const { data } = await api.put("/api/auth/change-password/", body);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to change password"));
+    }
+  },
+
+  changeEmail: async (payload) => {
+    try {
+      const body = {
+        current_email:
+          payload.current_email ?? payload.currentEmail,
+        new_email:
+          payload.new_email ?? payload.newEmail,
+        confirm_email:
+          payload.confirm_email ?? payload.confirmEmail,
+      };
+
+      const { data } = await api.put("/api/auth/change-email/", body);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to change email"));
+    }
   },
 };
 
@@ -209,12 +247,23 @@ export const allocationAPI = {
     }
   },
 
+  getResults: async (regionId = null) => {
+    try {
+      const { data } = await api.get("/api/allocation/results/", {
+        params: regionId ? { region: regionId } : {},
+      });
+
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load allocation results"));
+    }
+  },
+
   results: async (regionId = null) => {
     try {
-      const url = regionId
-        ? `/api/allocation/results/?region=${regionId}`
-        : "/api/allocation/results/";
-      const { data } = await api.get(url);
+      const { data } = await api.get("/api/allocation/results/", {
+        params: regionId ? { region: regionId } : {},
+      });
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to load allocation results"));
@@ -408,19 +457,19 @@ export const studentsAPI = {
         const total = list.length;
 
         const staying = list.filter((s) =>
-          isStatus(s, ["staying", "stay", "נשאר"])
+          isStatus(s, ["staying", "stay", "׳ ׳©׳׳¨"])
         ).length;
 
         const newStudents = list.filter((s) =>
-          isStatus(s, ["new", "incoming", "חדש", "נכנס"])
+          isStatus(s, ["new", "incoming", "׳—׳“׳©", "׳ ׳›׳ ׳¡"])
         ).length;
 
         const transferring = list.filter((s) =>
-          isStatus(s, ["transferring", "transfer", "מעבר", "עובר"])
+          isStatus(s, ["transferring", "transfer", "׳׳¢׳‘׳¨", "׳¢׳•׳‘׳¨"])
         ).length;
 
         const leaving = list.filter((s) =>
-          isStatus(s, ["leaving", "leave", "עזיבה", "עוזב"])
+          isStatus(s, ["leaving", "leave", "׳¢׳–׳™׳‘׳”", "׳¢׳•׳–׳‘"])
         ).length;
 
         return {

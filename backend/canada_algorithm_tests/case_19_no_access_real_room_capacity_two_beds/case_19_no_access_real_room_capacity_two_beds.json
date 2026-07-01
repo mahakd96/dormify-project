@@ -1,0 +1,65 @@
+{
+  "description": "Real room capacity=2 test: 8 students, 4 rooms, each room has capacity 2. The test runner must create 2 Bed rows per room.",
+  "solver": {
+    "max_seconds": 500,
+    "solve_mode": "optimal-required",
+    "max_relative_gap": 0.0,
+    "persist_feasible_on_timeout": false
+  },
+  "constraints": {
+    "sameGender": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "priorityFirst": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "roommatePositiveOnly": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "ReligiousTogether": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 0
+    },
+    "sameReligion": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "roommateMatch": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 8
+    },
+    "sectorMatching": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 7
+    },
+    "avoidYearMix_1_with_3_4": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 0
+    },
+    "avoidAtudaimWithHasmaha": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 0
+    }
+  }
+}

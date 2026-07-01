@@ -1,0 +1,66 @@
+{
+  "case_name": "case_14_no_access_inactive_housing_not_used",
+  "description": "Checks that inactive housing is not used. There are 12 students. One apartment is inactive and one room in an active apartment is inactive. No accessibility involved.",
+  "constraints_config": {
+    "priorityFirst": {
+      "enabled": false,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "roommateMatch": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 9
+    },
+    "roommatePositiveOnly": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 10
+    },
+    "sameReligion": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "sectorMatching": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "ReligiousTogether": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 10
+    },
+    "avoidYearMix_1_with_3_4": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 8
+    },
+    "avoidAtudaimWithHasmaha": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 5
+    }
+  },
+  "expected_result": [
+    "successful_assignments should be 11 or 12 depending on how inactive apartments are filtered by the importer.",
+    "No student should be assigned to inactive apartment N14-A4.",
+    "No student should be assigned to inactive room N14-A3-R4.",
+    "No accessibility-related no_feasible warning should appear."
+  ],
+  "checklist": [
+    "Check assignments created.",
+    "Check no assigned room starts with N14-A4.",
+    "Check no assignment uses N14-A3-R4.",
+    "Check students_with_no_feasible_beds == []."
+  ]
+}

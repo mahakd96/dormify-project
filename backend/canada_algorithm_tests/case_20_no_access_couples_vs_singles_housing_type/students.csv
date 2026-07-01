@@ -1,0 +1,9 @@
+﻿student_id,first_name,last_name,gender,housing_type,placement_sector,requested_religion,religious_for_placement,academic_points_total,is_priority,needs_accessibility,roommate_request_student_id_1,roommate_request_flag_1,roommate_request_student_id_2,roommate_request_flag_2,roommate_request_student_id_3,roommate_request_flag_3,roommate_request_student_id_4,roommate_request_flag_4,roommate_request_student_id_5,roommate_request_flag_5
+N20-SF01,SingleFemale1,CS,female,single_female,unknown,not_specified,no_preference,20,False,False,,False,,False,,False,,False,,False
+N20-SF02,SingleFemale2,CS,female,single_female,unknown,not_specified,no_preference,20,False,False,,False,,False,,False,,False,,False
+N20-SM01,SingleMale1,CS,male,single_male,unknown,not_specified,no_preference,20,False,False,,False,,False,,False,,False,,False
+N20-SM02,SingleMale2,CS,male,single_male,unknown,not_specified,no_preference,20,False,False,,False,,False,,False,,False,,False
+N20-C01,Couple1,CS,male,couple,unknown,not_specified,no_preference,20,False,False,N20-C02,True,,False,,False,,False,,False
+N20-C02,Couple2,CS,female,couple,unknown,not_specified,no_preference,20,False,False,N20-C01,True,,False,,False,,False,,False
+N20-C03,Couple3,CS,male,couple,unknown,not_specified,no_preference,20,False,False,N20-C04,True,,False,,False,,False,,False
+N20-C04,Couple4,CS,female,couple,unknown,not_specified,no_preference,20,False,False,N20-C03,True,,False,,False,,False,,False

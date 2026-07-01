@@ -1,0 +1,9 @@
+﻿student_id,first_name,last_name,gender,housing_type,is_priority,priority_reason,needs_accessibility,placement_sector,religion,requested_religion,religious_for_placement,religious_preference,academic_points_total,special_status_1,special_status_2,special_status_3,special_status_4,roommate_request_student_id_1,roommate_request_flag_1,roommate_request_student_id_2,roommate_request_flag_2,roommate_request_student_id_3,roommate_request_flag_3,roommate_request_student_id_4,roommate_request_flag_4,roommate_request_student_id_5,roommate_request_flag_5
+N21-SF01,SingleFemale1,Short,female,single_female,False,,False,jewish,jewish,jewish,not_religious,not_religious,31,,,,,,False,,False,,False,,False,,False
+N21-SF02,SingleFemale2,Short,female,single_female,False,,False,jewish,jewish,jewish,not_religious,not_religious,32,,,,,,False,,False,,False,,False,,False
+N21-SM01,SingleMale1,Short,male,single_male,False,,False,arab,muslim,muslim,not_religious,not_religious,41,,,,,,False,,False,,False,,False,,False
+N21-SM02,SingleMale2,Short,male,single_male,False,,False,arab,muslim,muslim,not_religious,not_religious,42,,,,,,False,,False,,False,,False,,False
+N21-C01,Couple1,Short,female,couple,False,,False,jewish,jewish,jewish,not_religious,not_religious,51,,,,,,False,,False,,False,,False,,False
+N21-C02,Couple2,Short,male,couple,False,,False,jewish,jewish,jewish,not_religious,not_religious,52,,,,,,False,,False,,False,,False,,False
+N21-C03,Couple3,Short,female,couple,False,,False,jewish,jewish,jewish,not_religious,not_religious,53,,,,,,False,,False,,False,,False,,False
+N21-C04,Couple4,Short,male,couple,False,,False,jewish,jewish,jewish,not_religious,not_religious,54,,,,,,False,,False,,False,,False,,False

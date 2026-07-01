@@ -287,13 +287,15 @@ function AllocationPage({ language = 'he' }) {
     sectorMatching:         { enabled: true, strict: false, critical: false, weight: 7 },
     avoidYearMix_1_with_3_4:{ enabled: true, strict: false, critical: false, weight: 4 },
     avoidAtudaimWithHasmaha:{ enabled: true, strict: false, critical: false, weight: 4 },
-  });
+  }
+
+  );
 
   // ── Refs ────────────────────────────────────
-  const pollRef       = useRef(null);
-  const mountedRef    = useRef(true);
-  const runStartRef   = useRef(null);
-  const timerRef      = useRef(null);
+  const pollRef = useRef(null);
+  const mountedRef = useRef(true);
+  const runStartRef = useRef(null);
+  const timerRef = useRef(null);
 
   // ── Translations ────────────────────────────
   const t = useMemo(() => {
@@ -866,17 +868,17 @@ function AllocationPage({ language = 'he' }) {
 
   // ── Action Handlers ──────────────────────────
   const handleViewResults = useCallback(() => {
-    if (!result) return;
     navigate('/allocation/results', {
       state: {
-        result,
+        result: result || null,
         summary,
         constraints: effectiveConfig,
         region: summary?.region || null,
-        generatedAt: new Date().toISOString(),
+        generatedAt: result ? new Date().toISOString() : null,
       },
     });
   }, [navigate, result, summary, effectiveConfig]);
+
 
   const runAllocation = async () => {
     if (isRunning || isStopping || isDeleting) return;
@@ -1340,7 +1342,7 @@ function AllocationPage({ language = 'he' }) {
         </div>
       </div>
 
-      <style>{styles}</style>
+            <style>{styles}</style>
     </div>
   );
 }
@@ -1349,8 +1351,7 @@ function AllocationPage({ language = 'he' }) {
 // Styles
 // ─────────────────────────────────────────────
 
-const styles = `
-  /* ── Variables ────────────────────────────── */
+const styles = `  /* ── Variables ────────────────────────────── */
   .ap-page {
     --ap-bg: #f0f4f8;
     --ap-surface: #ffffff;

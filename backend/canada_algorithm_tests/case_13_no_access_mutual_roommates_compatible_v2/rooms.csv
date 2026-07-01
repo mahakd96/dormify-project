@@ -1,0 +1,17 @@
+﻿room_code,apartment_code,capacity,is_active,bed_label
+N13-A1-R1,N13-A1,1,True,Bed 1
+N13-A1-R2,N13-A1,1,True,Bed 1
+N13-A1-R3,N13-A1,1,True,Bed 1
+N13-A1-R4,N13-A1,1,True,Bed 1
+N13-A2-R1,N13-A2,1,True,Bed 1
+N13-A2-R2,N13-A2,1,True,Bed 1
+N13-A2-R3,N13-A2,1,True,Bed 1
+N13-A2-R4,N13-A2,1,True,Bed 1
+N13-A3-R1,N13-A3,1,True,Bed 1
+N13-A3-R2,N13-A3,1,True,Bed 1
+N13-A3-R3,N13-A3,1,True,Bed 1
+N13-A3-R4,N13-A3,1,True,Bed 1
+N13-A4-R1,N13-A4,1,True,Bed 1
+N13-A4-R2,N13-A4,1,True,Bed 1
+N13-A4-R3,N13-A4,1,True,Bed 1
+N13-A4-R4,N13-A4,1,True,Bed 1

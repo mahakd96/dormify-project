@@ -1,0 +1,5 @@
+﻿apartment_code,category,apartment_type,is_active,is_accessible,is_reserved,inactive_reason
+N20-SF,female,רווקות,True,False,False,
+N20-SM,male,רווקים,True,False,False,
+N20-C1,mixed,זוגות,True,False,False,
+N20-C2,mixed,זוגות,True,False,False,
