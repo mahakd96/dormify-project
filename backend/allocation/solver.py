@@ -172,23 +172,6 @@ def _is_hasmaha(student):
     return "הסמכה" in _collect_special_status_text(student)
 
 
-def _needs_accessibility(student):
-    return bool(
-        getattr(student, "needs_accessibility", False)
-        or (
-            getattr(student, "is_priority", False)
-            and "נגיש" in _safe_lower(getattr(student, "priority_reason", ""))
-        )
-    )
-
-
-def _apartment_accessibility_ok(student, apartment):
-    if not _needs_accessibility(student):
-        return True
-    if not hasattr(Apartment, "is_accessible"):
-        return True
-    return bool(getattr(apartment, "is_accessible", False))
-
 
 def _normalize_roommate_identifier(value):
     if value is None:
@@ -444,6 +427,32 @@ def _religion_key(student):
     return value
 
 
+def _is_religious_jewish(student):
+    """True when the student is both Jewish and observant at the RELIGIOUS level."""
+    return (
+        _religion_key(student) == _safe_lower(Student.Religion.Jewish)
+        and _religious_pref_key(student) == "religious"
+    )
+
+
+def _student_religious_state(student):
+    """
+    Returns the religion-restriction state this student imposes on their apartment,
+    or None if the student has no restriction (not RELIGIOUS).
+
+      ("rj",)         — Religious Jewish: apartment must contain only Jewish+RELIGIOUS
+      ("religion", r) — Religious non-Jewish (religion key r): apartment must contain
+                        only students with religion r (any observance level)
+      None            — not RELIGIOUS; student imposes no restriction
+    """
+    if _religious_pref_key(student) != "religious":
+        return None
+    r = _religion_key(student)
+    if r == _safe_lower(Student.Religion.Jewish):
+        return ("rj",)
+    return ("religion", r) if r else None
+
+
 def _sector_key(student):
     value = _safe_lower(_get_student_sector(student))
     if value in {"", "unknown", "לא ידוע", "not_specified", "לא צוין"}:
@@ -502,9 +511,32 @@ def _apartment_is_available_for_student(
     apartment,
     existing_assignments,
     existing_exclusive,
-    existing_religious_preferences,
     hard_religious_together,
+    existing_rj=False,
+    existing_non_rj=False,
+    existing_restricted_religions=frozenset(),
+    existing_religion_set=frozenset(),
 ):
+    """
+    Return True when the apartment is a feasible candidate for this student.
+
+    When hard_religious_together is True the rule works symmetrically:
+
+    Direction 1 — existing RELIGIOUS occupants restrict the apartment:
+      • If a Religious Jewish occupant is present, only Jewish+RELIGIOUS students
+        may enter.
+      • If a Religious non-Jewish occupant of religion R is present, only students
+        with religion R (any observance level) may enter.
+
+    Direction 2 — the new student's own restriction must not conflict with existing
+    occupants:
+      • A Religious Jewish student blocks entry unless all existing occupants are
+        also Religious Jewish (existing_non_rj must be False).
+      • A Religious non-Jewish student of religion R blocks entry unless all existing
+        occupants also have religion R (existing_religion_set ⊆ {R}).
+
+    An empty apartment is always available to any student.
+    """
     building = apartment.building
 
     if not bool(getattr(building, "is_active", True)):
@@ -518,8 +550,6 @@ def _apartment_is_available_for_student(
         return False
     if not _housing_matches_apartment(student, apartment):
         return False
-    if not _apartment_accessibility_ok(student, apartment):
-        return False
 
     if _student_is_exclusive(student):
         if existing_assignments:
@@ -528,10 +558,25 @@ def _apartment_is_available_for_student(
         return False
 
     if hard_religious_together:
-        student_preference = _religious_pref_key(student)
-        if student_preference and existing_religious_preferences:
-            if existing_religious_preferences != {student_preference}:
+        s_state = _student_religious_state(student)
+        s_religion = _religion_key(student)
+
+        # Direction 1: existing RELIGIOUS occupants restrict the apartment
+        if existing_rj and not _is_religious_jewish(student):
+            return False
+        for r in existing_restricted_religions:
+            if s_religion != r:
                 return False
+
+        # Direction 2: this student's restriction must not conflict with existing occupants
+        if s_state is not None:
+            if s_state[0] == "rj":
+                if existing_non_rj:
+                    return False
+            elif s_state[0] == "religion":
+                r = s_state[1]
+                if existing_religion_set - {r}:
+                    return False
 
     return True
 
@@ -599,16 +644,31 @@ def _prepare_inventory(rooms):
     active_bed_ids = {assignment.bed_id for assignment in active_assignments}
     existing_assignments_by_apartment = defaultdict(list)
     existing_exclusive_by_apartment = defaultdict(bool)
-    existing_religious_preferences_by_apartment = defaultdict(set)
+    # Per-apartment religion tracking for the ReligiousTogether hard constraint:
+    #   existing_rj_apartments        — apt_ids with ≥1 Religious Jewish occupant
+    #   existing_non_rj_apartments    — apt_ids with ≥1 non-Religious-Jewish occupant
+    #   existing_restricted_religion_by_apartment — religion keys of RELIGIOUS non-Jewish occupants
+    #   existing_religion_set_by_apartment        — religion keys of ALL occupants
+    existing_rj_apartments = set()
+    existing_non_rj_apartments = set()
+    existing_restricted_religion_by_apartment = defaultdict(set)
+    existing_religion_set_by_apartment = defaultdict(set)
 
     for assignment in active_assignments:
         apartment_id = assignment.bed.room.apartment_id
         existing_assignments_by_apartment[apartment_id].append(assignment)
         if _student_is_exclusive(assignment.student):
             existing_exclusive_by_apartment[apartment_id] = True
-        preference = _religious_pref_key(assignment.student)
-        if preference:
-            existing_religious_preferences_by_apartment[apartment_id].add(preference)
+        if _is_religious_jewish(assignment.student):
+            existing_rj_apartments.add(apartment_id)
+        else:
+            existing_non_rj_apartments.add(apartment_id)
+        state = _student_religious_state(assignment.student)
+        if state is not None and state[0] == "religion":
+            existing_restricted_religion_by_apartment[apartment_id].add(state[1])
+        r = _religion_key(assignment.student)
+        if r:
+            existing_religion_set_by_apartment[apartment_id].add(r)
 
     free_beds_by_apartment = defaultdict(list)
     free_beds_by_room = defaultdict(list)
@@ -636,7 +696,10 @@ def _prepare_inventory(rooms):
         "active_assignments": active_assignments,
         "existing_assignments_by_apartment": existing_assignments_by_apartment,
         "existing_exclusive_by_apartment": existing_exclusive_by_apartment,
-        "existing_religious_preferences_by_apartment": existing_religious_preferences_by_apartment,
+        "existing_rj_apartments": existing_rj_apartments,
+        "existing_non_rj_apartments": existing_non_rj_apartments,
+        "existing_restricted_religion_by_apartment": existing_restricted_religion_by_apartment,
+        "existing_religion_set_by_apartment": existing_religion_set_by_apartment,
         "free_beds_by_apartment": free_beds_by_apartment,
         "free_beds_by_room": free_beds_by_room,
         "apartments_by_id": apartments_by_id,
@@ -662,8 +725,11 @@ def _build_candidate_apartments(
                 apartment,
                 inventory["existing_assignments_by_apartment"].get(apartment_id, []),
                 inventory["existing_exclusive_by_apartment"].get(apartment_id, False),
-                inventory["existing_religious_preferences_by_apartment"].get(apartment_id, set()),
                 hard_religious_together,
+                existing_rj=apartment_id in inventory["existing_rj_apartments"],
+                existing_non_rj=apartment_id in inventory["existing_non_rj_apartments"],
+                existing_restricted_religions=inventory["existing_restricted_religion_by_apartment"].get(apartment_id, frozenset()),
+                existing_religion_set=inventory["existing_religion_set_by_apartment"].get(apartment_id, frozenset()),
             ):
                 candidates[student.id].append(apartment_id)
 
@@ -686,32 +752,80 @@ def _add_hard_religious_together(
     assignment_vars,
     student_candidates,
 ):
-    groups_by_apartment = defaultdict(lambda: defaultdict(list))
+    """
+    Enforce the ReligiousTogether hard rule for students in this CP-SAT run.
 
-    for student in students:
-        preference = _religious_pref_key(student)
-        if not preference:
-            continue
-        for apartment_id in student_candidates.get(student.id, []):
-            variable = assignment_vars.get((student.id, apartment_id))
-            if variable is not None:
-                groups_by_apartment[apartment_id][preference].append(variable)
+    Two constraint families are added per apartment:
 
+    Constraint A — RJ isolation:
+      has_rj is True iff any Religious Jewish student is assigned.
+      When has_rj is True, every non-Religious-Jewish variable is forced to 0.
+
+    Constraint B — per-religion isolation (one per non-Jewish religion that has
+      at least one RELIGIOUS candidate):
+      has_rel_<r> is True iff any RELIGIOUS student of religion r is assigned.
+      When has_rel_<r> is True, every student whose religion != r is forced to 0.
+
+    Together these rules ensure:
+      • Religious Jewish students share only with other Religious Jewish students.
+      • Religious non-Jewish students of religion R share only with students who
+        also have religion R (any observance level).
+      • Two RELIGIOUS students of different religions cannot share — the constraints
+        block each other symmetrically.
+      • Unrestricted (non-RELIGIOUS) students of any mix of religions may share
+        freely as long as no RELIGIOUS student is present.
+    """
     created = 0
     for apartment in apartments:
-        used_vars = []
-        for group_index, member_vars in enumerate(
-            groups_by_apartment.get(apartment.id, {}).values(),
-            start=1,
-        ):
-            used_var = model.NewBoolVar(
-                f"religious_group_a{apartment.id}_{group_index}"
-            )
-            _link_group_used_var(model, used_var, member_vars)
-            used_vars.append(used_var)
+        apt_id = apartment.id
+
+        rj_vars = []
+        non_rj_vars = []
+        religious_non_jewish_by_religion = defaultdict(list)
+        all_vars_by_religion = defaultdict(list)
+
+        for student in students:
+            if apt_id not in student_candidates.get(student.id, []):
+                continue
+            variable = assignment_vars.get((student.id, apt_id))
+            if variable is None:
+                continue
+
+            state = _student_religious_state(student)
+            r = _religion_key(student)
+
+            if _is_religious_jewish(student):
+                rj_vars.append(variable)
+            else:
+                non_rj_vars.append(variable)
+
+            if state is not None and state[0] == "religion":
+                religious_non_jewish_by_religion[state[1]].append(variable)
+
+            all_vars_by_religion[r].append(variable)
+
+        # Constraint A: RJ isolation
+        if rj_vars and non_rj_vars:
+            has_rj = model.NewBoolVar(f"has_rj_a{apt_id}")
+            _link_group_used_var(model, has_rj, rj_vars)
+            for v in non_rj_vars:
+                model.Add(has_rj + v <= 1)
             created += 1
-        if used_vars:
-            model.Add(sum(used_vars) <= 1)
+
+        # Constraint B: per-religion isolation for Religious non-Jewish students
+        for rel_r, rel_vars in religious_non_jewish_by_religion.items():
+            other_vars = [
+                v
+                for other_r, var_list in all_vars_by_religion.items()
+                if other_r != rel_r
+                for v in var_list
+            ]
+            if rel_vars and other_vars:
+                has_rel_r = model.NewBoolVar(f"has_rel_{rel_r}_a{apt_id}")
+                _link_group_used_var(model, has_rel_r, rel_vars)
+                for v in other_vars:
+                    model.Add(has_rel_r + v <= 1)
+                created += 1
 
     return created
 
@@ -811,16 +925,35 @@ def _add_greedy_hint(
     assignment_vars,
     student_candidates,
     free_capacity_by_apartment,
-    existing_religious_preferences,
+    existing_rj_apartments,
+    existing_non_rj_apartments,
+    existing_restricted_religion_by_apartment,
+    existing_religion_set_by_apartment,
     hard_religious_together,
 ):
+    """
+    Provide a warm-start hint to CP-SAT using a greedy assignment pass.
+
+    When hard_religious_together is True the hint replicates the same two-directional
+    compatibility check used by the real constraint and candidate filtering, tracking
+    per apartment:
+      apt_rj_set               — apt_ids that have ≥1 Religious Jewish occupant
+      apt_non_rj_set           — apt_ids that have ≥1 non-RJ occupant
+      apt_restricted_religions — religion keys of RELIGIOUS non-Jewish occupants
+      apt_religion_set         — all religion keys of occupants placed so far
+    """
     remaining_capacity = dict(free_capacity_by_apartment)
     exclusive_apartments = set()
-    apartment_preference = {
-        apartment_id: next(iter(preferences))
-        for apartment_id, preferences in existing_religious_preferences.items()
-        if len(preferences) == 1
-    }
+
+    apt_rj_set = set(existing_rj_apartments)
+    apt_non_rj_set = set(existing_non_rj_apartments)
+    apt_restricted_religions = defaultdict(set)
+    for apt_id, rel_set in existing_restricted_religion_by_apartment.items():
+        apt_restricted_religions[apt_id] = set(rel_set)
+    apt_religion_set = defaultdict(set)
+    for apt_id, rel_set in existing_religion_set_by_apartment.items():
+        apt_religion_set[apt_id] = set(rel_set)
+
     selected = {}
 
     ordered_students = sorted(
@@ -834,7 +967,6 @@ def _add_greedy_hint(
     )
 
     for student in ordered_students:
-        preference = _religious_pref_key(student) if hard_religious_together else ""
         is_exclusive = _student_is_exclusive(student)
 
         candidates = sorted(
@@ -851,14 +983,29 @@ def _add_greedy_hint(
             if apartment_id in exclusive_apartments:
                 continue
 
-            current_preference = apartment_preference.get(apartment_id)
-            if (
-                hard_religious_together
-                and preference
-                and current_preference
-                and current_preference != preference
-            ):
-                continue
+            if hard_religious_together:
+                s_state = _student_religious_state(student)
+                s_religion = _religion_key(student)
+
+                # Direction 1: existing restriction blocks student
+                if apartment_id in apt_rj_set and not _is_religious_jewish(student):
+                    continue
+                conflict = False
+                for r in apt_restricted_religions.get(apartment_id, set()):
+                    if s_religion != r:
+                        conflict = True
+                        break
+                if conflict:
+                    continue
+
+                # Direction 2: student's restriction blocks existing occupants
+                if s_state is not None:
+                    if s_state[0] == "rj" and apartment_id in apt_non_rj_set:
+                        continue
+                    if s_state[0] == "religion":
+                        r = s_state[1]
+                        if apt_religion_set.get(apartment_id, set()) - {r}:
+                            continue
 
             selected[student.id] = apartment_id
 
@@ -868,8 +1015,18 @@ def _add_greedy_hint(
             else:
                 remaining_capacity[apartment_id] -= 1
 
-            if hard_religious_together and preference and not current_preference:
-                apartment_preference[apartment_id] = preference
+            if hard_religious_together:
+                s_state = _student_religious_state(student)
+                s_religion = _religion_key(student)
+                if _is_religious_jewish(student):
+                    apt_rj_set.add(apartment_id)
+                else:
+                    apt_non_rj_set.add(apartment_id)
+                if s_state is not None and s_state[0] == "religion":
+                    apt_restricted_religions[apartment_id].add(s_state[1])
+                if s_religion:
+                    apt_religion_set[apartment_id].add(s_religion)
+
             break
 
     for key, variable in assignment_vars.items():
@@ -1142,7 +1299,10 @@ def run_improved_ortools_allocation(
             assignment_vars,
             student_candidates,
             free_capacity_by_apartment,
-            inventory["existing_religious_preferences_by_apartment"],
+            inventory["existing_rj_apartments"],
+            inventory["existing_non_rj_apartments"],
+            inventory["existing_restricted_religion_by_apartment"],
+            inventory["existing_religion_set_by_apartment"],
             hard_religious_together,
         )
 

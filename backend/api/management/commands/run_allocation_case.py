@@ -568,38 +568,12 @@ class Command(BaseCommand):
         """
         patches = []
 
-        accessibility_by_student_id = {
-            row["student_id"].strip(): self.parse_bool(
-                row.get("needs_accessibility", "False")
-            )
-            for row in students_rows
-        }
-        accessible_by_apartment_number = {
-            row["apartment_code"].strip(): self.parse_bool(
-                row.get("is_accessible", "False")
-            )
-            for row in apartments_rows
-        }
         reserved_by_apartment_number = {
             row["apartment_code"].strip(): self.parse_bool(
                 row.get("is_reserved", "False")
             )
             for row in apartments_rows
         }
-
-        if not self.has_model_field(Student, "needs_accessibility"):
-            old = Student.__dict__.get("needs_accessibility")
-            Student.needs_accessibility = property(
-                lambda obj: accessibility_by_student_id.get(obj.student_id, False)
-            )
-            patches.append((Student, "needs_accessibility", old))
-
-        if not self.has_model_field(Apartment, "is_accessible"):
-            old = Apartment.__dict__.get("is_accessible")
-            Apartment.is_accessible = property(
-                lambda obj: accessible_by_apartment_number.get(obj.number, False)
-            )
-            patches.append((Apartment, "is_accessible", old))
 
         if not self.has_model_field(Apartment, "is_reserved"):
             old = Apartment.__dict__.get("is_reserved")
@@ -1025,7 +999,6 @@ class Command(BaseCommand):
 
         gender_violations = []
         reserved_violations = []
-        accessibility_violations = []
         for item in report["assignments"]:
             student_row = student_rows_by_id[item["student_id"]]
             apartment_row = apartment_rows_by_code[item["apartment_code"]]
@@ -1050,15 +1023,6 @@ class Command(BaseCommand):
                     f"{item['student_id']} -> {item['apartment_code']}"
                 )
 
-            if self.parse_bool(
-                student_row.get("needs_accessibility", "False")
-            ) and not self.parse_bool(
-                apartment_row.get("is_accessible", "False")
-            ):
-                accessibility_violations.append(
-                    f"{item['student_id']} -> {item['apartment_code']}"
-                )
-
         self.add_check(
             report,
             "Gender hard rule respected",
@@ -1074,14 +1038,6 @@ class Command(BaseCommand):
             len(reserved_violations),
             not reserved_violations,
             "; ".join(reserved_violations),
-        )
-        self.add_check(
-            report,
-            "Accessibility-needing students use accessible apartments only",
-            0,
-            len(accessibility_violations),
-            not accessibility_violations,
-            "; ".join(accessibility_violations),
         )
 
         # Hard priority expectation, when the solver returned a solution.
