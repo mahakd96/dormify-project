@@ -1844,20 +1844,30 @@ def allocation_history(request):
 def allocation_results(request):
     """
     Return active BedAssignment rows for the requesting user's region.
-    Central admin may pass ?region=<id> to filter. Without a region, central admin sees all regions.
+
+    central_admin / region_boss may pass ?region=<id> for read-only cross-region
+    access; without one, central_admin sees all regions and region_boss defaults
+    to their own. Employees always get their own region — any region query param
+    is ignored.
     """
     region_value = request.query_params.get('region') or None
+    user = request.user
 
-    if region_value:
-        region = _resolve_region(region_value)
-        if not region:
-            return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
-    elif request.user.is_central_admin:
-        region = None
-    elif request.user.region:
-        region = request.user.region
+    if user.is_central_admin or user.is_boss:
+        if region_value:
+            region = _resolve_region(region_value)
+            if not region:
+                return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        elif user.is_central_admin:
+            region = None
+        elif user.region:
+            region = user.region
+        else:
+            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
     else:
-        return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+        if not user.region:
+            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+        region = user.region
 
     qs = BedAssignment.objects.filter(
         status=BedAssignment.Status.ACTIVE
