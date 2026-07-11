@@ -583,9 +583,19 @@ class BuildingViewSet(viewsets.ModelViewSet):
             'dorm_type__region',
         )
         user = self.request.user
+        region_value = self.request.query_params.get('region')
 
-        if user.is_central_admin:
-            return queryset
+        if user.is_central_admin or user.is_boss:
+            if region_value:
+                region = _resolve_region(region_value)
+                if not region:
+                    return queryset.none()
+                return queryset.filter(dorm_type__region=region)
+            if user.is_central_admin:
+                return queryset
+            if not user.region_id:
+                return queryset.none()
+            return queryset.filter(dorm_type__region_id=user.region_id)
 
         if not user.region_id:
             return queryset.none()
@@ -669,8 +679,19 @@ class RoomViewSet(viewsets.ReadOnlyModelViewSet):
         ).all()
 
         user = self.request.user
+        region_value = self.request.query_params.get('region')
 
-        if not user.is_central_admin and user.region_id:
+        if (user.is_central_admin or user.is_boss) and region_value:
+            region = _resolve_region(region_value)
+            if not region:
+                return queryset.none()
+            return queryset.filter(
+                apartment__building__dorm_type__region=region
+            )
+
+        if not user.is_central_admin:
+            if not user.region_id:
+                return queryset.none()
             queryset = queryset.filter(
                 apartment__building__dorm_type__region=user.region
             )
@@ -699,11 +720,26 @@ class StudentViewSet(viewsets.ModelViewSet):
             'assigned_room',
         ).all()
 
-        if not self.request.user.is_central_admin:
-            if not self.request.user.region_id:
+        user = self.request.user
+        region_value = self.request.query_params.get('region')
+
+        if user.is_central_admin or user.is_boss:
+            if region_value:
+                region = _resolve_region(region_value)
+                if not region:
+                    return queryset.none()
+                queryset = queryset.filter(accepted_dorm_type__region=region)
+            elif not user.is_central_admin:
+                if not user.region_id:
+                    return queryset.none()
+                queryset = queryset.filter(
+                    accepted_dorm_type__region_id=user.region_id
+                )
+        else:
+            if not user.region_id:
                 return queryset.none()
             queryset = queryset.filter(
-                accepted_dorm_type__region_id=self.request.user.region_id
+                accepted_dorm_type__region_id=user.region_id
             )
         search = self.request.query_params.get('search')
         if search:
@@ -1928,7 +1964,7 @@ def allocation_results(request):
 def allocation_summary(request):
     user = request.user
 
-    if user.is_central_admin:
+    if user.is_central_admin or user.is_boss:
         region_value = (
             request.query_params.get('region')
             or request.query_params.get('region_id')
@@ -1941,7 +1977,7 @@ def allocation_summary(request):
                 return Response({
                     'error': 'אזור לא נמצא'
                 }, status=status.HTTP_404_NOT_FOUND)
-        else:
+        elif user.is_central_admin:
             return Response({
                 'region': None,
                 'total_students': 0,
@@ -1991,6 +2027,12 @@ def allocation_summary(request):
                 'latest_inbox': None,
                 'latest_run': None,
             }, status=status.HTTP_200_OK)
+        elif user.region:
+            region = user.region
+        else:
+            return Response({
+                'error': 'המשתמש אינו משויך לאזור'
+            }, status=status.HTTP_400_BAD_REQUEST)
     else:
         if not user.region:
             return Response({
@@ -3564,8 +3606,25 @@ def what_if_availability_confirm(request):
 @permission_classes([IsAuthenticated])
 def statistics(request):
     user = request.user
+    region_value = request.query_params.get('region')
 
-    if user.is_central_admin:
+    if user.is_central_admin or user.is_boss:
+        if region_value:
+            region = _resolve_region(region_value)
+            if not region:
+                return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        elif user.is_central_admin:
+            region = None
+        elif user.region:
+            region = user.region
+        else:
+            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        if not user.region:
+            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+        region = user.region
+
+    if region is None:
         students = Student.objects.all()
         buildings = Building.objects.filter(is_active=True)
         rooms = Room.objects.filter(
@@ -3582,41 +3641,41 @@ def statistics(request):
         transfers = Transfer.objects.filter(status=Transfer.Status.PENDING)
     else:
         students = Student.objects.filter(
-            accepted_dorm_type__region=user.region
+            accepted_dorm_type__region=region
         )
         buildings = Building.objects.filter(
-            dorm_type__region=user.region,
+            dorm_type__region=region,
             is_active=True
         )
         rooms = Room.objects.filter(
-            apartment__building__dorm_type__region=user.region,
+            apartment__building__dorm_type__region=region,
             is_active=True,
             apartment__is_active=True,
             apartment__building__is_active=True,
         )
         active_assignments = BedAssignment.objects.filter(
             status=BedAssignment.Status.ACTIVE,
-            bed__room__apartment__building__dorm_type__region=user.region,
+            bed__room__apartment__building__dorm_type__region=region,
             bed__room__is_active=True,
             bed__room__apartment__is_active=True,
             bed__room__apartment__building__is_active=True,
         )
         transfers = Transfer.objects.filter(
-            Q(from_room__apartment__building__dorm_type__region=user.region) |
-            Q(to_room__apartment__building__dorm_type__region=user.region),
+            Q(from_room__apartment__building__dorm_type__region=region) |
+            Q(to_room__apartment__building__dorm_type__region=region),
             status=Transfer.Status.PENDING
         )
 
     total_capacity = sum(rooms.values_list('capacity', flat=True))
-    if user.is_central_admin:
+    if region is None:
         total_buildings_count = Building.objects.count()
         inactive_buildings_count = Building.objects.filter(is_active=False).count()
     else:
         total_buildings_count = Building.objects.filter(
-            dorm_type__region=user.region
+            dorm_type__region=region
         ).count()
         inactive_buildings_count = Building.objects.filter(
-            dorm_type__region=user.region,
+            dorm_type__region=region,
             is_active=False
         ).count()
 

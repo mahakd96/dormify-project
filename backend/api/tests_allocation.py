@@ -581,3 +581,188 @@ class AllocationResultsRegionAccessTest(TestCase):
 
         student_ids = [a['student_id'] for a in resp.data['assignments']]
         self.assertIn(self.student_a.student_id, student_ids)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Case 3B - region-manager (region_boss) read access to another
+# region's students/buildings/rooms/statistics/allocation-summary, while
+# employees stay pinned to their own region and central_admin keeps existing
+# behavior (unfiltered by default, filterable by ?region=).
+#
+# Self-contained, reuses _make_region_with_data from the allocation_results
+# fix above; does not use the pre-existing broken shared helpers.
+# ---------------------------------------------------------------------------
+
+class RegionAccessByRoleTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+        self.region_a, self.employee_a, self.student_a = _make_region_with_data(
+            'case3b-region-a', 'Case3B Region A',
+            User.Role.EMPLOYEE, 'case3b-emp-a@test.com', 'CASE3B-STU-A',
+        )
+        self.region_b, self.boss_b, self.student_b = _make_region_with_data(
+            'case3b-region-b', 'Case3B Region B',
+            User.Role.REGION_BOSS, 'case3b-boss-b@test.com', 'CASE3B-STU-B',
+        )
+        self.central_admin = User.objects.create_user(
+            username='case3b-admin@test.com',
+            email='case3b-admin@test.com',
+            password='testpass123',
+            role=User.Role.CENTRAL_ADMIN,
+            first_name='Test',
+            last_name='Admin',
+        )
+
+    # ---- /api/students/ ----
+
+    def test_students_employee_pinned_to_own_region(self):
+        self.client.force_authenticate(user=self.employee_a)
+
+        resp = self.client.get('/api/students/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        student_ids = [s['student_id'] for s in resp.data]
+        self.assertIn(self.student_a.student_id, student_ids)
+        self.assertNotIn(self.student_b.student_id, student_ids)
+
+        resp = self.client.get('/api/students/', {'region': self.region_b.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        student_ids = [s['student_id'] for s in resp.data]
+        self.assertIn(self.student_a.student_id, student_ids)
+        self.assertNotIn(self.student_b.student_id, student_ids)
+
+    def test_students_region_boss_can_read_foreign_region(self):
+        self.client.force_authenticate(user=self.boss_b)
+        resp = self.client.get('/api/students/', {'region': self.region_a.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        student_ids = [s['student_id'] for s in resp.data]
+        self.assertIn(self.student_a.student_id, student_ids)
+
+    def test_students_central_admin_can_filter_by_region(self):
+        self.client.force_authenticate(user=self.central_admin)
+        resp = self.client.get('/api/students/', {'region': self.region_b.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        student_ids = [s['student_id'] for s in resp.data]
+        self.assertIn(self.student_b.student_id, student_ids)
+        self.assertNotIn(self.student_a.student_id, student_ids)
+
+    # ---- /api/buildings/ ----
+
+    def test_buildings_employee_pinned_to_own_region(self):
+        self.client.force_authenticate(user=self.employee_a)
+        resp = self.client.get('/api/buildings/', {'region': self.region_b.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        regions = {b['region'] for b in resp.data}
+        self.assertEqual(regions, {self.region_a.id})
+
+    def test_buildings_region_boss_can_read_foreign_region(self):
+        self.client.force_authenticate(user=self.boss_b)
+        resp = self.client.get('/api/buildings/', {'region': self.region_a.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        regions = {b['region'] for b in resp.data}
+        self.assertEqual(regions, {self.region_a.id})
+
+    def test_buildings_central_admin_can_filter_by_region(self):
+        self.client.force_authenticate(user=self.central_admin)
+        resp = self.client.get('/api/buildings/', {'region': self.region_b.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        regions = {b['region'] for b in resp.data}
+        self.assertEqual(regions, {self.region_b.id})
+
+    # ---- /api/rooms/ ----
+
+    def test_rooms_employee_pinned_to_own_region(self):
+        self.client.force_authenticate(user=self.employee_a)
+        resp = self.client.get('/api/rooms/', {'region': self.region_b.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        regions = {r['region'] for r in resp.data}
+        self.assertEqual(regions, {self.region_a.id})
+
+    def test_rooms_region_boss_can_read_foreign_region(self):
+        self.client.force_authenticate(user=self.boss_b)
+        resp = self.client.get('/api/rooms/', {'region': self.region_a.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        regions = {r['region'] for r in resp.data}
+        self.assertEqual(regions, {self.region_a.id})
+
+    def test_rooms_central_admin_can_filter_by_region(self):
+        self.client.force_authenticate(user=self.central_admin)
+        resp = self.client.get('/api/rooms/', {'region': self.region_a.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        regions = {r['region'] for r in resp.data}
+        self.assertEqual(regions, {self.region_a.id})
+
+    def test_rooms_non_central_user_without_region_returns_empty(self):
+        employee_no_region = User.objects.create_user(
+            username='case3b-emp-no-region@test.com',
+            email='case3b-emp-no-region@test.com',
+            password='testpass123',
+            role=User.Role.EMPLOYEE,
+            first_name='Test',
+            last_name='NoRegion',
+        )
+        self.client.force_authenticate(user=employee_no_region)
+
+        resp = self.client.get('/api/rooms/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(list(resp.data), [])
+
+        resp = self.client.get('/api/rooms/', {'region': self.region_a.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(list(resp.data), [])
+
+    # ---- /api/statistics/ ----
+
+    def test_statistics_employee_pinned_to_own_region(self):
+        self.client.force_authenticate(user=self.employee_a)
+        resp = self.client.get('/api/statistics/', {'region': self.region_b.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['total_students'], 1)
+        self.assertEqual(resp.data['total_buildings'], 1)
+
+    def test_statistics_region_boss_can_read_foreign_region(self):
+        self.client.force_authenticate(user=self.boss_b)
+        resp = self.client.get('/api/statistics/', {'region': self.region_a.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['total_students'], 1)
+
+    def test_statistics_central_admin_can_filter_by_region(self):
+        self.client.force_authenticate(user=self.central_admin)
+        resp = self.client.get('/api/statistics/', {'region': self.region_a.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['total_students'], 1)
+
+    def test_statistics_central_admin_no_region_sees_all(self):
+        self.client.force_authenticate(user=self.central_admin)
+        resp = self.client.get('/api/statistics/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['total_students'], 2)
+
+    # ---- /api/allocation/summary/ ----
+
+    def test_allocation_summary_employee_pinned_to_own_region(self):
+        self.client.force_authenticate(user=self.employee_a)
+        resp = self.client.get('/api/allocation/summary/', {'region': self.region_b.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['region']['id'], self.region_a.id)
+        self.assertEqual(resp.data['total_students'], 1)
+
+    def test_allocation_summary_region_boss_can_read_foreign_region(self):
+        self.client.force_authenticate(user=self.boss_b)
+        resp = self.client.get('/api/allocation/summary/', {'region': self.region_a.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['region']['id'], self.region_a.id)
+        self.assertEqual(resp.data['total_students'], 1)
+
+    def test_allocation_summary_central_admin_can_filter_by_region(self):
+        self.client.force_authenticate(user=self.central_admin)
+        resp = self.client.get('/api/allocation/summary/', {'region': self.region_b.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['region']['id'], self.region_b.id)
+
+    def test_allocation_summary_central_admin_no_region_returns_defaults(self):
+        self.client.force_authenticate(user=self.central_admin)
+        resp = self.client.get('/api/allocation/summary/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data['region'])
+        self.assertEqual(resp.data['total_students'], 0)
