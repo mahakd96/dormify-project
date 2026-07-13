@@ -443,6 +443,22 @@ def validate_apartment_assignment(student: Student, room: Room):
             f'but apartment has category={apartment.category}.'
         )
 
+    # Z3/Z4 exclusivity: a Student record with COUPLE/FAMILY housing type
+    # represents one COMPLETE application (the applicant and their
+    # partner/family, who are not tracked as separate Student records) —
+    # never one member of a shared household. An apartment already holding
+    # any other active assignment is unavailable, unconditionally; there is
+    # no second Student record that may ever join it.
+    if student.housing_type in (
+        Student.HousingType.COUPLE,
+        Student.HousingType.FAMILY,
+    ) and other_active_assignments.exists():
+        raise ValueError(
+            'This apartment already has an active assignment. Exclusive '
+            'couple/family apartments may only be assigned to one Student '
+            'record.'
+        )
+
 
 def assign_student_to_room(
     student: Student,
@@ -601,6 +617,19 @@ class BuildingViewSet(viewsets.ModelViewSet):
             return queryset.none()
 
         return queryset.filter(dorm_type__region_id=user.region_id)
+
+    def update(self, request, *args, **kwargs):
+        # Editing a building (e.g. gender_restriction) is a boss-level
+        # action; ordinary employees may only view. get_queryset() above
+        # already scopes region_boss users to their own region, so a boss
+        # editing a building outside their region gets a 404 from
+        # get_object() below rather than reaching this check.
+        if not request.user.is_boss:
+            return Response(
+                {'error': 'רק מנהל אזור או מנהל מרכזי יכול לערוך בניין'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().update(request, *args, **kwargs)
 
     @action(detail=True, methods=['get'])
     def apartments(self, request, pk=None):
@@ -4203,12 +4232,32 @@ def get_or_create_dorm_type_from_excel(dorm_code=None, dorm_name=None):
     return None
 
 
-def is_accessibility_priority(row):
+def read_accessibility_fields(row):
+    """
+    Read the raw accessibility/medical columns from the Excel row, exactly
+    as imported — independent of whether they end up implying priority.
+    """
     explicit_flag = parse_yes_no_code(get_alias_value(row, 'accessibility_flag', default=''))
-    disability_percent = safe_decimal(get_alias_value(row, 'disability_percent', default=''), default=Decimal('0'))
+    disability_percent = safe_decimal(get_alias_value(row, 'disability_percent', default=''), default=None)
     medical_reason = safe_str(get_alias_value(row, 'medical_reason', default=''))
+    return explicit_flag, disability_percent, medical_reason
 
+
+def is_accessibility_priority(row):
+    explicit_flag, disability_percent, medical_reason = read_accessibility_fields(row)
     return explicit_flag or (disability_percent is not None and disability_percent > 0) or bool(medical_reason)
+
+
+def priority_fields_from_special_statuses(*special_statuses):
+    """
+    is_priority/priority_reason are derived solely from special_status_1..4.
+    Accessibility/medical data (is_accessibility_priority) is imported and
+    preserved for the dorm office to allocate those students manually, but
+    must never affect is_priority, the solver, priority score, clustering,
+    or building rules.
+    """
+    non_empty = [status for status in special_statuses if status]
+    return bool(non_empty), ' | '.join(non_empty)
 
 
 def filter_payload_to_student_fields(payload):
@@ -4234,9 +4283,21 @@ def build_student_payload_from_row(row, existing_student=None, sheet_name=''):
         decision_dorm_name
     )
 
-    needs_accessibility = is_accessibility_priority(row)
+    # Accessibility/medical data is imported and stored on its own fields
+    # (accessibility_flag/disability_percent/medical_reason) so the dorm
+    # office can allocate these students manually. It must never feed
+    # is_priority — see priority_fields_from_special_statuses below.
+    accessibility_flag, disability_percent, medical_reason = read_accessibility_fields(row)
     placement_sector = parse_placement_sector(row)
     allocation_group_value = get_alias_value(row, 'allocation_group', default='')
+
+    special_status_1 = safe_str(get_alias_value(row, 'special_status_1'))
+    special_status_2 = safe_str(get_alias_value(row, 'special_status_2'))
+    special_status_3 = safe_str(get_alias_value(row, 'special_status_3'))
+    special_status_4 = safe_str(get_alias_value(row, 'special_status_4'))
+    is_priority, priority_reason = priority_fields_from_special_statuses(
+        special_status_1, special_status_2, special_status_3, special_status_4,
+    )
 
     current_dorm_type_value = (
         accepted_dorm_type.name
@@ -4287,17 +4348,21 @@ def build_student_payload_from_row(row, existing_student=None, sheet_name=''):
         'roommate_request_flag_4': extract_roommate_flag(get_alias_value(row, 'roommate_flag_4')),
         'roommate_request_flag_5': extract_roommate_flag(get_alias_value(row, 'roommate_flag_5')),
 
-        'special_status_1': safe_str(get_alias_value(row, 'special_status_1')),
-        'special_status_2': safe_str(get_alias_value(row, 'special_status_2')),
-        'special_status_3': safe_str(get_alias_value(row, 'special_status_3')),
-        'special_status_4': safe_str(get_alias_value(row, 'special_status_4')),
+        'special_status_1': special_status_1,
+        'special_status_2': special_status_2,
+        'special_status_3': special_status_3,
+        'special_status_4': special_status_4,
 
         'study_points': safe_decimal(get_alias_value(row, 'study_points', default=''), default=None),
         'current_address': safe_str(get_alias_value(row, 'current_address', default='')),
         'current_dorm_type': current_dorm_type_value,
 
-        'is_priority': needs_accessibility,
-        'priority_reason': 'נגישות/רפואי' if needs_accessibility else '',
+        'is_priority': is_priority,
+        'priority_reason': priority_reason,
+
+        'accessibility_flag': accessibility_flag,
+        'disability_percent': disability_percent,
+        'medical_reason': medical_reason,
     }
 
     optional_fields = {
