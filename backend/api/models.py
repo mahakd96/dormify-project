@@ -161,6 +161,10 @@ class DormType(models.Model):
         return f"{self.code} - {self.name} ({region_name})"
 
 class Building(models.Model):
+    class GenderRestriction(models.TextChoices):
+        MALE = 'male', _('בנים בלבד')
+        FEMALE = 'female', _('בנות בלבד')
+
     number = models.PositiveIntegerField(null=True, blank=True)
     dorm_type = models.ForeignKey(
         DormType,
@@ -170,6 +174,17 @@ class Building(models.Model):
         blank=True
     )
     is_active = models.BooleanField(default=True)
+    gender_restriction = models.CharField(
+        max_length=10,
+        choices=GenderRestriction.choices,
+        blank=True,
+        verbose_name=_('הגבלת מגדר לבניין'),
+        help_text=_(
+            'לבניינים עם שירותים משותפים: כל הבניין מוגבל למגדר אחד, '
+            'ללא קשר לקטגוריית הדירות. ריק = ללא הגבלת בניין (ברירת מחדל).'
+        ),
+    )
+
     class Meta:
         verbose_name = _('בניין')
         verbose_name_plural = _('בניינים')
@@ -477,6 +492,20 @@ class Student(models.Model):
 
     is_priority = models.BooleanField(default=False)
     priority_reason = models.CharField(max_length=255, blank=True)
+
+    # Accessibility/medical import data. Kept intentionally separate from
+    # is_priority/priority_reason: accessible students are allocated
+    # manually by the dorm office, not by the solver's priorityFirst rule.
+    accessibility_flag = models.BooleanField(default=False)
+    disability_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name=_('אחוז נכות'),
+    )
+    medical_reason = models.CharField(max_length=255, blank=True)
+
     study_points = models.DecimalField(
         max_digits=8,
         decimal_places=2,

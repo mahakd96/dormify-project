@@ -220,6 +220,7 @@ class BuildingSerializer(serializers.ModelSerializer):
             'region',
             'region_name',
             'is_active',
+            'gender_restriction',
         ]
 
 
@@ -432,6 +433,9 @@ class StudentSerializer(serializers.ModelSerializer):
             'special_status_4',
             'is_priority',
             'priority_reason',
+            'accessibility_flag',
+            'disability_percent',
+            'medical_reason',
             'study_points',
             'current_address',
             'current_dorm_type',
