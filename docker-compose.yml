@@ -3,6 +3,8 @@ services:
     image: postgres:16
     container_name: dormify_test_db
     restart: always
+    profiles:
+      - local-db
     environment:
       POSTGRES_DB: dormify_test
       POSTGRES_USER: dormify_user
@@ -28,8 +30,6 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
-    depends_on:
-      - test_db
 
   frontend:
     build:
