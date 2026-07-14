@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { studentsAPI, requestsAPI } from '../services/api';
+import { studentsAPI, requestsAPI, regionsAPI } from '../services/api';
+import { useAuth } from '../context/AuthContext';
+import BedMatchPicker, { assignActionLabel, mergeBuildings } from '../components/BedMatchPicker';
 import {
   Search, X, Plus, Loader2, Check, AlertTriangle,
   Home, DoorOpen, FileText, MapPin, Building2, BedDouble,
@@ -32,6 +34,7 @@ const TYPE_CFG = {
   other:          { color:'amber',  labelHe:'בקשה אחרת',    labelEn:'Other',            Icon: FileText  },
   add_student:    { color:'blue',   labelHe:'הוספת סטודנט', labelEn:'Add Student',      Icon: UserPlus  },
   remove_student: { color:'rose',   labelHe:'הסרה ממעונות', labelEn:'Remove Student',   Icon: UserMinus },
+  swap:           { color:'indigo', labelHe:'חילוף בין סטודנטים', labelEn:'Student Swap', Icon: RefreshCw },
 };
 const STATUS_CFG = {
   pending:  { color:'amber', labelHe:'ממתינה', labelEn:'Pending',  Icon: Clock       },
@@ -164,37 +167,6 @@ const PickedBar = ({ student, onClear }) => {
   );
 };
 
-// ── Recommendation card ───────────────────────────────────────
-const RecCard = ({ opt, index, selected, onSelect }) => {
-  const isRec = opt.match==='empty' || opt.recommended;
-  const score = opt.score ?? opt.confidence;
-  return (
-    <button type="button"
-      className={`rec-card${selected?' rec-sel':''} match-${opt.match||'ok'}`}
-      onClick={()=>onSelect(opt)}>
-      {isRec && <div className="rec-star"><Star size={8} fill="currentColor"/> מומלץ</div>}
-      <div className="rec-hdr">
-        <span className="rec-num">#{index+1}</span>
-        {score!=null && <span className="rec-score">{Math.round(score)}%</span>}
-      </div>
-      <div className="rec-loc">
-        <span><Building2 size={10}/> בניין {opt.building}</span>
-        <span><DoorOpen size={10}/>  דירה {opt.apartment}</span>
-        <span><Home size={10}/>      חדר {opt.room}</span>
-        {opt.bed_label && <span><BedDouble size={10}/> {opt.bed_label}</span>}
-      </div>
-      {Array.isArray(opt.apartment_residents) && opt.apartment_residents.length>0 && (
-        <div className="rec-res">
-          {opt.apartment_residents.slice(0,3).map(r=>(
-            <span key={r.id} className="res-chip">{(r.full_name||'?')[0].toUpperCase()}</span>
-          ))}
-          {opt.apartment_residents.length>3 && <span className="rec-more">+{opt.apartment_residents.length-3}</span>}
-        </div>
-      )}
-      {selected && <div className="rec-chk"><Check size={11}/> נבחר</div>}
-    </button>
-  );
-};
 
 // ── Add Student Wizard ────────────────────────────────────────
 const AddStudentWizard = ({ onSubmit, onCancel, submitting, error }) => {
@@ -273,7 +245,10 @@ const AddStudentWizard = ({ onSubmit, onCancel, submitting, error }) => {
         <span className="wz-prog">{step+1}/{steps.length}</span>
         {step<steps.length-1
           ? <button className="wz-next wz-blue" disabled={!canNext()} onClick={()=>setStep(s=>s+1)}>המשך <ArrowLeft size={13}/></button>
-          : <button className="wz-next wz-blue" disabled={submitting} onClick={()=>onSubmit({...d,request_type:'add_student'})}>
+          : <button className="wz-next wz-blue" disabled={submitting} onClick={()=>{
+              const { reason, ...studentFields } = d;
+              onSubmit({ request_type:'add_student', reason, student_data: studentFields });
+            }}>
               {submitting?<Spinner size={13}/>:<Check size={13}/>} שלח
             </button>}
       </div>
@@ -343,60 +318,244 @@ const RemoveWizard = ({ onSubmit, onCancel, submitting, error }) => {
   );
 };
 
+// ── Swap Wizard (two students swap current beds/rooms) ────────
+const SwapWizard = ({ onSubmit, onCancel, submitting, error }) => {
+  const [step, setStep] = useState(0);
+  const [studentA, setStudentA] = useState(null);
+  const [studentB, setStudentB] = useState(null);
+  const [reason, setReason] = useState('');
+  const steps = ['סטודנט א׳','סטודנט ב׳','סיבה','אישור'];
+
+  const canNext = () => {
+    if (step===0) return !!studentA;
+    if (step===1) return !!studentB && studentB.id !== studentA?.id;
+    if (step===2) return reason.trim().length>0;
+    return true;
+  };
+
+  const AssignmentBox = ({ student }) => (
+    <div className="assignment-panel violet-panel">
+      <div className="ap-row"><Building2 size={13}/><span>בניין</span><strong>{student.current_building||'—'}</strong></div>
+      <div className="ap-row"><DoorOpen size={13}/><span>דירה</span><strong>{student.current_apartment||'—'}</strong></div>
+      <div className="ap-row"><Home size={13}/><span>חדר</span><strong>{student.current_room||'—'}</strong></div>
+      <div className="ap-row"><BedDouble size={13}/><span>מיטה</span><strong>{student.current_bed||'—'}</strong></div>
+    </div>
+  );
+
+  return (
+    <div className="wz-root">
+      <WizardBar steps={steps} current={step} colorKey="indigo"/>
+      <div className="wz-content">
+        {step===0 && (<>
+          <h3 className="wz-title">בחר סטודנט ראשון</h3>
+          {studentA ? <PickedBar student={studentA} onClear={()=>setStudentA(null)}/> : <StudentSearch onPick={setStudentA} filter={s=>s.is_assigned} placeholder="חפש סטודנט משובץ..."/>}
+          {studentA && <div style={{marginTop:12}}><AssignmentBox student={studentA}/></div>}
+        </>)}
+        {step===1 && (<>
+          <h3 className="wz-title">בחר סטודנט שני להחלפה</h3>
+          {studentB ? <PickedBar student={studentB} onClear={()=>setStudentB(null)}/> : <StudentSearch onPick={setStudentB} filter={s=>s.is_assigned && s.id!==studentA?.id} placeholder="חפש סטודנט משובץ..."/>}
+          {studentB && <div style={{marginTop:12}}><AssignmentBox student={studentB}/></div>}
+          {studentB && studentB.id===studentA?.id && (
+            <div className="wz-note rose-note"><AlertTriangle size={13}/> יש לבחור שני סטודנטים שונים</div>
+          )}
+        </>)}
+        {step===2 && (<>
+          <h3 className="wz-title">סיבת החילוף</h3>
+          <div className="wz-field">
+            <label>סיבה<span className="req">*</span></label>
+            <textarea rows={4} value={reason} onChange={e=>setReason(e.target.value)} placeholder="הסבר מדוע מבוקש החילוף..."/>
+          </div>
+        </>)}
+        {step===3 && (<>
+          <h3 className="wz-title">אישור חילוף</h3>
+          <div className="wz-summary">
+            <div className="sum-row"><span className="sum-k">סטודנט א׳</span><span className="sum-v">{studentA?.full_name} · בניין {studentA?.current_building} דירה {studentA?.current_apartment} חדר {studentA?.current_room}</span></div>
+            <div className="sum-row"><span className="sum-k">סטודנט ב׳</span><span className="sum-v">{studentB?.full_name} · בניין {studentB?.current_building} דירה {studentB?.current_apartment} חדר {studentB?.current_room}</span></div>
+            <div className="sum-row"><span className="sum-k">סיבה</span><span className="sum-v">{reason}</span></div>
+          </div>
+          {error && <div className="wz-err">{error}</div>}
+        </>)}
+      </div>
+      <div className="wz-footer">
+        <button className="wz-back" onClick={step===0?onCancel:()=>setStep(s=>s-1)}>{step===0?'ביטול':<><ArrowRight size={13}/> חזרה</>}</button>
+        <span className="wz-prog">{step+1}/{steps.length}</span>
+        {step<steps.length-1
+          ? <button className="wz-next wz-indigo" disabled={!canNext()} onClick={()=>setStep(s=>s+1)}>המשך <ArrowLeft size={13}/></button>
+          : <button className="wz-next wz-indigo" disabled={submitting} onClick={()=>onSubmit({student:studentA?.id,swap_with_student:studentB?.id,reason,request_type:'swap'})}>
+              {submitting?<Spinner size={13}/>:<RefreshCw size={13}/>} שלח בקשת חילוף
+            </button>}
+      </div>
+    </div>
+  );
+};
+
 // ── Transfer Wizard (room / apartment / other) ────────────────
-const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, feasData, onCheckFeas, checkingFeas }) => {
+const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions = [],
+  feasData, onCheckFeas, checkingFeas, onClearFeas, onLoadMoreFeas, loadingMoreFeas, loadMoreFeasError }) => {
+  const { isCentralAdmin, user } = useAuth();
+  const central = isCentralAdmin();
   const [step, setStep] = useState(0);
   const [student, setStudent] = useState(null);
   const [sameApt, setSameApt] = useState(null);
   const [reason, setReason] = useState('');
   const [otherDesc, setOtherDesc] = useState('');
   const [selOpt, setSelOpt] = useState(null);
+  // Transfer scope: regional users are hard-locked to a same-region
+  // transfer (the backend enforces this independently of the UI).
+  const [scope, setScope] = useState('same_region');
+  const [destRegions, setDestRegions] = useState([]);
+  const [regionQuery, setRegionQuery] = useState('');
 
   const isRoom = type==='room';
+  const isTransfer = type==='room' || type==='apartment';
   const colorKey = type==='room'?'violet':type==='apartment'?'teal':'amber';
-  const steps = isRoom
-    ? ['בחר סטודנט','העדפה','אפשרויות','אישור']
-    : ['בחר סטודנט','פרטים','אישור'];
+
+  // Step KEYS (not indices) so room/apartment/other flows stay readable.
+  const stepKeys = isRoom
+    ? ['student','scope','pref','options','confirm']
+    : isTransfer
+      ? ['student','scope','details','options','confirm']
+      : ['student','details','confirm'];
+  const stepLabels = {
+    student:'בחר סטודנט', scope:'סוג מעבר', pref:'העדפה', details:'פרטים',
+    options:'אפשרויות', confirm:'אישור',
+  };
+  const steps = stepKeys.map(k=>stepLabels[k]);
+  const stepKey = stepKeys[step];
+  const lastStep = steps.length-1;
+
+  // Any change to what defines the search invalidates previously fetched
+  // options (and the previously selected bed) - never show stale results.
+  useEffect(() => {
+    if (!isTransfer) return;
+    setSelOpt(null);
+    if (onClearFeas) onClearFeas();
+    // Staying in the same apartment is impossible when moving regions.
+    if (scope==='cross_region' && sameApt===true) setSameApt(null);
+  }, [scope, destRegions, sameApt, student]); // eslint-disable-line
 
   const canNext = () => {
-    if (step===0) return !!student;
-    if (step===1 && !isRoom) return reason.trim().length>0;
-    if (isRoom && step===2) return !!selOpt;
+    if (stepKey==='student') return !!student;
+    if (stepKey==='scope') return scope==='same_region' || destRegions.length>0;
+    if (stepKey==='pref') return reason.trim().length>0;
+    if (stepKey==='details') return reason.trim().length>0;
+    if (stepKey==='options') return !!selOpt;
     return true;
   };
 
-  const lastStep = steps.length-1;
+  const toggleDestRegion = (id) => {
+    setDestRegions(prev => prev.includes(id) ? prev.filter(r=>r!==id) : [...prev, id]);
+  };
+  const visibleRegions = regions.filter(r =>
+    !regionQuery.trim() || (r.name||'').toLowerCase().includes(regionQuery.trim().toLowerCase()));
+  const destRegionNames = regions.filter(r=>destRegions.includes(r.id)).map(r=>r.name);
+  const currentRegionLabel = student?.region_name || 'האזור הנוכחי של הסטודנט';
+  const searchedRegionNames = (feasData?.search_regions||[]).map(r=>r.name);
 
   return (
     <div className="wz-root">
       <WizardBar steps={steps} current={step} colorKey={colorKey}/>
       <div className="wz-content">
-        {step===0 && (<>
+        {stepKey==='student' && (<>
           <h3 className="wz-title">בחר סטודנט</h3>
-          {student ? <PickedBar student={student} onClear={()=>setStudent(null)}/> : <StudentSearch onPick={setStudent} filter={s=>s.is_assigned} placeholder="חפש סטודנט משובץ..."/>}
+          {student ? <PickedBar student={student} onClear={()=>setStudent(null)}/> : (
+            <StudentSearch
+              onPick={(s)=>{
+                setStudent(s);
+                // The slim search payload has no region_name - fetch the full
+                // record so the read-only "אזור יעד" label can show the real
+                // current region name on the scope step.
+                if (!s.region_name && studentsAPI.getById) {
+                  studentsAPI.getById(s.id)
+                    .then(full => setStudent(prev => (prev && prev.id===s.id ? { ...prev, ...full } : prev)))
+                    .catch(()=>{});
+                }
+              }}
+              filter={s=>s.is_assigned} placeholder="חפש סטודנט משובץ..."/>
+          )}
           {student && (
             <div className="assignment-panel violet-panel" style={{marginTop:12}}>
+              {student.region_name && <div className="ap-row"><MapPin size={13}/><span>אזור</span><strong>{student.region_name}</strong></div>}
               <div className="ap-row"><Building2 size={13}/><span>בניין</span><strong>{student.current_building||'—'}</strong></div>
               <div className="ap-row"><DoorOpen size={13}/><span>דירה</span><strong>{student.current_apartment||'—'}</strong></div>
               <div className="ap-row"><Home size={13}/><span>חדר</span><strong>{student.current_room||'—'}</strong></div>
             </div>
           )}
         </>)}
-        {step===1 && isRoom && (<>
+
+        {stepKey==='scope' && (<>
+          <h3 className="wz-title">סוג המעבר</h3>
+          {central ? (
+            <>
+              <div className="pref-group">
+                {[{v:'same_region',l:'מעבר בתוך האזור הנוכחי'},{v:'cross_region',l:'מעבר לאזור אחר'}].map(o=>(
+                  <button key={o.v} type="button"
+                    className={`pref-btn${scope===o.v?' pref-active':''}`}
+                    onClick={()=>setScope(o.v)}>{o.l}</button>
+                ))}
+              </div>
+              {scope==='same_region' && (
+                <div className="scope-region-note">
+                  <MapPin size={13}/> אזור יעד: <strong>{currentRegionLabel}</strong>
+                  <span className="scope-region-hint">נבחר אוטומטית - האזור הנוכחי של הסטודנט</span>
+                </div>
+              )}
+              {scope==='cross_region' && (
+                <div className="region-ms">
+                  <label className="region-ms-label">אזורי יעד<span className="req">*</span> (ניתן לבחור יותר מאחד)</label>
+                  <div className="region-ms-search">
+                    <Search size={12}/>
+                    <input value={regionQuery} onChange={e=>setRegionQuery(e.target.value)} placeholder="חיפוש אזור..."/>
+                  </div>
+                  <div className="region-ms-list">
+                    {visibleRegions.map(r=>(
+                      <label key={r.id} className={`region-ms-row${destRegions.includes(r.id)?' region-ms-on':''}`}>
+                        <input type="checkbox" checked={destRegions.includes(r.id)} onChange={()=>toggleDestRegion(r.id)}/>
+                        <span>{r.name}</span>
+                        {student?.region_name===r.name && <span className="region-ms-cur">(האזור הנוכחי)</span>}
+                      </label>
+                    ))}
+                    {visibleRegions.length===0 && <div className="region-ms-empty">לא נמצאו אזורים</div>}
+                  </div>
+                  {destRegions.length>0 && (
+                    <div className="region-ms-picked">נבחרו: <strong>{destRegionNames.join(', ')}</strong></div>
+                  )}
+                </div>
+              )}
+            </>
+          ) : (
+            // Regional staff: transfer type is FIXED to same-region and the
+            // region is read-only. The backend rejects anything else anyway.
+            <>
+              <div className="pref-group">
+                <button type="button" className="pref-btn pref-active" disabled>מעבר בתוך האזור הנוכחי</button>
+              </div>
+              <div className="scope-region-note">
+                <MapPin size={13}/> אזור: <strong>{user?.region_name || user?.regionName || currentRegionLabel}</strong>
+                <span className="scope-region-hint">משתמש אזורי רשאי לבצע מעברים בתוך האזור המורשה בלבד</span>
+              </div>
+            </>
+          )}
+        </>)}
+
+        {stepKey==='pref' && (<>
           <h3 className="wz-title">העדפת מיקום</h3>
           <div className="pref-group">
             {[{v:true,l:'באותה דירה'},{v:false,l:'בדירה אחרת'},{v:null,l:'לא משנה'}].map(o=>(
               <button key={String(o.v)} type="button"
                 className={`pref-btn${sameApt===o.v?' pref-active':''}`}
+                disabled={scope==='cross_region' && o.v===true}
                 onClick={()=>setSameApt(o.v)}>{o.l}</button>
             ))}
           </div>
+          {scope==='cross_region' && <div className="scope-region-hint" style={{marginTop:6}}>במעבר לאזור אחר לא ניתן להישאר באותה דירה</div>}
           <div className="wz-field" style={{marginTop:14}}>
-            <label>סיבת הבקשה</label>
+            <label>סיבת הבקשה<span className="req">*</span></label>
             <textarea rows={3} value={reason} onChange={e=>setReason(e.target.value)} placeholder="הסבר מדוע הסטודנט מבקש להחליף חדר..."/>
           </div>
         </>)}
-        {step===1 && !isRoom && (<>
+
+        {stepKey==='details' && (<>
           <h3 className="wz-title">פרטי הבקשה</h3>
           {type==='other' && (
             <div className="wz-field">
@@ -409,29 +568,52 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, feasData,
             <textarea rows={3} value={reason} onChange={e=>setReason(e.target.value)} placeholder="הסבר את סיבת הבקשה..."/>
           </div>
         </>)}
-        {step===2 && isRoom && (<>
-          <h3 className="wz-title">חדרים פנויים מתאימים</h3>
+
+        {stepKey==='options' && (<>
+          <h3 className="wz-title">אפשרויות שיבוץ</h3>
+          <div className="scope-region-note">
+            <MapPin size={13}/>
+            {scope==='cross_region'
+              ? <>אזורי יעד: <strong>{(searchedRegionNames.length?searchedRegionNames:destRegionNames).join(', ')}</strong></>
+              : <>אזור יעד: <strong>{searchedRegionNames[0] || currentRegionLabel}</strong></>}
+          </div>
           {!feasData && !checkingFeas && (
-            <button className="check-feas-btn" onClick={()=>onCheckFeas(null,student?.id,type,sameApt)}>
-              <Activity size={14}/> בדוק אפשרויות פנויות
+            <button className="check-feas-btn"
+              onClick={()=>onCheckFeas(null,student?.id,type,sameApt,scope,scope==='cross_region'?destRegions:undefined)}>
+              <Activity size={14}/> בדיקת אפשרויות שיבוץ
             </button>
           )}
           {checkingFeas && <div className="checking-state"><Spinner/> מחפש...</div>}
-          {feasData?.feasible===false && <div className="feas-no"><AlertTriangle size={13}/> לא נמצאו אפשרויות מתאימות</div>}
-          {feasData?.feasible===true && (
-            <div className="rec-grid">
-              {(feasData.options||[]).map((o,i)=>(
-                <RecCard key={i} opt={o} index={i} selected={selOpt===o} onSelect={setSelOpt}/>
-              ))}
-            </div>
+          {feasData && (
+            <BedMatchPicker
+              buildings={feasData.buildings||[]}
+              totalBuildings={feasData.total_buildings}
+              totalApartments={feasData.total_apartments}
+              totalRooms={feasData.total_rooms}
+              totalValidBeds={feasData.total_valid_beds}
+              counts={feasData.counts}
+              dataIntegrity={feasData.data_integrity}
+              conflictExamples={feasData.conflict_examples}
+              loading={checkingFeas}
+              loadingMore={loadingMoreFeas}
+              hasMore={!!feasData.has_more}
+              onLoadMore={onLoadMoreFeas}
+              loadMoreError={loadMoreFeasError}
+              selectedBedId={selOpt?.bed_id}
+              onSelectBed={setSelOpt}
+              language="he"
+            />
           )}
         </>)}
-        {((step===2&&!isRoom)||(step===3&&isRoom)) && (<>
+
+        {stepKey==='confirm' && (<>
           <h3 className="wz-title">סיכום לפני שליחה</h3>
           <div className="wz-summary">
             <div className="sum-row"><span className="sum-k">סטודנט</span><span className="sum-v">{student?.full_name}</span></div>
-            <div className="sum-row"><span className="sum-k">שיבוץ נוכחי</span><span className="sum-v">בניין {student?.current_building} · דירה {student?.current_apartment} · חדר {student?.current_room}</span></div>
-            {isRoom&&selOpt && <div className="sum-row"><span className="sum-k">יעד נבחר</span><span className="sum-v">בניין {selOpt.building} · דירה {selOpt.apartment} · חדר {selOpt.room}</span></div>}
+            <div className="sum-row"><span className="sum-k">שיבוץ נוכחי</span><span className="sum-v">{student?.region_name ? `${student.region_name} · ` : ''}בניין {student?.current_building} · דירה {student?.current_apartment} · חדר {student?.current_room}</span></div>
+            {isTransfer && <div className="sum-row"><span className="sum-k">סוג מעבר</span><span className="sum-v">{scope==='cross_region'?'מעבר לאזור אחר':'מעבר בתוך האזור הנוכחי'}</span></div>}
+            {isTransfer && scope==='cross_region' && <div className="sum-row"><span className="sum-k">אזורי יעד</span><span className="sum-v">{destRegionNames.join(', ')}</span></div>}
+            {isTransfer&&selOpt && <div className="sum-row"><span className="sum-k">יעד נבחר</span><span className="sum-v">{selOpt.region_name ? `${selOpt.region_name} · ` : ''}בניין {selOpt.building} · דירה {selOpt.apartment} · חדר {selOpt.room} · {selOpt.single_bed_room ? 'מקום יחיד' : `מיטה ${selOpt.bed_display || selOpt.bed_label}`}</span></div>}
             {reason && <div className="sum-row"><span className="sum-k">סיבה</span><span className="sum-v">{reason}</span></div>}
             {otherDesc && <div className="sum-row"><span className="sum-k">תיאור</span><span className="sum-v">{otherDesc}</span></div>}
           </div>
@@ -444,7 +626,14 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, feasData,
         {step<lastStep
           ? <button className={`wz-next wz-${colorKey}`} disabled={!canNext()} onClick={()=>setStep(s=>s+1)}>המשך <ArrowLeft size={13}/></button>
           : <button className={`wz-next wz-${colorKey}`} disabled={submitting}
-              onClick={()=>onSubmit({student:student?.id,request_type:type,reason,other_description:otherDesc,same_apartment:sameApt,target_option:selOpt?.room_id||selOpt?.roomId})}>
+              onClick={()=>onSubmit({
+                student:student?.id,request_type:type,reason,other_description:otherDesc,same_apartment:sameApt,
+                target_room:selOpt?.room_id||selOpt?.roomId,
+                ...(isTransfer ? {
+                  transfer_scope: central ? scope : 'same_region',
+                  destination_regions: (central && scope==='cross_region') ? destRegions : [],
+                } : {}),
+              })}>
               {submitting?<Spinner size={13}/>:<Check size={13}/>} שלח
             </button>}
       </div>
@@ -453,18 +642,26 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, feasData,
 };
 
 // ── New Request Modal ─────────────────────────────────────────
-const NewRequestModal = ({ onClose, onSuccess }) => {
+const NewRequestModal = ({ onClose, onSuccess, regions = [] }) => {
   const [type, setType] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [feasData, setFeasData] = useState(null);
   const [checkingFeas, setCheckingFeas] = useState(false);
+  const [loadingMoreFeas, setLoadingMoreFeas] = useState(false);
+  const [loadMoreFeasError, setLoadMoreFeasError] = useState('');
+  // Remembers the params of the last feasibility check so "load more" can
+  // repeat the exact same filter (student/type/same-apartment) at the next
+  // offset instead of guessing - never mixes results from a different query.
+  const feasParamsRef = useRef(null);
+  const feasAbortRef = useRef(null);
 
   const typeCards = [
     { v:'add_student',    Icon:UserPlus,  color:'blue',   title:'הוספת סטודנט', sub:'רישום סטודנט חדש למעונות' },
     { v:'remove_student', Icon:UserMinus, color:'rose',   title:'הסרה ממעונות', sub:'הסרת סטודנט קיים' },
     { v:'room',           Icon:Home,      color:'violet', title:'שינוי חדר',    sub:'העברה לחדר אחר' },
     { v:'apartment',      Icon:DoorOpen,  color:'teal',   title:'מעבר מדירה',  sub:'מעבר לדירה אחרת' },
+    { v:'swap',           Icon:RefreshCw, color:'indigo', title:'חילוף בין סטודנטים', sub:'שני סטודנטים מחליפים מקום' },
     { v:'other',          Icon:FileText,  color:'amber',  title:'בקשה אחרת',   sub:'הארכת שהייה ועוד' },
   ];
 
@@ -475,15 +672,44 @@ const NewRequestModal = ({ onClose, onSuccess }) => {
     finally { setSubmitting(false); }
   };
 
-  const handleCheckFeas = async (_id, studentId, reqType, sameApt) => {
+  const handleCheckFeas = async (_id, studentId, reqType, sameApt, transferScope, regionIds) => {
+    if (feasAbortRef.current) feasAbortRef.current.abort();
+    const controller = new AbortController();
+    feasAbortRef.current = controller;
+    // Remember the FULL search definition (incl. transfer scope and the
+    // selected destination regions) so "load more" repeats it exactly.
+    feasParamsRef.current = { studentId, reqType, sameApt, transferScope, regionIds };
     setCheckingFeas(true);
+    setFeasData(null); // clear stale results from a previous filter immediately
     try {
-      const d = requestsAPI.checkFeasibilityForStudent
-        ? await requestsAPI.checkFeasibilityForStudent(studentId, reqType, sameApt)
-        : { feasible: null, options: [], reason: '' };
+      const d = await requestsAPI.checkFeasibilityForStudent(studentId, reqType, sameApt, {
+        signal: controller.signal, transferScope, regionIds,
+      });
       setFeasData(d);
-    } catch (err) { setFeasData({ feasible:false, reason:err.message, options:[] }); }
-    finally { setCheckingFeas(false); }
+    } catch (err) {
+      if (err.name === 'CanceledError' || err.code === 'ERR_CANCELED') return;
+      setFeasData({ feasible:false, reason:err.message, buildings:[] });
+    }
+    finally { if (feasAbortRef.current === controller) setCheckingFeas(false); }
+  };
+
+  const handleLoadMoreFeas = async () => {
+    const p = feasParamsRef.current;
+    if (!p || !feasData || loadingMoreFeas) return;
+    setLoadingMoreFeas(true);
+    setLoadMoreFeasError('');
+    try {
+      // Building-paged: offset counts BUILDINGS already loaded; the next
+      // page is appended, never replacing what is already on screen.
+      const d = await requestsAPI.checkFeasibilityForStudent(p.studentId, p.reqType, p.sameApt, {
+        offset: (feasData.buildings || []).length,
+        transferScope: p.transferScope, regionIds: p.regionIds,
+      });
+      setFeasData((prev) => ({ ...d, buildings: mergeBuildings(prev?.buildings, d.buildings) }));
+    } catch (err) {
+      // keep existing results visible - a failed "load more" isn't fatal.
+      setLoadMoreFeasError(err.message || 'שגיאה');
+    } finally { setLoadingMoreFeas(false); }
   };
 
   return (
@@ -516,10 +742,14 @@ const NewRequestModal = ({ onClose, onSuccess }) => {
         )}
         {type==='add_student'    && <AddStudentWizard onSubmit={handleSubmit} onCancel={onClose} submitting={submitting} error={error}/>}
         {type==='remove_student' && <RemoveWizard     onSubmit={handleSubmit} onCancel={onClose} submitting={submitting} error={error}/>}
+        {type==='swap'           && <SwapWizard       onSubmit={handleSubmit} onCancel={onClose} submitting={submitting} error={error}/>}
         {(type==='room'||type==='apartment'||type==='other') && (
           <TransferWizard type={type} onSubmit={handleSubmit} onCancel={onClose}
-            submitting={submitting} error={error}
-            feasData={feasData} onCheckFeas={handleCheckFeas} checkingFeas={checkingFeas}/>
+            submitting={submitting} error={error} regions={regions}
+            feasData={feasData} onCheckFeas={handleCheckFeas} checkingFeas={checkingFeas}
+            onClearFeas={()=>setFeasData(null)}
+            onLoadMoreFeas={handleLoadMoreFeas} loadingMoreFeas={loadingMoreFeas}
+            loadMoreFeasError={loadMoreFeasError}/>
         )}
       </div>
     </div>
@@ -528,15 +758,16 @@ const NewRequestModal = ({ onClose, onSuccess }) => {
 
 // ── Action Panel ──────────────────────────────────────────────
 const ActionPanel = ({ request, onApprove, onReject, acting,
-  feasData, checkingFeas, onCheckFeas,
-  aptOptions, loadingBeds, bedsError,
-  selectedApt, onSetApt, roomId, onSetRoom,
+  feasData, checkingFeas, onCheckFeas, onLoadMoreFeas, loadingMoreFeas, loadMoreFeasError,
+  rawBedOptions, loadingBeds, bedsError, onLoadMoreBedOptions, loadingMoreBeds, loadMoreBedsError,
+  roomId, onSetRoom,
   selFeasOpt, onSelFeasOpt }) => {
 
   const [rejectText, setRejectText] = useState('');
   const [showReject, setShowReject] = useState(false);
   const isAdd = request.request_type==='add_student';
   const isRem = request.request_type==='remove_student';
+  const isSwap = request.request_type==='swap';
   const hasFeas = feasData?.feasible !== undefined;
 
   if (request.status!=='pending') return null;
@@ -561,57 +792,37 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
           </button>
           <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> דחה</button>
         </div>
+      ) : isSwap ? (
+        <div className="act-row">
+          <button className="btn-approve" onClick={()=>onApprove(request.id)} disabled={acting}>
+            {acting?<Spinner size={12}/>:<RefreshCw size={12}/>} אשר חילוף
+          </button>
+          <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> דחה</button>
+        </div>
       ) : isAdd ? (
         <>
-          {loadingBeds && <div className="checking-state"><Spinner size={13}/> טוען דירות...</div>}
           {bedsError && <div className="feas-no"><AlertTriangle size={13}/>{bedsError}</div>}
-          {!loadingBeds && aptOptions.length>0 && (
-            <div className="apt-two-col">
-              <div className="apt-list-col">
-                <div className="col-head">דירות פנויות ({aptOptions.length})</div>
-                {aptOptions.map(apt=>(
-                  <button key={apt.key}
-                    className={`apt-row${selectedApt?.key===apt.key?' apt-sel':''} match-${apt.match}`}
-                    disabled={apt.match==='mismatch'}
-                    onClick={()=>{onSetApt(apt);onSetRoom('');}}>
-                    {apt.match==='empty'&&<Star size={9} className="apt-star" fill="currentColor"/>}
-                    <div><strong>בניין {apt.building} · דירה {apt.apartment}</strong><span>{apt.dorm_type}</span></div>
-                    <span className="free-badge">{apt.freeBeds} פנויות</span>
-                  </button>
-                ))}
-              </div>
-              <div className="apt-detail-col">
-                {!selectedApt ? <div className="apt-empty">בחר דירה</div> : (
-                  <>
-                    <div className="col-head">בניין {selectedApt.building} · דירה {selectedApt.apartment}</div>
-                    {selectedApt.residents?.length>0
-                      ? selectedApt.residents.map(r=>(
-                          <div key={r.id} className="res-row-sm">
-                            <div className="rs-ava">{(r.full_name||'?')[0]}</div>
-                            <span>{r.full_name}</span>
-                            <span className="rs-room">חדר {r.room_name}</span>
-                          </div>
-                        ))
-                      : <div className="apt-empty">דירה ריקה</div>}
-                    <div className="col-head" style={{marginTop:8}}>בחר חדר</div>
-                    <div className="room-chips">
-                      {selectedApt.rooms?.map(rm=>(
-                        <button key={rm.room_id}
-                          className={`room-chip${String(roomId)===String(rm.room_id)?' room-chip-sel':''}`}
-                          onClick={()=>onSetRoom(rm.room_id)}>
-                          <strong>חדר {rm.room_name||rm.room}</strong>
-                          <span>{rm.available_beds} מיטות</span>
-                        </button>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-          )}
+          <BedMatchPicker
+            buildings={rawBedOptions?.buildings||[]}
+            totalBuildings={rawBedOptions?.total_buildings}
+            totalApartments={rawBedOptions?.total_apartments}
+            totalRooms={rawBedOptions?.total_rooms}
+            totalValidBeds={rawBedOptions?.total_valid_beds}
+            counts={rawBedOptions?.counts}
+            dataIntegrity={rawBedOptions?.data_integrity}
+            conflictExamples={rawBedOptions?.conflict_examples}
+            loading={loadingBeds}
+            loadingMore={loadingMoreBeds}
+            hasMore={!!rawBedOptions?.has_more}
+            onLoadMore={onLoadMoreBedOptions}
+            loadMoreError={loadMoreBedsError}
+            selectedBedId={roomId?.bed_id}
+            onSelectBed={(bed)=>onSetRoom(bed)}
+            language="he"
+          />
           <div className="act-row" style={{marginTop:8}}>
-            <button className="btn-approve" onClick={()=>onApprove(request.id,roomId)} disabled={acting||!roomId}>
-              {acting?<Spinner size={12}/>:<Check size={12}/>} אשר ושבץ
+            <button className="btn-approve" onClick={()=>onApprove(request.id,roomId?.room_id,roomId?.bed_id)} disabled={acting||!roomId}>
+              {acting?<Spinner size={12}/>:<Check size={12}/>} {roomId ? assignActionLabel(roomId) : 'אשר ושבץ'}
             </button>
             <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> דחה</button>
           </div>
@@ -625,19 +836,36 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
         </div>
       ) : (
         <>
-          {feasData.feasible===true && (
-            <div className="rec-grid compact-rec">
-              {(feasData.options||[]).map((o,i)=>(
-                <RecCard key={i} opt={o} index={i} selected={selFeasOpt===o} onSelect={onSelFeasOpt}/>
-              ))}
+          {(feasData.search_regions||[]).length>0 && (
+            <div className="scope-region-note">
+              <MapPin size={13}/>
+              {feasData.transfer_scope==='cross_region' ? 'אזורי יעד:' : 'אזור יעד:'}{' '}
+              <strong>{feasData.search_regions.map(r=>r.name).join(', ')}</strong>
             </div>
           )}
-          {feasData.feasible===false && <div className="feas-no"><AlertTriangle size={13}/> לא נמצאו אפשרויות מתאימות</div>}
+          <BedMatchPicker
+            buildings={feasData.buildings||[]}
+            totalBuildings={feasData.total_buildings}
+            totalApartments={feasData.total_apartments}
+            totalRooms={feasData.total_rooms}
+            totalValidBeds={feasData.total_valid_beds}
+            counts={feasData.counts}
+            dataIntegrity={feasData.data_integrity}
+            conflictExamples={feasData.conflict_examples}
+            loading={checkingFeas}
+            loadingMore={loadingMoreFeas}
+            hasMore={!!feasData.has_more}
+            onLoadMore={onLoadMoreFeas}
+            loadMoreError={loadMoreFeasError}
+            selectedBedId={selFeasOpt?.bed_id}
+            onSelectBed={onSelFeasOpt}
+            language="he"
+          />
           <div className="act-row">
             {feasData.feasible===true && (
               <button className="btn-approve" disabled={acting||!selFeasOpt}
-                onClick={()=>onApprove(request.id,selFeasOpt?.room_id||selFeasOpt?.roomId)}>
-                {acting?<Spinner size={12}/>:<Check size={12}/>} אשר
+                onClick={()=>onApprove(request.id,selFeasOpt?.room_id,selFeasOpt?.bed_id)}>
+                {acting?<Spinner size={12}/>:<Check size={12}/>} {selFeasOpt ? assignActionLabel(selFeasOpt) : 'אשר'}
               </button>
             )}
             <button className="btn-recheck" onClick={()=>onCheckFeas(request.id)} disabled={checkingFeas}><RefreshCw size={12}/> שוב</button>
@@ -651,9 +879,9 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
 
 // ── Detail Pane ───────────────────────────────────────────────
 const DetailPane = ({ request, onApprove, onReject, acting, language,
-  feasData, checkingFeas, onCheckFeas,
-  aptOptions, loadingBeds, bedsError,
-  selectedApt, onSetApt, roomId, onSetRoom,
+  feasData, checkingFeas, onCheckFeas, onLoadMoreFeas, loadingMoreFeas, loadMoreFeasError,
+  rawBedOptions, loadingBeds, bedsError, onLoadMoreBedOptions, loadingMoreBeds, loadMoreBedsError,
+  roomId, onSetRoom,
   selFeasOpt, onSelFeasOpt }) => {
 
   const [histOpen, setHistOpen] = useState(false);
@@ -723,6 +951,24 @@ const DetailPane = ({ request, onApprove, onReject, acting, language,
           {request.request_type==='room' && request.same_apartment!==undefined && (
             <div className="kv"><span>העדפה</span><strong>{request.same_apartment===true?'באותה דירה':request.same_apartment===false?'בדירה אחרת':'לא משנה'}</strong></div>
           )}
+          {request.transfer_scope && (
+            <div className="kv"><span>סוג מעבר</span><strong>{request.transfer_scope_display || (request.transfer_scope==='cross_region'?'מעבר לאזור אחר':'מעבר בתוך האזור הנוכחי')}</strong></div>
+          )}
+          {request.transfer_scope && request.source_region_name && (
+            <div className="kv"><span>אזור מוצא</span><strong>{request.source_region_name}</strong></div>
+          )}
+          {request.transfer_scope==='cross_region' && (request.destination_region_names||[]).length>0 && (
+            <div className="kv"><span>אזורי יעד</span><strong>{request.destination_region_names.join(', ')}</strong></div>
+          )}
+          {request.status==='approved' && request.target_room_name && (
+            <div className="kv"><span>שיבוץ סופי</span><strong>
+              בניין {request.target_building_number} · דירה {request.target_apartment_number} · חדר {request.target_room_name}
+              {request.final_bed_label ? ` · מיטה ${String(request.final_bed_label).replace(/^bed\s*/i,'')}` : ''}
+            </strong></div>
+          )}
+          {request.request_type==='swap' && request.swap_with_student_name && (
+            <div className="kv"><span>מחליף/ה עם</span><strong>{request.swap_with_student_name} ({request.swap_with_student_id_number})</strong></div>
+          )}
           {request.reason && <div className="kv"><span>סיבה</span><strong className="kv-reason">{request.reason}</strong></div>}
           {request.other_description && <div className="kv"><span>תיאור</span><strong>{request.other_description}</strong></div>}
           <div className="kv"><span>נפתח ע"י</span><strong>{request.requested_by_name||'—'}</strong></div>
@@ -758,8 +1004,10 @@ const DetailPane = ({ request, onApprove, onReject, acting, language,
         <ActionPanel
           request={request} onApprove={onApprove} onReject={onReject} acting={acting}
           feasData={feasData} checkingFeas={checkingFeas} onCheckFeas={onCheckFeas}
-          aptOptions={aptOptions} loadingBeds={loadingBeds} bedsError={bedsError}
-          selectedApt={selectedApt} onSetApt={onSetApt} roomId={roomId} onSetRoom={onSetRoom}
+          onLoadMoreFeas={onLoadMoreFeas} loadingMoreFeas={loadingMoreFeas} loadMoreFeasError={loadMoreFeasError}
+          rawBedOptions={rawBedOptions} loadingBeds={loadingBeds} bedsError={bedsError}
+          onLoadMoreBedOptions={onLoadMoreBedOptions} loadingMoreBeds={loadingMoreBeds} loadMoreBedsError={loadMoreBedsError}
+          roomId={roomId} onSetRoom={onSetRoom}
           selFeasOpt={selFeasOpt} onSelFeasOpt={onSelFeasOpt}
         />
       </div>
@@ -787,6 +1035,7 @@ const ListItem = ({ request, selected, onClick, language }) => {
       </div>
       <div className="ri-bot">
         <span className={`ri-type ri-type-${tc.color}`}><TI size={9}/> {language==='he'?tc.labelHe:tc.labelEn}</span>
+        {request.current_region && <span className="ri-region">{request.current_region}</span>}
         <span className="ri-date">{fmtDateShort(request.created_at)}</span>
       </div>
     </button>
@@ -796,6 +1045,7 @@ const ListItem = ({ request, selected, onClick, language }) => {
 // ── Main Page ─────────────────────────────────────────────────
 export default function TransfersPage({ language = 'he' }) {
   const isHe = language === 'he';
+  const { isCentralAdmin } = useAuth();
 
   const [requests, setRequests]   = useState([]);
   const [loading, setLoading]     = useState(false);
@@ -807,15 +1057,34 @@ export default function TransfersPage({ language = 'he' }) {
   const [typeFilter, setTypeFilter] = useState('all');
   const [searchQ, setSearchQ]     = useState('');
 
+  // Region filter - central admins only (§9/§11). Loaded from the real
+  // regions API, never hardcoded. Regional users never see this selector
+  // and the backend ignores any region param they might send directly.
+  const [regions, setRegions] = useState([]);
+  const [regionFilter, setRegionFilter] = useState('all');
+
+  useEffect(() => {
+    if (isCentralAdmin()) {
+      regionsAPI.getAll().then(setRegions).catch(() => setRegions([]));
+    }
+  }, []); // eslint-disable-line
+
   const [feasData, setFeasData]   = useState({});
   const [checkingFeas, setCheckingFeas] = useState(null);
+  const [loadingMoreFeasId, setLoadingMoreFeasId] = useState(null);
   const [actionId, setActionId]   = useState(null);
   const [bedOptions, setBedOpts]  = useState({});
   const [loadingBeds, setLdBeds]  = useState(null);
+  const [loadingMoreBedsId, setLoadingMoreBedsId] = useState(null);
   const [bedsError, setBedsErr]   = useState({});
-  const [selApt, setSelApt]       = useState({});
+  // Failed "load more buildings" attempts, keyed by request id - existing
+  // results always stay visible; the picker shows the error with a retry.
+  const [loadMoreFeasErr, setLoadMoreFeasErr] = useState({});
+  const [loadMoreBedsErr, setLoadMoreBedsErr] = useState({});
   const [selRoom, setSelRoom]     = useState({});
   const [selFeasOpt, setSelFeasOpt] = useState({});
+  const feasAbortRef = useRef(null);
+  const bedsAbortRef = useRef(null);
 
   // ── Draggable splitter ──
   const [listWidth, setListWidth] = useState(360);
@@ -850,12 +1119,13 @@ export default function TransfersPage({ language = 'he' }) {
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
   }, []); // eslint-disable-line
 
-  useEffect(() => { loadRequests(); }, [tab]); // eslint-disable-line
+  useEffect(() => { loadRequests(); }, [tab, regionFilter]); // eslint-disable-line
 
   const loadRequests = async () => {
     setLoading(true); setPageError('');
     try {
       const params = tab === 'all' ? {} : { status: tab };
+      if (isCentralAdmin() && regionFilter !== 'all') params.region = regionFilter;
       const d = await requestsAPI.getAll(params);
       const list = Array.isArray(d) ? d : (d.results || []);
       setRequests(list);
@@ -888,51 +1158,76 @@ export default function TransfersPage({ language = 'he' }) {
     return list;
   }, [requests, tab, typeFilter, searchQ]);
 
-  const aptOptions = useMemo(() => {
-    if (!selected) return [];
-    const opts = bedOptions[selected.id] || [];
-    const g = {};
-    opts.forEach(o => {
-      const k = `${o.building}-${o.apartment}`;
-      if (!g[k]) g[k] = { key:k, building:o.building, apartment:o.apartment,
-        dorm_type:o.dorm_type, region:o.region, rooms:[], residents:o.apartment_residents||[],
-        freeBeds:0, match:o.match||'ok' };
-      g[k].rooms.push(o);
-      g[k].freeBeds += Number(o.available_beds || 0);
-      if (o.match === 'mismatch') g[k].match = 'mismatch';
-      else if (o.match === 'empty' && g[k].match === 'ok') g[k].match = 'empty';
-    });
-    return Object.values(g).sort((a,b) => {
-      if (a.match==='empty'&&b.match!=='empty') return -1;
-      if (b.match==='empty'&&a.match!=='empty') return 1;
-      return 0;
-    });
-  }, [bedOptions, selected]);
-
   const handleSelect = async (req) => {
     setSelected(req);
     if (req.request_type === 'add_student' && !bedOptions[req.id]) {
+      if (bedsAbortRef.current) bedsAbortRef.current.abort();
+      const controller = new AbortController();
+      bedsAbortRef.current = controller;
       setLdBeds(req.id);
       try {
-        const d = await requestsAPI.getAddStudentBeds(req.id);
-        setBedOpts(p => ({ ...p, [req.id]: d.options || [] }));
-      } catch (err) { setBedsErr(p => ({ ...p, [req.id]: err.message })); }
-      finally { setLdBeds(null); }
+        const d = await requestsAPI.getAddStudentBeds(req.id, { signal: controller.signal });
+        setBedOpts(p => ({ ...p, [req.id]: d }));
+      } catch (err) {
+        if (err.name === 'CanceledError' || err.code === 'ERR_CANCELED') return;
+        setBedsErr(p => ({ ...p, [req.id]: err.message }));
+      }
+      finally { if (bedsAbortRef.current === controller) setLdBeds(null); }
     }
   };
 
-  const checkFeasibility = async (id) => {
-    setCheckingFeas(id);
+  const loadMoreBedOptions = async (id) => {
+    const current = bedOptions[id];
+    if (!current || loadingMoreBedsId) return;
+    setLoadingMoreBedsId(id);
+    setLoadMoreBedsErr(p => ({ ...p, [id]: '' }));
     try {
-      const d = await requestsAPI.checkFeasibility(id);
-      setFeasData(p => ({ ...p, [id]: d }));
-    } catch (err) { setFeasData(p => ({ ...p, [id]: { feasible:false, reason:err.message, options:[] } })); }
-    finally { setCheckingFeas(null); }
+      // Pagination unit is the BUILDING: the next page starts after the
+      // buildings already loaded, and is APPENDED - never replaces them.
+      const d = await requestsAPI.getAddStudentBeds(id, { offset: (current.buildings || []).length });
+      setBedOpts(p => ({ ...p, [id]: { ...d, buildings: mergeBuildings(p[id]?.buildings, d.buildings) } }));
+    } catch (err) {
+      setLoadMoreBedsErr(p => ({ ...p, [id]: err.message || 'שגיאה' }));
+    } finally { setLoadingMoreBedsId(null); }
   };
 
-  const doApprove = async (id, roomId) => {
+  const checkFeasibility = async (id) => {
+    if (feasAbortRef.current) feasAbortRef.current.abort();
+    const controller = new AbortController();
+    feasAbortRef.current = controller;
+    setCheckingFeas(id);
+    // Clear any stale results for this request immediately - "שוב" (recheck)
+    // must never leave a previous filter's results mixed with the new ones.
+    setFeasData(p => ({ ...p, [id]: null }));
+    try {
+      const d = await requestsAPI.checkFeasibility(id, { signal: controller.signal });
+      setFeasData(p => ({ ...p, [id]: d }));
+    } catch (err) {
+      if (err.name === 'CanceledError' || err.code === 'ERR_CANCELED') return;
+      setFeasData(p => ({ ...p, [id]: { feasible:false, reason:err.message, options:[] } }));
+    }
+    finally { if (feasAbortRef.current === controller) setCheckingFeas(null); }
+  };
+
+  const loadMoreFeasibility = async (id) => {
+    const current = feasData[id];
+    if (!current || loadingMoreFeasId) return;
+    setLoadingMoreFeasId(id);
+    setLoadMoreFeasErr(p => ({ ...p, [id]: '' }));
+    try {
+      const d = await requestsAPI.checkFeasibility(id, { offset: (current.buildings || []).length });
+      setFeasData(p => ({ ...p, [id]: { ...d, buildings: mergeBuildings(p[id]?.buildings, d.buildings) } }));
+    } catch (err) {
+      setLoadMoreFeasErr(p => ({ ...p, [id]: err.message || 'שגיאה' }));
+    } finally { setLoadingMoreFeasId(null); }
+  };
+
+  const doApprove = async (id, roomId, bedId) => {
     setActionId(id);
-    try { await requestsAPI.approve(id, roomId ? { target_room: roomId } : {}); await loadRequests(); }
+    const payload = {};
+    if (roomId) payload.target_room = roomId;
+    if (bedId) payload.bed_id = bedId;
+    try { await requestsAPI.approve(id, payload); await loadRequests(); }
     catch (err) { alert(err.message || 'שגיאה'); }
     finally { setActionId(null); }
   };
@@ -1023,6 +1318,17 @@ export default function TransfersPage({ language = 'he' }) {
                   onClick={()=>setTypeFilter(tf.v)}>{tf.l}</button>
               ))}
             </div>
+            {isCentralAdmin() && (
+              <select
+                className="region-select"
+                value={regionFilter}
+                onChange={(e)=>setRegionFilter(e.target.value)}
+                title="סינון לפי אזור"
+              >
+                <option value="all">כל האזורים</option>
+                {regions.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+              </select>
+            )}
             <div className="lt-count">{visible.length} בקשות</div>
           </div>
 
@@ -1076,11 +1382,15 @@ export default function TransfersPage({ language = 'he' }) {
                 feasData={feasData[selected.id]}
                 checkingFeas={checkingFeas===selected.id}
                 onCheckFeas={checkFeasibility}
-                aptOptions={aptOptions}
+                onLoadMoreFeas={()=>loadMoreFeasibility(selected.id)}
+                loadingMoreFeas={loadingMoreFeasId===selected.id}
+                loadMoreFeasError={loadMoreFeasErr[selected.id]||''}
+                rawBedOptions={bedOptions[selected.id]}
                 loadingBeds={loadingBeds===selected.id}
                 bedsError={bedsError[selected.id]}
-                selectedApt={selApt[selected.id]}
-                onSetApt={apt=>setSelApt(p=>({...p,[selected.id]:apt}))}
+                onLoadMoreBedOptions={()=>loadMoreBedOptions(selected.id)}
+                loadingMoreBeds={loadingMoreBedsId===selected.id}
+                loadMoreBedsError={loadMoreBedsErr[selected.id]||''}
                 roomId={selRoom[selected.id]}
                 onSetRoom={rid=>setSelRoom(p=>({...p,[selected.id]:rid}))}
                 selFeasOpt={selFeasOpt[selected.id]}
@@ -1091,6 +1401,7 @@ export default function TransfersPage({ language = 'he' }) {
       </div>
       {showModal && (
         <NewRequestModal
+          regions={regions}
           onClose={() => setShowModal(false)}
           onSuccess={() => {
             setShowModal(false);
@@ -1148,6 +1459,10 @@ export default function TransfersPage({ language = 'he' }) {
           --rose:       #bf2600;
           --rose-bg:    #ffebe6;
           --rose-bdr:   #ff8f73;
+
+          --indigo:     #4338ca;
+          --indigo-bg:  #eef2ff;
+          --indigo-bdr: #a5b4fc;
 
           --slate:      #42526e;
           --slate-bg:   #f4f5f7;
@@ -1405,6 +1720,13 @@ export default function TransfersPage({ language = 'he' }) {
         }
 
         .type-chips { display: flex; gap: 4px; flex-wrap: wrap; }
+        .region-select {
+          padding: 4px 8px;
+          border: 1px solid var(--bdr);
+          border-radius: 8px;
+          font-family: inherit; font-size: 12px; font-weight: 500;
+          color: var(--t2); background: white; cursor: pointer;
+        }
         .type-chip {
           padding: 3px 9px;
           border: 1px solid var(--bdr);
@@ -1465,6 +1787,7 @@ export default function TransfersPage({ language = 'he' }) {
         .rq-item-amber  { border-right: 3px solid var(--amber);  }
         .rq-item-blue   { border-right: 3px solid var(--blue);   }
         .rq-item-rose   { border-right: 3px solid var(--rose);   }
+        .rq-item-indigo { border-right: 3px solid var(--indigo); }
 
         .ri-top {
           display: flex;
@@ -1483,6 +1806,7 @@ export default function TransfersPage({ language = 'he' }) {
         .si-amber { color: var(--amber) !important; }
         .si-green { color: var(--green) !important; }
         .si-rose  { color: var(--rose)  !important; }
+        .si-indigo  { color: var(--indigo)  !important; }
 
         .ri-stu {
           display: flex;
@@ -1501,6 +1825,7 @@ export default function TransfersPage({ language = 'he' }) {
         .ri-ava-amber  { background: #a36a00;        }
         .ri-ava-blue   { background: var(--blue);    }
         .ri-ava-rose   { background: var(--rose);    }
+        .ri-ava-indigo   { background: var(--indigo);    }
 
         .ri-inf { flex: 1; min-width: 0; }
         .ri-name {
@@ -1537,6 +1862,8 @@ export default function TransfersPage({ language = 'he' }) {
         .ri-type-amber  { background: var(--amber-bg);  color: var(--amber);  }
         .ri-type-blue   { background: var(--blue-bg);   color: var(--blue);   }
         .ri-type-rose   { background: var(--rose-bg);   color: var(--rose);   }
+        .ri-type-indigo   { background: var(--indigo-bg);   color: var(--indigo);   }
+        .ri-region { font-size: 10px; color: var(--t4); background: var(--slate-bg); padding: 1px 6px; border-radius: 999px; }
         .ri-date { font-size: 12px; color: var(--t4); }
 
         /* ── Detail outer ─────────────────────────── */
@@ -1651,6 +1978,7 @@ export default function TransfersPage({ language = 'he' }) {
         .dp-ava-amber  { background: #a36a00;        }
         .dp-ava-blue   { background: var(--blue);    }
         .dp-ava-rose   { background: var(--rose);    }
+        .dp-ava-indigo   { background: var(--indigo);    }
 
         .dp-stu-name {
           font-size: 20px;
@@ -1683,6 +2011,7 @@ export default function TransfersPage({ language = 'he' }) {
         .dp-type-amber  { background: var(--amber-bg);  color: var(--amber);  }
         .dp-type-blue   { background: var(--blue-bg);   color: var(--blue);   }
         .dp-type-rose   { background: var(--rose-bg);   color: var(--rose);   }
+        .dp-type-indigo   { background: var(--indigo-bg);   color: var(--indigo);   }
 
         .dp-body {
           padding: 20px 24px;
@@ -2059,6 +2388,7 @@ export default function TransfersPage({ language = 'he' }) {
         .pill-amber { background: var(--amber-bg); color: var(--amber); }
         .pill-green { background: var(--green-bg); color: var(--green); }
         .pill-rose  { background: var(--rose-bg);  color: var(--rose);  }
+        .pill-indigo  { background: var(--indigo-bg);  color: var(--indigo);  }
         .pill-gray  { background: var(--slate-bdr); color: var(--slate); }
         .pill-blue  { background: var(--blue-bg);  color: var(--blue);  }
 
@@ -2140,6 +2470,7 @@ export default function TransfersPage({ language = 'he' }) {
         }
         .tp-ico-blue   { background: var(--blue-bg);   color: var(--blue);   }
         .tp-ico-rose   { background: var(--rose-bg);   color: var(--rose);   }
+        .tp-ico-indigo   { background: var(--indigo-bg);   color: var(--indigo);   }
         .tp-ico-violet { background: var(--violet-bg); color: var(--violet); }
         .tp-ico-teal   { background: var(--teal-bg);   color: var(--teal);   }
         .tp-ico-amber  { background: var(--amber-bg);  color: var(--amber);  }
@@ -2165,6 +2496,7 @@ export default function TransfersPage({ language = 'he' }) {
         .wz-done  .wz-circle { background: var(--green);  border-color: var(--green); color: #fff; }
         .wz-cur-blue   .wz-circle { background: var(--blue);   border-color: var(--blue);   color: #fff; }
         .wz-cur-rose   .wz-circle { background: var(--rose);   border-color: var(--rose);   color: #fff; }
+        .wz-cur-indigo   .wz-circle { background: var(--indigo);   border-color: var(--indigo);   color: #fff; }
         .wz-cur-violet .wz-circle { background: var(--violet); border-color: var(--violet); color: #fff; }
         .wz-cur-teal   .wz-circle { background: var(--teal);   border-color: var(--teal);   color: #fff; }
         .wz-cur-amber  .wz-circle { background: var(--amber);  border-color: var(--amber);  color: #fff; }
@@ -2242,6 +2574,7 @@ export default function TransfersPage({ language = 'he' }) {
         .wz-next:not(:disabled):hover { filter: brightness(1.1); }
         .wz-blue   { background: var(--blue);   }
         .wz-rose   { background: var(--rose);   }
+        .wz-indigo   { background: var(--indigo);   }
         .wz-violet { background: var(--violet); }
         .wz-teal   { background: var(--teal);   }
         .wz-amber  { background: var(--amber);  }
@@ -2314,6 +2647,41 @@ export default function TransfersPage({ language = 'he' }) {
 
         /* ── Preference buttons ── */
         .pref-group { display: flex; gap: 8px; flex-wrap: wrap; }
+        .pref-btn:disabled { opacity: .55; cursor: not-allowed; }
+
+        /* ── Transfer scope / destination-region selection ── */
+        .scope-region-note {
+          display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+          margin: 12px 0 4px; padding: 10px 12px;
+          background: var(--blue-bg); border: 1px solid var(--blue-bdr);
+          border-radius: var(--r4); font-size: 13px; color: var(--t1);
+        }
+        .scope-region-note svg { color: var(--blue); flex-shrink: 0; }
+        .scope-region-hint { font-size: 11.5px; color: var(--t3); flex-basis: 100%; }
+        .region-ms { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+        .region-ms-label { font-size: 13px; font-weight: 600; color: var(--t2); }
+        .region-ms-search {
+          display: flex; align-items: center; gap: 6px;
+          background: var(--surf-2); border: 1px solid var(--bdr);
+          border-radius: var(--r4); padding: 7px 10px;
+        }
+        .region-ms-search input { border: none; background: none; outline: none; width: 100%; font-family: inherit; font-size: 13px; }
+        .region-ms-list {
+          display: flex; flex-direction: column; gap: 4px;
+          max-height: 200px; overflow-y: auto;
+          border: 1px solid var(--bdr); border-radius: var(--r4); padding: 6px;
+        }
+        .region-ms-row {
+          display: flex; align-items: center; gap: 8px;
+          padding: 8px 10px; border-radius: var(--r4);
+          font-size: 13.5px; color: var(--t1); cursor: pointer;
+        }
+        .region-ms-row:hover { background: var(--surf-2); }
+        .region-ms-on { background: var(--blue-bg); font-weight: 600; }
+        .region-ms-row input { accent-color: var(--blue); }
+        .region-ms-cur { font-size: 11px; color: var(--t3); }
+        .region-ms-empty { padding: 10px; font-size: 12.5px; color: var(--t3); text-align: center; }
+        .region-ms-picked { font-size: 12.5px; color: var(--t2); }
         .pref-btn {
           flex: 1; min-width: 72px; padding: 9px 12px;
           border: 1.5px solid var(--bdr); background: var(--surf);

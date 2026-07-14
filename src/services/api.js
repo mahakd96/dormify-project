@@ -38,29 +38,79 @@ const clearStoredAuth = () => {
   localStorage.removeItem(STORAGE_KEYS.user);
 };
 
+// DRF error bodies come in several shapes: a plain string, {detail: "..."},
+// {error: "..."}, {non_field_errors: [...]}, a plain array (raised via
+// rest_framework.exceptions.ValidationError("message")), or the most common
+// serializer shape {field_name: ["message", ...], other_field: [...]}.
+// Flatten any of these into one readable string instead of falling through
+// to a generic "empty/unknown body" message.
+const flattenErrorValue = (value, keyHint) => {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+
+  if (Array.isArray(value)) {
+    return value.map((v) => flattenErrorValue(v)).filter(Boolean).join("; ");
+  }
+
+  if (typeof value === "object") {
+    return Object.entries(value)
+      .map(([key, v]) => {
+        const msg = flattenErrorValue(v, key);
+        if (!msg) return "";
+        return key === "non_field_errors" || key === "detail" ? msg : `${key}: ${msg}`;
+      })
+      .filter(Boolean)
+      .join("; ");
+  }
+
+  return String(value);
+};
+
 const getErrorMessage = (err, fallback = "Request failed") => {
   const data = err?.response?.data;
   const status = err?.response?.status;
 
   if (typeof data === "string" && data.trim()) {
     return data.length > 400
-      ? `${status || ""} ${data.slice(0, 400)}ג€¦`
+      ? `${status || ""} ${data.slice(0, 400)}…`
       : data;
   }
 
-  if (data?.detail) return data.detail;
-  if (data?.error) return data.error;
-  if (data?.message) return data.message;
-  if (data?.non_field_errors?.length) return data.non_field_errors[0];
+  if (data && typeof data === "object" && Object.keys(data).length) {
+    const flattened = flattenErrorValue(data);
+    if (flattened) return flattened;
+  }
+
+  if (Array.isArray(data) && data.length) {
+    const flattened = flattenErrorValue(data);
+    if (flattened) return flattened;
+  }
 
   if (!err?.response) {
     const code = err?.code ? ` [${err.code}]` : "";
-    return `${fallback}: no response from server${code} ג€” ${
+    return `${fallback}: no response from server${code} — ${
       err?.message || "Network Error"
     }`;
   }
 
   return `${fallback}: HTTP ${status || "?"} with empty/unknown body`;
+};
+
+// Same message resolution as getErrorMessage, but also attaches the raw
+// field-keyed error dict (when the backend returned one, e.g.
+// {"student_id": ["already exists"]}) as `.fieldErrors` on the thrown Error,
+// so callers can map errors to the right form field instead of only
+// showing one flattened string.
+const throwApiError = (err, fallback) => {
+  const message = getErrorMessage(err, fallback);
+  const wrapped = new Error(message);
+  const data = err?.response?.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    wrapped.fieldErrors = data;
+  }
+  wrapped.status = err?.response?.status;
+  throw wrapped;
 };
 
 api.interceptors.request.use(
@@ -405,11 +455,12 @@ export const studentsAPI = {
     }
   },
 
-  getStudents: async (params = {}) => {
+  getStudents: async (params = {}, opts = {}) => {
     try {
-      const { data } = await api.get("/api/students/", { params });
+      const { data } = await api.get("/api/students/", { params, signal: opts.signal });
       return data;
     } catch (err) {
+      if (err.code === "ERR_CANCELED" || err.name === "CanceledError") throw err;
       throw new Error(getErrorMessage(err, "Failed to load students"));
     }
   },
@@ -524,6 +575,99 @@ export const studentsAPI = {
       return {};
     }
   },
+
+  create: async (payload) => {
+    try {
+      const { data } = await api.post("/api/students/", payload);
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to create student");
+    }
+  },
+
+  update: async (id, payload) => {
+    try {
+      const { data } = await api.patch(`/api/students/${id}/`, payload);
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to update student");
+    }
+  },
+
+  // Real matching engine, paginated by BUILDING (primary key). Returns
+  // { feasible, reason, buildings: [building → apartments → rooms → beds],
+  //   loaded_buildings, total_buildings, total_apartments, total_rooms,
+  //   total_valid_beds, has_more, next_offset, counts, conflict_examples,
+  //   data_integrity }.
+  // Every returned building carries its COMPLETE apartment/room/bed
+  // subtree (real Bed records only - browsing is strictly read-only and
+  // never creates rows). limit/offset count buildings, not beds. Honors
+  // the same hard constraints (gender, housing type, capacity, region,
+  // active status) the backend enforces when the assignment is actually
+  // made. regionId override is central-admin only (ignored server-side for
+  // regional users).
+  getAvailableBeds: async (studentId, opts = {}) => {
+    try {
+      const { data } = await api.post("/api/requests/match-options/", {
+        student_id: studentId,
+        same_apartment: opts.sameApartment ?? null,
+        region_id: opts.regionId ?? undefined,
+        limit: opts.limit ?? 10,
+        offset: opts.offset ?? 0,
+      });
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load available beds"));
+    }
+  },
+
+  assignBed: async (studentId, roomId, bedId) => {
+    try {
+      const { data } = await api.post("/api/room-assignments/assign/", {
+        student_id: studentId,
+        room_id: roomId,
+        bed_id: bedId ?? undefined,
+      });
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to assign bed"));
+    }
+  },
+
+  reassignBed: async (studentId, roomId, bedId) => {
+    try {
+      const { data } = await api.post("/api/room-assignments/move/", {
+        student_id: studentId,
+        room_id: roomId,
+        bed_id: bedId ?? undefined,
+      });
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to reassign bed"));
+    }
+  },
+
+  unassignBed: async (studentId) => {
+    try {
+      const { data } = await api.post("/api/room-assignments/unassign/", {
+        student_id: studentId,
+      });
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to unassign bed"));
+    }
+  },
+
+  getRequests: async (studentId) => {
+    try {
+      const { data } = await api.get("/api/requests/", {
+        params: { student: studentId },
+      });
+      return Array.isArray(data) ? data : data.results || [];
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load student requests"));
+    }
+  },
 };
 
 export const analysisAPI = {
@@ -571,7 +715,7 @@ export const transfersAPI = {
 export const requestsAPI = {
   getAll: async (params = {}) => {
     try {
-      const { data } = await api.get("/api/transfers/", { params });
+      const { data } = await api.get("/api/requests/", { params });
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to load requests"));
@@ -580,7 +724,7 @@ export const requestsAPI = {
 
   create: async (payload) => {
     try {
-      const { data } = await api.post("/api/transfers/", payload);
+      const { data } = await api.post("/api/requests/", payload);
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to create request"));
@@ -589,7 +733,7 @@ export const requestsAPI = {
 
   approve: async (id, payload = {}) => {
     try {
-      const { data } = await api.put(`/api/transfers/${id}/approve/`, payload);
+      const { data } = await api.put(`/api/requests/${id}/approve/`, payload);
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to approve request"));
@@ -598,7 +742,7 @@ export const requestsAPI = {
 
   reject: async (id, reason = "") => {
     try {
-      const { data } = await api.put(`/api/transfers/${id}/reject/`, {
+      const { data } = await api.put(`/api/requests/${id}/reject/`, {
         reason,
       });
       return data;
@@ -607,39 +751,63 @@ export const requestsAPI = {
     }
   },
 
-  checkFeasibility: async (id) => {
+  // Feasibility for an already-created (pending) request - used both for
+  // room/apartment transfer requests and for add_student requests (the
+  // backend computes matches from the request's stored student/student_data).
+  // Same building-paged hierarchical shape as getAvailableBeds; limit/offset
+  // count buildings.
+  checkFeasibility: async (id, opts = {}) => {
     try {
-      const { data } = await api.get(`/api/transfers/${id}/feasibility/`);
-      return data;
-    } catch (err) {
-      throw new Error(getErrorMessage(err, "Failed to check feasibility"));
-    }
-  },
-
-  checkFeasibilityForStudent: async (
-    studentId,
-    requestType,
-    sameApartment = false
-  ) => {
-    try {
-      const { data } = await api.get("/api/transfers/check-feasibility/", {
-        params: {
-          student_id: studentId,
-          request_type: requestType,
-          same_apartment: sameApartment,
-        },
+      const { data } = await api.get(`/api/requests/${id}/feasibility/`, {
+        params: { limit: opts.limit ?? 10, offset: opts.offset ?? 0 },
+        signal: opts.signal,
       });
       return data;
     } catch (err) {
+      if (err.code === "ERR_CANCELED" || err.name === "CanceledError") throw err;
       throw new Error(getErrorMessage(err, "Failed to check feasibility"));
     }
   },
 
-  getAddStudentBeds: async (id) => {
+  // Feasibility preview before a request exists yet (used by the "check
+  // available options" step while composing a new room/apartment request).
+  checkFeasibilityForStudent: async (
+    studentId,
+    requestType,
+    sameApartment = null,
+    opts = {}
+  ) => {
     try {
-      const { data } = await api.get(`/api/transfers/${id}/add-student-beds/`);
+      const { data } = await api.post("/api/requests/match-options/", {
+        student_id: studentId,
+        request_type: requestType,
+        same_apartment: sameApartment,
+        region_id: opts.regionId ?? undefined,
+        // Transfer scope: 'same_region' searches the student's current
+        // region automatically; 'cross_region' searches exactly the
+        // destination regions the central admin selected (regional users
+        // are rejected server-side with 403).
+        transfer_scope: opts.transferScope ?? undefined,
+        region_ids: opts.regionIds ?? undefined,
+        limit: opts.limit ?? 10,
+        offset: opts.offset ?? 0,
+      }, { signal: opts.signal });
       return data;
     } catch (err) {
+      if (err.code === "ERR_CANCELED" || err.name === "CanceledError") throw err;
+      throw new Error(getErrorMessage(err, "Failed to check feasibility"));
+    }
+  },
+
+  getAddStudentBeds: async (id, opts = {}) => {
+    try {
+      const { data } = await api.get(`/api/requests/${id}/feasibility/`, {
+        params: { limit: opts.limit ?? 10, offset: opts.offset ?? 0 },
+        signal: opts.signal,
+      });
+      return data;
+    } catch (err) {
+      if (err.code === "ERR_CANCELED" || err.name === "CanceledError") throw err;
       throw new Error(getErrorMessage(err, "Failed to load available beds"));
     }
   },
