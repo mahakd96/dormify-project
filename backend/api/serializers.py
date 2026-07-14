@@ -5,10 +5,11 @@ Convert database objects to JSON and vice versa
 
 from django.contrib.auth import authenticate, get_user_model
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 
 from .models import (
     User, Region, Office, StaffProfile, DormType, Building, Apartment, Room, Bed,
-    Student, BedAssignment, MovementRequest, Transfer,
+    Student, BedAssignment, MovementRequest, Transfer, StudentRequest,
     AllocationRun, ImportBatch, RegionInbox
 )
 
@@ -326,6 +327,11 @@ class StudentListSerializer(serializers.ModelSerializer):
 
     is_assigned = serializers.BooleanField(read_only=True)
 
+    current_building = serializers.SerializerMethodField()
+    current_apartment = serializers.SerializerMethodField()
+    current_room = serializers.SerializerMethodField()
+    current_bed = serializers.SerializerMethodField()
+
     class Meta:
         model = Student
         fields = [
@@ -351,7 +357,33 @@ class StudentListSerializer(serializers.ModelSerializer):
             'priority_reason',
             'assigned_room',
             'is_assigned',
+            'current_building',
+            'current_apartment',
+            'current_room',
+            'current_bed',
         ]
+
+    def get_current_building(self, obj):
+        return obj.assigned_room.apartment.building.number if obj.assigned_room else None
+
+    def get_current_apartment(self, obj):
+        return obj.assigned_room.apartment.number if obj.assigned_room else None
+
+    def get_current_room(self, obj):
+        return obj.assigned_room.name if obj.assigned_room else None
+
+    def get_current_bed(self, obj):
+        # Uses the queryset's prefetched 'prefetched_active_assignments'
+        # (one extra query total for the whole page) rather than
+        # obj.current_bed, whose default property issues a fresh
+        # BedAssignment query per student - the list page's N+1 source.
+        # Falls back to the property only if a caller passes an object that
+        # wasn't built through StudentViewSet's list queryset.
+        assignments = getattr(obj, 'prefetched_active_assignments', None)
+        if assignments is not None:
+            return assignments[0].bed.label if assignments else None
+        bed = obj.current_bed
+        return bed.label if bed else None
 
 # ===========================================
 # STUDENT SERIALIZER
@@ -367,6 +399,10 @@ class StudentSerializer(serializers.ModelSerializer):
 
     accepted_dorm_type_name = serializers.CharField(source='accepted_dorm_type.name', read_only=True)
     accepted_dorm_type_code = serializers.IntegerField(source='accepted_dorm_type.code', read_only=True)
+    # The student's own (home) region - lets the assign/reassign UI default
+    # the region selector without a second round trip through dorm_types.
+    region_id = serializers.CharField(source='accepted_dorm_type.region_id', read_only=True, default=None)
+    region_name = serializers.CharField(source='accepted_dorm_type.region.name', read_only=True, default=None)
 
     assigned_room_name = serializers.CharField(source='assigned_room.name', read_only=True)
     assigned_room_id = serializers.IntegerField(source='assigned_room.id', read_only=True)
@@ -415,6 +451,8 @@ class StudentSerializer(serializers.ModelSerializer):
             'accepted_dorm_type',
             'accepted_dorm_type_name',
             'accepted_dorm_type_code',
+            'region_id',
+            'region_name',
             'batch',
             'batch_id',
             'roommate_request_1',
@@ -470,6 +508,42 @@ class StudentSerializer(serializers.ModelSerializer):
     def get_current_bed_label(self, obj):
         bed = obj.current_bed
         return bed.label if bed else None
+
+    def validate(self, attrs):
+        """
+        housing_type/accepted_dorm_type are only required for students who
+        are actually eligible for a dorm assignment (every category except
+        LEAVING - leaving students are exempt). This
+        runs on both create and update (PATCH), reading whichever of
+        housing_type/category/accepted_dorm_type is present in this request
+        and falling back to the existing instance value for a partial update.
+        """
+        instance = self.instance
+
+        def effective(field, default=None):
+            if field in attrs:
+                return attrs[field]
+            if instance is not None:
+                return getattr(instance, field)
+            return default
+
+        category = effective('category', Student.StudentCategory.NEW)
+        is_eligible = category != Student.StudentCategory.LEAVING
+
+        if is_eligible:
+            housing_type = effective('housing_type', '')
+            if not housing_type:
+                raise serializers.ValidationError({
+                    'housing_type': ['יש לבחור סוג דיור לפני שניתן לבצע שיבוץ.']
+                })
+
+            accepted_dorm_type = effective('accepted_dorm_type', None)
+            if not accepted_dorm_type:
+                raise serializers.ValidationError({
+                    'accepted_dorm_type': ['יש לבחור אזור/סוג מעונות לפני שניתן לבצע שיבוץ.']
+                })
+
+        return attrs
 
 
 # ===========================================
@@ -759,6 +833,235 @@ class TransferSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     'Rejected transfer must have reviewed_by and reviewed_at.'
                 )
+
+        return attrs
+
+
+# ===========================================
+# STUDENT REQUEST SERIALIZER
+# ===========================================
+class StudentRequestSerializer(serializers.ModelSerializer):
+    """
+    Serialize the unified "Requests" workflow (add student, remove student,
+    room change, apartment change, other). Backs the /api/requests/ endpoints
+    used by the Requests (Transfers) page and the Students page.
+    """
+
+    request_type_display = serializers.CharField(source='get_request_type_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    priority_display = serializers.CharField(source='get_priority_display', read_only=True)
+
+    student_name = serializers.SerializerMethodField()
+    student_id_number = serializers.CharField(source='student.student_id', read_only=True, default=None)
+    student_phone = serializers.CharField(source='student.phone', read_only=True, default=None)
+
+    requested_by_name = serializers.SerializerMethodField()
+    reviewed_by_name = serializers.SerializerMethodField()
+
+    target_room_name = serializers.CharField(source='target_room.name', read_only=True, default=None)
+    target_building_number = serializers.IntegerField(
+        source='target_room.apartment.building.number', read_only=True, default=None
+    )
+    target_apartment_number = serializers.CharField(
+        source='target_room.apartment.number', read_only=True, default=None
+    )
+
+    swap_with_student_name = serializers.CharField(source='swap_with_student.full_name', read_only=True, default=None)
+    swap_with_student_id_number = serializers.CharField(
+        source='swap_with_student.student_id', read_only=True, default=None
+    )
+    target_region_name = serializers.CharField(source='target_region.name', read_only=True, default=None)
+
+    # Transfer scope (same-region / cross-region). The scope and destination
+    # regions are writable at creation (validated against the caller's
+    # role); source region, assignment snapshot, and the final assignment
+    # are computed and persisted server-side only.
+    transfer_scope_display = serializers.CharField(
+        source='get_transfer_scope_display', read_only=True, default=None
+    )
+    source_region_name = serializers.CharField(source='source_region.name', read_only=True, default=None)
+    destination_regions = serializers.PrimaryKeyRelatedField(
+        many=True, queryset=Region.objects.all(), required=False,
+    )
+    destination_region_names = serializers.SerializerMethodField()
+    final_bed_label = serializers.CharField(source='final_assignment.bed.label', read_only=True, default=None)
+
+    current_region = serializers.SerializerMethodField()
+    current_building = serializers.SerializerMethodField()
+    current_apartment = serializers.SerializerMethodField()
+    current_room = serializers.SerializerMethodField()
+    current_bed = serializers.SerializerMethodField()
+    placement_history = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StudentRequest
+        fields = [
+            'id', 'request_number',
+            'request_type', 'request_type_display',
+            'reason', 'status', 'status_display',
+            'priority', 'priority_display',
+            'other_description', 'same_apartment',
+            'removal_notes', 'removal_reason',
+            'student', 'student_name', 'student_id_number', 'student_phone', 'student_data',
+            'target_room', 'target_room_name', 'target_building_number', 'target_apartment_number',
+            'swap_with_student', 'swap_with_student_name', 'swap_with_student_id_number',
+            'target_region', 'target_region_name',
+            'transfer_scope', 'transfer_scope_display',
+            'source_region', 'source_region_name',
+            'destination_regions', 'destination_region_names',
+            'current_assignment_snapshot', 'final_assignment', 'final_bed_label',
+            'current_region', 'current_building', 'current_apartment', 'current_room', 'current_bed',
+            'placement_history',
+            'requested_by', 'requested_by_name',
+            'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'rejection_reason',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'request_number', 'status',
+            'source_region', 'current_assignment_snapshot', 'final_assignment',
+            'requested_by', 'reviewed_by', 'reviewed_at', 'rejection_reason',
+            'created_at', 'updated_at',
+        ]
+
+    def get_destination_region_names(self, obj):
+        return [r.name for r in obj.destination_regions.all()]
+
+    def get_student_name(self, obj):
+        if obj.student:
+            return obj.student.full_name
+        data = obj.student_data or {}
+        name = f"{data.get('first_name', '')} {data.get('last_name', '')}".strip()
+        return name or None
+
+    def get_requested_by_name(self, obj):
+        if not obj.requested_by:
+            return None
+        return obj.requested_by.get_full_name() or obj.requested_by.email
+
+    def get_reviewed_by_name(self, obj):
+        if not obj.reviewed_by:
+            return None
+        return obj.reviewed_by.get_full_name() or obj.reviewed_by.email
+
+    def _current_room(self, obj):
+        if not obj.student_id:
+            return None
+        return obj.student.assigned_room
+
+    def get_current_region(self, obj):
+        room = self._current_room(obj)
+        if not room:
+            return None
+        region = room.region
+        return region.name if region else None
+
+    def get_current_building(self, obj):
+        room = self._current_room(obj)
+        return room.apartment.building.number if room else None
+
+    def get_current_apartment(self, obj):
+        room = self._current_room(obj)
+        return room.apartment.number if room else None
+
+    def get_current_room(self, obj):
+        room = self._current_room(obj)
+        return room.name if room else None
+
+    def get_current_bed(self, obj):
+        if not obj.student_id:
+            return None
+        bed = obj.student.current_bed
+        return bed.label if bed else None
+
+    def get_placement_history(self, obj):
+        if not obj.student_id:
+            return []
+        history = []
+        assignments = obj.student.bed_assignments.select_related(
+            'bed__room__apartment__building',
+            'bed__room__apartment__building__dorm_type__region',
+        ).order_by('-assigned_at')[:10]
+        for a in assignments:
+            room = a.bed.room
+            history.append({
+                'region': room.region.name if room.region else None,
+                'building': room.apartment.building.number,
+                'apartment': room.apartment.number,
+                'room': room.name,
+                'status': a.status,
+                'assigned_at': a.assigned_at,
+                'ended_at': a.ended_at,
+            })
+        return history
+
+    def validate(self, attrs):
+        request_type = attrs.get(
+            'request_type', getattr(self.instance, 'request_type', None)
+        )
+        student = attrs.get('student', getattr(self.instance, 'student', None))
+        student_data = attrs.get(
+            'student_data', getattr(self.instance, 'student_data', None)
+        ) or {}
+
+        needs_existing_student = {
+            StudentRequest.RequestType.ROOM,
+            StudentRequest.RequestType.APARTMENT,
+            StudentRequest.RequestType.REMOVE_STUDENT,
+            StudentRequest.RequestType.SWAP,
+            StudentRequest.RequestType.REGION_TRANSFER,
+        }
+
+        if request_type in needs_existing_student and not student:
+            raise serializers.ValidationError({
+                'student': 'This request type requires selecting an existing student.'
+            })
+
+        if request_type == StudentRequest.RequestType.SWAP:
+            swap_with = attrs.get('swap_with_student', getattr(self.instance, 'swap_with_student', None))
+            if not swap_with:
+                raise serializers.ValidationError({
+                    'swap_with_student': 'A swap request requires selecting the other student.'
+                })
+            if student and swap_with.id == student.id:
+                raise serializers.ValidationError({
+                    'swap_with_student': 'A student cannot swap with themselves.'
+                })
+
+        if request_type == StudentRequest.RequestType.REGION_TRANSFER:
+            target_region = attrs.get('target_region', getattr(self.instance, 'target_region', None))
+            if not target_region:
+                raise serializers.ValidationError({
+                    'target_region': 'A region transfer request requires a destination region.'
+                })
+
+        if request_type == StudentRequest.RequestType.ADD_STUDENT and not self.instance:
+            required = ['student_id', 'first_name', 'last_name', 'gender']
+            missing = [f for f in required if not student_data.get(f)]
+            if missing:
+                raise serializers.ValidationError({
+                    'student_data': f"Missing required new-student fields: {', '.join(missing)}"
+                })
+
+        # Transfer-scope role rules are enforced HERE (server-side), never by
+        # trusting the frontend: only a central admin may create a
+        # cross-region transfer or name destination regions, and a
+        # cross-region transfer must name at least one destination region.
+        if request_type in (StudentRequest.RequestType.ROOM, StudentRequest.RequestType.APARTMENT):
+            request = self.context.get('request')
+            user = getattr(request, 'user', None)
+            scope = attrs.get('transfer_scope')
+            destinations = attrs.get('destination_regions') or []
+            wants_cross = scope == StudentRequest.TransferScope.CROSS_REGION
+            if user is not None and not user.is_central_admin and (wants_cross or destinations):
+                raise PermissionDenied('אין לך הרשאה לבצע מעבר לאזור אחר.')
+            if wants_cross and not destinations:
+                raise serializers.ValidationError(
+                    {'destination_regions': 'יש לבחור לפחות אזור יעד אחד עבור מעבר לאזור אחר.'}
+                )
+            if not wants_cross:
+                # Same-region (or legacy unscoped) transfers never carry
+                # destination regions.
+                attrs['destination_regions'] = []
 
         return attrs
 

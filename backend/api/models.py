@@ -1050,6 +1050,8 @@ class StudentRequest(models.Model):
         REMOVE_STUDENT = 'remove_student', _('הסרת סטודנט מהמעונות')
         ROOM           = 'room',           _('שינוי חדר')
         APARTMENT      = 'apartment',      _('מעבר מהדירה')
+        SWAP           = 'swap',           _('חילוף בין סטודנטים')
+        REGION_TRANSFER = 'region_transfer', _('העברה בין אזורים')
         OTHER          = 'other',          _('בקשה אחרת')
 
     class Status(models.TextChoices):
@@ -1117,6 +1119,64 @@ class StudentRequest(models.Model):
         help_text='For add student request: room selected during approval',
     )
 
+    swap_with_student = models.ForeignKey(
+        Student,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='swap_requests_as_partner',
+        help_text='For swap requests: the other student whose room/bed is being swapped',
+    )
+
+    target_region = models.ForeignKey(
+        Region,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='incoming_transfer_requests',
+        help_text='For region_transfer requests: the destination region',
+    )
+
+    class TransferScope(models.TextChoices):
+        SAME_REGION = 'same_region', _('מעבר בתוך האזור הנוכחי')
+        CROSS_REGION = 'cross_region', _('מעבר לאזור אחר')
+
+    transfer_scope = models.CharField(
+        max_length=20,
+        choices=TransferScope.choices,
+        null=True,
+        blank=True,
+        help_text='For room/apartment transfer requests: whether the move stays '
+                  'inside the student\'s current region or crosses regions',
+    )
+    source_region = models.ForeignKey(
+        Region,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='outgoing_transfer_requests',
+        help_text='Snapshot of the student\'s region at request-creation time',
+    )
+    destination_regions = models.ManyToManyField(
+        Region,
+        blank=True,
+        related_name='destination_transfer_requests',
+        help_text='For cross-region transfers: destination regions selected by the central admin',
+    )
+    current_assignment_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        help_text='Snapshot of the student\'s bed assignment at request-creation time',
+    )
+    final_assignment = models.ForeignKey(
+        BedAssignment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='finalized_requests',
+        help_text='The bed assignment actually created when this request was approved',
+    )
+
     student_data = models.JSONField(blank=True, default=dict)
 
     priority = models.CharField(
@@ -1130,7 +1190,12 @@ class StudentRequest(models.Model):
         verbose_name = _('בקשת סטודנט')
         verbose_name_plural = _('בקשות סטודנט')
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', '-created_at']),
+            models.Index(fields=['request_type']),
+        ]
 
     def __str__(self):
         student_label = self.student.full_name if self.student else '(no student)'
         return f"{self.get_request_type_display()} - {student_label} - {self.get_status_display()}"
+

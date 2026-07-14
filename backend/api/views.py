@@ -1,6 +1,7 @@
 from decimal import Decimal, InvalidOperation
 import re
 import threading
+from collections import defaultdict
 import traceback
 import pandas as pd
 
@@ -8,27 +9,36 @@ from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.pagination import PageNumberPagination
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.exceptions import PermissionDenied as DRFPermissionDenied
 
 from django.utils import timezone
 from django.db import transaction
-from django.db.models import Q, Count
+from django.db.models import Q, Count, Prefetch
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import connection
 
 from .models import (
     User, Region, Office, StaffProfile, DormType, Building, Apartment, Room, Bed,
-    Student, BedAssignment, MovementRequest, Transfer,
+    Student, BedAssignment, MovementRequest, Transfer, StudentRequest,
     AllocationRun, ImportBatch, RegionInbox
 )
 from .serializers import (
     UserSerializer, LoginSerializer, RegisterSerializer,
     RegionSerializer, DormTypeSerializer, BuildingSerializer, ApartmentSerializer,
     RoomSerializer, StudentSerializer, StudentListSerializer, TransferSerializer,
+    StudentRequestSerializer,
     AllocationRunSerializer, ImportBatchSerializer, RegionInboxSerializer
 )
+
+
+class StandardResultsPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 # =========================
 # Auth Views
@@ -297,6 +307,16 @@ def normalize_allocation_constraints(raw_config):
 
 
 def ensure_room_beds(room: Room):
+    """
+    Materialize missing Bed rows for a room from its configured capacity.
+
+    EXPLICIT SETUP ONLY: this writes to the database and therefore must
+    never be called from any read/browse path (match-options, feasibility,
+    the assignment picker, pagination) nor from the regular assignment flow.
+    Its only legitimate caller is the admin-only management command
+    `manage.py materialize_beds` (and test fixtures). Read paths report a
+    capacity/Bed-row mismatch as a data-integrity problem instead.
+    """
     existing = room.beds.count()
     if existing >= room.capacity:
         return
@@ -305,7 +325,19 @@ def ensure_room_beds(room: Room):
         Bed.objects.create(room=room, label=f'Bed {i}')
 
 
+_MISSING_BED_RECORDS_MSG = (
+    'בחדר זה קיימת קיבולת פנויה אך חסרות רשומות מיטה במסד הנתונים (בעיית נתונים). '
+    'יש להריץ את פעולת האתחול הייעודית (manage.py materialize_beds) לפני שיבוץ.'
+)
+
+
 def get_free_bed(room: Room):
+    """
+    First actually-free REAL bed in the room, or None when the room is at
+    capacity. Never creates Bed rows: a room with free capacity but no free
+    real Bed row raises a data-integrity ValueError instead (materializing
+    beds is an explicit admin operation, see ensure_room_beds).
+    """
     if not room.is_active:
         return None
     if not room.apartment.is_active:
@@ -313,14 +345,51 @@ def get_free_bed(room: Room):
     if not room.apartment.building.is_active:
         return None
 
-    ensure_room_beds(room)
-
-    occupied_bed_ids = BedAssignment.objects.filter(
+    occupied_bed_ids = set(BedAssignment.objects.filter(
         bed__room=room,
         status=BedAssignment.Status.ACTIVE
-    ).values_list('bed_id', flat=True)
+    ).values_list('bed_id', flat=True))
 
-    return room.beds.exclude(id__in=occupied_bed_ids).order_by('id').first()
+    # Capacity is authoritative: even if surplus Bed rows exist, the room
+    # never accepts more active residents than its configured capacity.
+    if len(occupied_bed_ids) >= room.capacity:
+        return None
+
+    free = room.beds.exclude(id__in=occupied_bed_ids).order_by('id').first()
+    if free is None:
+        raise ValueError(_MISSING_BED_RECORDS_MSG)
+    return free
+
+
+def get_specific_free_bed(room: Room, bed_id):
+    """
+    Resolve a specific bed the caller selected (e.g. from the per-bed
+    matching UI) and verify it is still free right now. Raises ValueError
+    (mirrors get_free_bed's None-on-no-capacity contract at the call site)
+    if the bed doesn't belong to this room or was taken in the meantime -
+    the caller must always re-validate the exact bed server-side rather
+    than trusting whatever the client last saw. Never creates Bed rows.
+    """
+    if not room.is_active or not room.apartment.is_active or not room.apartment.building.is_active:
+        raise ValueError('החדר אינו פעיל')
+
+    try:
+        bed = room.beds.get(pk=bed_id)
+    except Bed.DoesNotExist:
+        raise ValueError('המיטה שנבחרה אינה שייכת לחדר זה')
+
+    if BedAssignment.objects.filter(bed=bed, status=BedAssignment.Status.ACTIVE).exists():
+        raise ValueError('המיטה שנבחרה כבר תפוסה - נא לבחור מיטה אחרת')
+
+    # The room's configured capacity can never be exceeded, even when more
+    # Bed rows than capacity exist (data anomaly).
+    active_in_room = BedAssignment.objects.filter(
+        bed__room=room, status=BedAssignment.Status.ACTIVE,
+    ).count()
+    if active_in_room >= room.capacity:
+        raise ValueError('החדר בתפוסה מלאה - לא ניתן לחרוג מקיבולת החדר')
+
+    return bed
 
 
 def end_active_bed_assignments(student: Student):
@@ -343,6 +412,33 @@ def _active_apartment_assignments(apartment, exclude_student_id=None):
         queryset = queryset.exclude(student_id=exclude_student_id)
 
     return queryset
+
+
+def _z_compatibility(housing_type):
+    """
+    Single source of truth for Z1-Z4 apartment_type/category compatibility,
+    shared by validate_apartment_assignment (write-path, authoritative,
+    always re-checked live) and the read-path batch matching engine below
+    (which must not re-implement this policy table separately).
+    """
+    return {
+        Student.HousingType.SINGLE_MALE: (
+            Apartment.ApartmentType.SINGLE,
+            Apartment.Category.MALE,
+        ),
+        Student.HousingType.SINGLE_FEMALE: (
+            Apartment.ApartmentType.SINGLE,
+            Apartment.Category.FEMALE,
+        ),
+        Student.HousingType.COUPLE: (
+            Apartment.ApartmentType.COUPLE,
+            Apartment.Category.MIXED,
+        ),
+        Student.HousingType.FAMILY: (
+            Apartment.ApartmentType.FAMILY,
+            Apartment.Category.MIXED,
+        ),
+    }.get(housing_type)
 
 
 def validate_apartment_assignment(student: Student, room: Room):
@@ -401,26 +497,7 @@ def validate_apartment_assignment(student: Student, room: Room):
             'This apartment is reserved exclusively for a Z6 resident.'
         )
 
-    compatibility = {
-        Student.HousingType.SINGLE_MALE: (
-            Apartment.ApartmentType.SINGLE,
-            Apartment.Category.MALE,
-        ),
-        Student.HousingType.SINGLE_FEMALE: (
-            Apartment.ApartmentType.SINGLE,
-            Apartment.Category.FEMALE,
-        ),
-        Student.HousingType.COUPLE: (
-            Apartment.ApartmentType.COUPLE,
-            Apartment.Category.MIXED,
-        ),
-        Student.HousingType.FAMILY: (
-            Apartment.ApartmentType.FAMILY,
-            Apartment.Category.MIXED,
-        ),
-    }
-
-    expected = compatibility.get(student.housing_type)
+    expected = _z_compatibility(student.housing_type)
     if expected is None:
         raise ValueError(
             'The student has no supported housing type '
@@ -464,7 +541,8 @@ def assign_student_to_room(
     student: Student,
     room: Room,
     assigned_by: User,
-    assignment_type=BedAssignment.AssignmentType.MANUAL
+    assignment_type=BedAssignment.AssignmentType.MANUAL,
+    bed_id=None,
 ):
     # Lock the apartment while validating and assigning so two concurrent
     # requests cannot violate Z6 apartment exclusivity.
@@ -480,7 +558,14 @@ def assign_student_to_room(
 
         validate_apartment_assignment(student, locked_room)
 
-        free_bed = get_free_bed(locked_room)
+        # A caller may target a specific bed (e.g. the per-bed matching UI) -
+        # it is always re-verified free here, under the apartment lock,
+        # regardless of what the client last saw. Without an explicit
+        # bed_id, fall back to "any free bed in the room".
+        if bed_id is not None:
+            free_bed = get_specific_free_bed(locked_room, bed_id)
+        else:
+            free_bed = get_free_bed(locked_room)
         if not free_bed:
             raise ValueError('No available bed in selected room.')
 
@@ -735,6 +820,7 @@ class RoomViewSet(viewsets.ReadOnlyModelViewSet):
 class StudentViewSet(viewsets.ModelViewSet):
     serializer_class = StudentSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsPagination
 
     def get_serializer_class(self):
 
@@ -747,7 +833,26 @@ class StudentViewSet(viewsets.ModelViewSet):
             'accepted_dorm_type',
             'accepted_dorm_type__region',
             'assigned_room',
-        ).all()
+            'assigned_room__apartment',
+            'assigned_room__apartment__building',
+        )
+        if self.action == 'list':
+            # The list serializer's current_bed field must never issue a
+            # per-student BedAssignment query (obj.current_bed's default
+            # property does exactly that) - prefetch each student's one
+            # active assignment (+ its bed) in a single extra query instead.
+            # Scoped to action='list' only: the detail serializer reads the
+            # same current_bed property, which is fine as a single query on
+            # one object when opening a single student.
+            queryset = queryset.prefetch_related(
+                Prefetch(
+                    'bed_assignments',
+                    queryset=BedAssignment.objects.filter(
+                        status=BedAssignment.Status.ACTIVE
+                    ).select_related('bed'),
+                    to_attr='prefetched_active_assignments',
+                )
+            )
 
         user = self.request.user
         region_value = self.request.query_params.get('region')
@@ -779,13 +884,36 @@ class StudentViewSet(viewsets.ModelViewSet):
                 Q(business_partner_id__icontains=search)
             )
 
-        gender = self.request.query_params.get('gender')
-        if gender and gender != 'all':
-            queryset = queryset.filter(gender=gender)
+        # Multi-value filter params: accepts repeated params AND comma-joined
+        # values (?gender=male,female or ?gender=male&gender=female). 'all'
+        # and empties are dropped. Values are validated against model
+        # choices / cast where applicable - invalid input filters nothing
+        # extra rather than erroring.
+        def _csv_params(name):
+            values = []
+            for chunk in self.request.query_params.getlist(name):
+                values.extend(
+                    v.strip() for v in str(chunk).split(',')
+                    if v.strip() and v.strip() != 'all'
+                )
+            return values
 
-        requested_religion = self.request.query_params.get('requested_religion')
-        if requested_religion and requested_religion != 'all':
-            queryset = queryset.filter(requested_religion=requested_religion)
+        def _int_params(name):
+            out = []
+            for v in _csv_params(name):
+                try:
+                    out.append(int(v))
+                except (TypeError, ValueError):
+                    pass
+            return out
+
+        genders = [v for v in _csv_params('gender') if v in Student.Gender.values]
+        if genders:
+            queryset = queryset.filter(gender__in=genders)
+
+        religions = [v for v in _csv_params('requested_religion') if v in Student.Religion.values]
+        if religions:
+            queryset = queryset.filter(requested_religion__in=religions)
 
         religious = self.request.query_params.get('religious')
         if religious and religious != 'all':
@@ -795,6 +923,28 @@ class StudentViewSet(viewsets.ModelViewSet):
         if placement_sector and placement_sector != 'all':
             queryset = queryset.filter(placement_sector=placement_sector)
 
+        # Location filters (FiltersDrawer). Region PKs are slugs; the rest
+        # are integer PKs. Regional users are already hard-scoped above.
+        regions = _csv_params('region')
+        if regions:
+            queryset = queryset.filter(accepted_dorm_type__region_id__in=regions)
+
+        dorm_types = _int_params('dorm_type')
+        if dorm_types:
+            queryset = queryset.filter(accepted_dorm_type_id__in=dorm_types)
+
+        buildings = _int_params('building')
+        if buildings:
+            queryset = queryset.filter(assigned_room__apartment__building_id__in=buildings)
+
+        apartments = _int_params('apartment')
+        if apartments:
+            queryset = queryset.filter(assigned_room__apartment_id__in=apartments)
+
+        rooms = _int_params('room')
+        if rooms:
+            queryset = queryset.filter(assigned_room_id__in=rooms)
+
         status_filter = self.request.query_params.get('status')
         if status_filter == 'assigned':
             queryset = queryset.filter(assigned_room__isnull=False)
@@ -803,12 +953,113 @@ class StudentViewSet(viewsets.ModelViewSet):
         elif status_filter == 'priority':
             queryset = queryset.filter(is_priority=True)
 
+        has_roommate = self.request.query_params.get('has_roommate_request')
+        if has_roommate in ('yes', 'no'):
+            roommate_q = (
+                Q(roommate_request_1__gt='') | Q(roommate_request_2__gt='') |
+                Q(roommate_request_3__gt='') | Q(roommate_request_4__gt='') |
+                Q(roommate_request_5__gt='')
+            )
+            queryset = queryset.filter(roommate_q) if has_roommate == 'yes' else queryset.exclude(roommate_q)
+
+        category = self.request.query_params.get('category')
+        if category and category != 'all':
+            queryset = queryset.filter(category=category)
+
         return queryset
 
+    def _check_student_region_authorization(self, user, dorm_type):
+        """
+        §1: central admins may add/edit a student in any region (via their
+        choice of accepted_dorm_type, which carries the region); regional
+        staff may only add/edit students within their own region - a
+        manipulated request naming a dorm type from another region is
+        rejected outright here, not merely hidden in the UI.
+        """
+        if not user.is_central_admin:
+            if not user.region_id:
+                raise DRFPermissionDenied('אין לך אזור מוגדר - לא ניתן להוסיף/לערוך סטודנטים')
+            if dorm_type and dorm_type.region_id and dorm_type.region_id != user.region_id:
+                raise DRFPermissionDenied('אינך מורשה לשייך סטודנט לאזור זה')
+
     def perform_create(self, serializer):
-        if not self.request.user.is_central_admin:
-            raise permissions.PermissionDenied('רק מנהל מרכזי יכול להוסיף סטודנטים')
+        user = self.request.user
+        dorm_type = serializer.validated_data.get('accepted_dorm_type')
+        self._check_student_region_authorization(user, dorm_type)
+        # housing_type is never guessed from gender - the serializer already
+        # requires an explicit, employee-chosen value for any student
+        # eligible for assignment (every category except LEAVING).
         serializer.save()
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        dorm_type = serializer.validated_data.get(
+            'accepted_dorm_type', serializer.instance.accepted_dorm_type
+        )
+        self._check_student_region_authorization(user, dorm_type)
+        serializer.save()
+
+    @action(detail=False, methods=['get'])
+    def counts(self, request):
+        queryset = self.get_queryset()
+        by_category = dict(
+            queryset.values_list('category').annotate(n=Count('id'))
+        )
+        return Response({
+            'all': queryset.count(),
+            'continuing': by_category.get(Student.StudentCategory.CONTINUING, 0),
+            'new': by_category.get(Student.StudentCategory.NEW, 0),
+            'transfer': by_category.get(Student.StudentCategory.TRANSFER, 0),
+            'leaving': by_category.get(Student.StudentCategory.LEAVING, 0),
+        })
+
+    @action(detail=False, methods=['get'], url_path='filter-options')
+    def filter_options(self, request):
+        user = request.user
+        regions = Region.objects.all()
+        buildings = Building.objects.select_related('dorm_type').all()
+        dorm_types = DormType.objects.select_related('region').all()
+        apartments = Apartment.objects.select_related('building').all()
+        rooms = Room.objects.select_related('apartment').all()
+
+        if not user.is_central_admin and user.region_id:
+            regions = regions.filter(id=user.region_id)
+            buildings = buildings.filter(dorm_type__region_id=user.region_id)
+            dorm_types = dorm_types.filter(region_id=user.region_id)
+            apartments = apartments.filter(building__dorm_type__region_id=user.region_id)
+            rooms = rooms.filter(apartment__building__dorm_type__region_id=user.region_id)
+
+        religions = [
+            {'id': choice_value, 'name': str(choice_label)}
+            for choice_value, choice_label in Student.Religion.choices
+        ]
+
+        # Single source of truth for the canonical housing-type values -
+        # Add/Edit Student must offer exactly these 5 choices (Z1/Z2/Z3/Z4/Z6),
+        # never a hardcoded frontend copy that can drift from the model.
+        housing_types = [
+            {'id': choice_value, 'name': str(choice_label)}
+            for choice_value, choice_label in Student.HousingType.choices
+        ]
+
+        return Response({
+            'is_central_admin': user.is_central_admin,
+            'regions': [{'id': r.id, 'name': r.name} for r in regions],
+            'buildings': [{'id': b.id, 'name': str(b.number)} for b in buildings],
+            # 'dorm_types' is the key every frontend consumer (FiltersDrawer,
+            # StudentsPage's Add Student form) actually reads - it was
+            # previously returned as 'dormTypes' here, which meant the dorm
+            # type dropdown was always empty and any form requiring it as a
+            # required field (e.g. Add Student) could never be submitted.
+            'dorm_types': [
+                {'id': d.id, 'name': d.name, 'region_id': d.region_id, 'region_name': d.region.name if d.region else None}
+                for d in dorm_types
+            ],
+            'apartments': [{'id': a.id, 'name': a.number} for a in apartments],
+            'rooms': [{'id': r.id, 'name': r.name} for r in rooms],
+            'religions': religions,
+            'housing_types': housing_types,
+        })
 
 
 class TransferViewSet(viewsets.ModelViewSet):
@@ -844,7 +1095,12 @@ class TransferViewSet(viewsets.ModelViewSet):
         movement_type = infer_movement_type(from_room, to_room)
 
         with transaction.atomic():
-            target_bed = get_free_bed(to_room)
+            try:
+                target_bed = get_free_bed(to_room)
+            except ValueError as exc:
+                # Data-integrity case (capacity free but no real Bed rows) -
+                # surfaced as a validation error, never silently "fixed".
+                raise DRFValidationError(str(exc))
             if not target_bed:
                 raise DRFValidationError('אין מיטה פנויה בחדר היעד')
 
@@ -975,6 +1231,1427 @@ class TransferViewSet(viewsets.ModelViewSet):
         return Response({
             'message': 'הבקשה נדחתה',
             'transfer': TransferSerializer(transfer).data
+        })
+
+
+# =========================
+# Student Requests (add/remove student, room/apartment change, other)
+# =========================
+
+def _religion_group(religion):
+    if religion == Student.Religion.Jewish:
+        return 'jewish'
+    if religion in (Student.Religion.Muslim, Student.Religion.Christian, Student.Religion.Druze):
+        return 'arab'
+    return 'unknown'
+
+
+def _sector_group(placement_sector):
+    """
+    Coarse jewish/arab/other/unknown placement-sector bucket, independent of
+    the finer-grained religion field - mirrors the allocation solver's
+    sectorMatching signal (allocation/solver.py:_get_student_sector).
+    placement_sector is a field staff set explicitly for placement purposes
+    and can be more/less complete than requested_religion, so it is scored
+    as its own distinct warning rather than folded into the religion check.
+    """
+    if placement_sector == Student.PlacementSector.JEWISH:
+        return 'jewish'
+    if placement_sector == Student.PlacementSector.ARAB:
+        return 'arab'
+    if placement_sector == Student.PlacementSector.OTHER:
+        return 'other'
+    return 'unknown'
+
+
+def _year_group(study_points):
+    """
+    Coarse academic-year bucket used only to avoid mixing first-years with
+    3rd/4th-years in the same apartment - mirrors the allocation solver's
+    avoidYearMix signal (allocation/solver.py:_get_student_year_group).
+    Missing/unset study_points is 'other' (unknown), never 0 - it must not
+    be silently treated as a real, matchable year1 value.
+    """
+    if study_points is None or study_points == '':
+        return 'other'
+    try:
+        points = float(study_points)
+    except (TypeError, ValueError):
+        return 'other'
+    if 0 <= points <= 40:
+        return 'year1'
+    if points >= 60:
+        return 'year3_4'
+    return 'other'
+
+
+def _student_transfer_history(student):
+    """
+    Real, stored historical signal (Transfer records) for this student -
+    never invented, never inferred from unrelated behavior. Returns the set
+    of dorm_type ids the student has previously *requested to move to*
+    (any Transfer status - even a rejected/pending request shows real
+    interest) and the set they've previously *requested to move away from*.
+    Both are used only to explain an option, never to gate/exclude it.
+    """
+    if student is None or not getattr(student, 'pk', None):
+        return {'requested_to': set(), 'requested_away_from': set()}
+
+    transfers = Transfer.objects.filter(student=student).select_related(
+        'to_room__apartment__building__dorm_type',
+        'from_room__apartment__building__dorm_type',
+    )
+    requested_to = set()
+    requested_away_from = set()
+    for t in transfers:
+        to_dorm_type_id = (
+            t.to_room.apartment.building.dorm_type_id if t.to_room and t.to_room.apartment.building else None
+        )
+        from_dorm_type_id = (
+            t.from_room.apartment.building.dorm_type_id if t.from_room and t.from_room.apartment.building else None
+        )
+        if to_dorm_type_id:
+            requested_to.add(to_dorm_type_id)
+        if from_dorm_type_id:
+            requested_away_from.add(from_dorm_type_id)
+    return {'requested_to': requested_to, 'requested_away_from': requested_away_from}
+
+
+def _infer_housing_type(student_data):
+    """Best-effort mapping from the Add-Student wizard's loose dorm_type hint
+    ('couples' / 'single') + gender into a real Student.HousingType value."""
+    dorm_hint = (student_data.get('dorm_type') or student_data.get('housing_type') or '').strip().lower()
+    gender = student_data.get('gender')
+
+    if dorm_hint in ('couples', 'couple', 'זוגות'):
+        return Student.HousingType.COUPLE
+    if dorm_hint in ('single', 'בודדים', 'רווקים', 'רווקות', 'רווקים/ות בדירה'):
+        return Student.HousingType.SINGLE_FEMALE if gender == 'female' else Student.HousingType.SINGLE_MALE
+
+    if gender == 'female':
+        return Student.HousingType.SINGLE_FEMALE
+    if gender == 'male':
+        return Student.HousingType.SINGLE_MALE
+    return ''
+
+
+# ---------------------------------------------------------------------------
+# Central match-scoring configuration - single source of truth for §3.
+#
+# These weights mirror the *relative* importance already established by the
+# allocation solver's SOFT_ALLOCATION_CONSTRAINTS (allocation/solver.py):
+# roommateMatch=8 is its strongest soft signal, followed by
+# sectorMatching=7, sameReligion=6, and avoidYearMix=4 (its weakest default
+# soft signal). The solver has no existing weight split for "mutual" vs
+# "one-sided" roommate requests specifically - its fixtures (e.g.
+# case_02_soft_tradeoff_one_sided_bad_roommate) only establish that a
+# one-sided request is a weaker signal than a mutual one. That split is
+# therefore defined explicitly here, once, rather than as a magic number
+# inside the scoring loop.
+# ---------------------------------------------------------------------------
+MATCH_SCORE_WEIGHTS = {
+    'base': 50,
+    'roommate_match_mutual': 35,
+    'roommate_match_one_sided': 15,
+    'roommate_future_capacity': 10,
+    'preferred_dormitory': 14,
+    'empty_apartment': 15,
+    'religion_compatible': 10,
+    'religion_conflict_penalty': -15,
+    'sector_compatible': 12,
+    'sector_conflict_penalty': -18,
+    'year_mix_penalty': -8,
+    'city_match': 8,
+    'priority_student_bonus': 5,
+    'history_bonus': 4,
+}
+BEST_MATCH_SCORE_THRESHOLD = 70
+# The numeric score above is sort/threshold plumbing ONLY - it is never sent
+# to the frontend. Every reason attached to an option (matched/warning/
+# historical) is a (code, label) pair from this table, so the UI can render
+# "why", never a percentage. recommendation_level is the only thing the
+# client sees for ranking, mapped from match_level (itself derived from the
+# score) via RECOMMENDATION_LEVEL_MAP below.
+REASON_LABELS = {
+    'mutual_roommate_request': 'בקשת שותפים הדדית',
+    'roommate_already_here': 'השותף המבוקש כבר משובץ בדירה זו',
+    'roommate_future_capacity': 'בדירה קיימות שתי מיטות פנויות עבור שני השותפים',
+    'preferred_dormitory': 'המעון נמצא בעדיפות הסטודנט',
+    'empty_apartment': 'דירה ריקה - ללא סיכון התאמה',
+    'religion_match': 'התאמה דתית/עדתית',
+    'religion_conflict': 'בדירה יש דיירים מקבוצה דתית שונה',
+    'sector_match': 'התאמת סקטור שיבוץ',
+    'sector_conflict': 'בדירה יש דיירים מסקטור שיבוץ שונה',
+    'year_mix_conflict': 'ערבוב שנתונים בדירה (שנה א׳ עם שנה ג׳-ד׳)',
+    'city_match': 'התאמת עיר מגורים',
+    'priority_student': 'סטודנט/ית בעדיפות',
+    'roommate_incompatible_hard_rule': 'השותף המבוקש נמצא בדירה זו, אך קיים חוסר התאמה בדרישות חובה',
+    'previously_requested_dormitory': 'הסטודנט/ית ביקש/ה בעבר מעון זה',
+    'previously_transferred_away': 'הסטודנט/ית ביקש/ה בעבר לעבור ממעון זה',
+}
+
+RECOMMENDATION_LEVEL_MAP = {
+    'best_match': ('best', 'ההתאמה המומלצת ביותר', 4),
+    'empty': ('good', 'התאמה טובה', 3),
+    'valid': ('valid', 'אפשרות תקינה', 2),
+    'warning': ('warning', 'אפשרות עם אזהרות', 1),
+    'conflict': ('unavailable', 'לא זמין', 0),
+}
+
+
+def _reason(code):
+    return {'code': code, 'label': REASON_LABELS[code]}
+MAX_CONFLICT_EXAMPLES = 5
+MAX_CONFLICT_BUFFER = 50
+# Rooms whose only problem is "no free bed" are a far more useful diagnostic
+# sample than rooms that are also the wrong gender/housing type for this
+# student - a female student looking at "male apartment 1 is full" learns
+# nothing. _conflict_priority ranks type/gender-mismatched rooms last so the
+# sample favors "same category as the student, just full" whenever any exist.
+_TYPE_OR_GENDER_MISMATCH_REASONS = {
+    'אי-התאמת סוג הדירה לסוג הדיור של הסטודנט',
+    'אי-התאמת מגדר/קטגוריית הדירה',
+    'לסטודנט אין סוג דיור נתמך לשיבוץ',
+    'הדירה שמורה בלעדית לדייר/ת בשיבוץ רווקים/ות בדירה',
+    'נדרשת דירת זוגות עבור שיבוץ מסוג רווקים/ות בדירה',
+}
+
+
+def _conflict_priority(conflicts):
+    has_type_or_gender_mismatch = any(c in _TYPE_OR_GENDER_MISMATCH_REASONS for c in conflicts)
+    return (has_type_or_gender_mismatch, len(conflicts))
+
+
+def _classify_match_level(score, warnings, conflicts, is_empty=False):
+    """Single source of truth for match_level, used both when tallying
+    filter-chip counts over every valid bed and when building the display
+    dict for the handful actually returned - keeps the two in sync.
+
+    'empty' is its own top-level category (a zero-resident apartment carries
+    no compatibility risk at all - safer than any occupied "best_match")
+    rather than folding into 'best_match' as before, where a plain empty
+    apartment with no other bonus (no roommate/city/priority match) scored
+    exactly 65 - below BEST_MATCH_SCORE_THRESHOLD - and was silently
+    downgraded to 'valid'."""
+    if conflicts:
+        return 'conflict'
+    if is_empty:
+        return 'empty'
+    if score >= BEST_MATCH_SCORE_THRESHOLD and not warnings:
+        return 'best_match'
+    if warnings:
+        return 'warning'
+    return 'valid'
+
+
+def _student_assignment_blocker(student):
+    """
+    Single student-level reason this student cannot be matched to *any*
+    room at all, checked once before scanning candidate rooms. Without this,
+    a student missing housing_type/region would have the exact same
+    conflict reason repeated on every single candidate room in the result
+    set (e.g. hundreds of rows all saying "no supported housing type") -
+    this returns one (field, message) pair instead so the caller can show a
+    single blocking message.
+    """
+    if student.category == Student.StudentCategory.LEAVING:
+        return 'category', 'הסטודנט/ית בקטגוריית עוזבים ואינו/ה זכאי/ת לשיבוץ.'
+    if not student.housing_type or student.housing_type not in Student.HousingType.values:
+        return 'housing_type', 'לא ניתן לבצע שיבוץ: חסר סוג דיור בפרטי הסטודנט.'
+    if not student.accepted_dorm_type_id:
+        return 'region', 'לא ניתן לבצע שיבוץ: חסר אזור/סוג מעונות בפרטי הסטודנט.'
+    return None
+
+
+def _room_conflicts(student, room, apartment, residents, available_beds):
+    """
+    Hard-constraint (CONFLICT) reasons for a candidate room, computed only
+    from already-fetched data - no DB queries. Mirrors
+    validate_apartment_assignment's policy via the shared _z_compatibility
+    table so the two never drift apart, but returns every violation reason
+    instead of raising on the first one, since the matching engine has to
+    classify every candidate room, not just validate a single chosen one.
+    """
+    reasons = []
+
+    if not room.is_active:
+        reasons.append('החדר אינו פעיל')
+    if not apartment.is_active:
+        reason = apartment.get_inactive_reason_display() if apartment.inactive_reason else 'לא פעילה'
+        reasons.append(f'הדירה אינה פעילה ({reason})')
+    if not apartment.building.is_active:
+        reasons.append('הבניין אינו פעיל')
+
+    if available_beds <= 0:
+        reasons.append('אין מיטות פנויות בחדר - תפוסה מלאה')
+
+    other_residents = [r for r in residents if r['id'] != getattr(student, 'id', None)]
+
+    if student.housing_type == Student.HousingType.SINGLE_IN_APARTMENT:
+        if apartment.apartment_type != Apartment.ApartmentType.COUPLE:
+            reasons.append('נדרשת דירת זוגות עבור שיבוץ מסוג רווקים/ות בדירה')
+        if other_residents:
+            reasons.append('הדירה תפוסה - נדרשת דירה ריקה לחלוטין')
+        return reasons
+
+    if any(r['housing_type'] == Student.HousingType.SINGLE_IN_APARTMENT for r in other_residents):
+        reasons.append('הדירה שמורה בלעדית לדייר/ת בשיבוץ רווקים/ות בדירה')
+
+    expected = _z_compatibility(student.housing_type)
+    if expected is None:
+        reasons.append('לסטודנט אין סוג דיור נתמך לשיבוץ')
+    else:
+        expected_type, expected_category = expected
+        if apartment.apartment_type != expected_type:
+            reasons.append('אי-התאמת סוג הדירה לסוג הדיור של הסטודנט')
+        if apartment.category != expected_category:
+            reasons.append('אי-התאמת מגדר/קטגוריית הדירה')
+
+    return reasons
+
+
+def _room_candidate_queryset(user, region_id=None, region_ids=None):
+    """
+    Region-scoped, active-only candidate rooms. `region_id` (single) or
+    `region_ids` (cross-region transfer: one or more destination regions)
+    let a central admin explicitly target regions; a regional user is
+    always confined to their own region regardless of what is passed in,
+    so a client can never widen its own scope by sending region ids.
+    """
+    queryset = Room.objects.select_related(
+        'apartment',
+        'apartment__building',
+        'apartment__building__dorm_type',
+        'apartment__building__dorm_type__region',
+    ).filter(
+        is_active=True,
+        apartment__is_active=True,
+        apartment__building__is_active=True,
+    )
+
+    if user.is_central_admin:
+        if region_ids:
+            queryset = queryset.filter(apartment__building__dorm_type__region_id__in=region_ids)
+        elif region_id:
+            queryset = queryset.filter(apartment__building__dorm_type__region_id=region_id)
+    else:
+        if not user.region_id:
+            return queryset.none()
+        queryset = queryset.filter(apartment__building__dorm_type__region_id=user.region_id)
+
+    return queryset
+
+
+def find_matching_room_options(
+    user, student=None, student_data=None, same_apartment=None,
+    region_id=None, region_ids=None, limit=10, offset=0, explain_conflicts_if_empty=True,
+):
+    """
+    Real, currently-available placement options for a student (existing, or
+    a not-yet-created student described by student_data), returned as a
+    building-paged hierarchy:
+
+        buildings[] -> apartments[] -> rooms[] -> beds[]
+
+    This is the single reusable matching service - assign, reassign,
+    room/apartment requests and add-student allocation all call this instead
+    of re-implementing matching logic.
+
+    READ-ONLY GUARANTEE: browsing/matching never writes to the database.
+    Only real, existing Bed rows are ever offered as selectable; a room
+    whose configured capacity says "free" but that has no free real Bed row
+    contributes zero selectable beds and is reported under `data_integrity`
+    in the response instead of triggering any row creation. Materializing
+    Bed rows from room capacity is an explicit, admin-only operation
+    (manage.py materialize_beds) and is never run from here.
+
+    PAGINATION UNIT IS THE BUILDING (by primary key, never by the reusable
+    building *number*): `offset`/`limit` count buildings, and every building
+    on the returned page carries its complete apartment/room/bed subtree, so
+    the client can always expand exactly what it received - there are no
+    partial parents. Buildings are ordered by their best apartment's
+    (roommate_tier, score); the tier implements the required roommate
+    ranking lexicographically, so no combination of soft preferences can
+    ever outrank a higher roommate tier:
+
+        3 - mutual roommate request, roommate already assigned here
+        2 - one-sided roommate request, roommate already assigned here
+        1 - mutual roommate request, roommate unassigned anywhere, and this
+            apartment has free capacity for both students
+        0 - no roommate signal (score refines: preferred dormitory, then
+            the other soft preferences)
+
+    Hard constraints (gender/housing type/capacity/active flags/region
+    scoping via the queryset) always exclude a room entirely - they are
+    never outrankable by any preference.
+
+    Occupancy is always computed from the real active BedAssignment rows
+    (never from the Room record alone), so a two-bed room with one occupied
+    bed is "one free", not "full", and only the actually-free bed is
+    selectable.
+
+    The numeric score is internal plumbing only - the response never
+    contains a score or percentage, only recommendation_level/label (fixed
+    tiers) plus matched_reasons/warnings/historical_reasons as {code,label}
+    pairs.
+    """
+    student_data = student_data or {}
+    current_room = None
+
+    if student is not None and student.pk:
+        current_room = student.assigned_room
+    elif student is None:
+        student = Student(
+            gender=student_data.get('gender') or '',
+            housing_type=student_data.get('housing_type') or _infer_housing_type(student_data),
+            requested_religion=(
+                student_data.get('requested_religion')
+                or student_data.get('religion')
+                or Student.Religion.NOT_SPECIFIED
+            ),
+            city=student_data.get('city', ''),
+            is_priority=bool(student_data.get('is_priority')),
+        )
+
+    current_apartment_id = current_room.apartment_id if current_room else None
+
+    rooms_qs = _room_candidate_queryset(user, region_id=region_id, region_ids=region_ids)
+    if current_room:
+        rooms_qs = rooms_qs.exclude(id=current_room.id)
+    if same_apartment is True and current_apartment_id:
+        rooms_qs = rooms_qs.filter(apartment_id=current_apartment_id)
+    elif same_apartment is False and current_apartment_id:
+        rooms_qs = rooms_qs.exclude(apartment_id=current_apartment_id)
+
+    rooms = list(rooms_qs.prefetch_related('beds'))  # query #1 (Room + select_related chain), query #2 (beds prefetch)
+    apartment_ids = {r.apartment_id for r in rooms}
+
+    resident_assignments = BedAssignment.objects.filter(
+        status=BedAssignment.Status.ACTIVE,
+        bed__room__apartment_id__in=apartment_ids,
+    ).select_related('student', 'bed__room')  # query #3 - every resident of every candidate apartment, in one shot
+
+    residents_by_apartment = defaultdict(list)
+    occupied_bed_ids_by_room = defaultdict(set)
+    occupant_name_by_bed_id = {}
+    for a in resident_assignments:
+        occupied_bed_ids_by_room[a.bed.room_id].add(a.bed_id)
+        rs = a.student
+        occupant_name_by_bed_id[a.bed_id] = rs.full_name
+        rs_roommate_ids = {
+            rs.roommate_request_student_id_1, rs.roommate_request_student_id_2,
+            rs.roommate_request_student_id_3, rs.roommate_request_student_id_4,
+            rs.roommate_request_student_id_5,
+        }
+        rs_roommate_ids.discard(''); rs_roommate_ids.discard(None)
+        residents_by_apartment[a.bed.room.apartment_id].append({
+            'id': rs.id,
+            'student_id': rs.student_id,
+            'full_name': rs.full_name,
+            'city': rs.city,
+            'religion': rs.requested_religion,
+            'religion_display': rs.get_requested_religion_display(),
+            'placement_sector': rs.placement_sector,
+            'sector_display': rs.get_placement_sector_display(),
+            'study_points': rs.study_points,
+            'housing_type': rs.housing_type,
+            'roommate_ids': rs_roommate_ids,
+            'room_name': a.bed.room.name,
+        })
+
+    roommate_ids = {
+        student_data.get('roommate_request_student_id_1'),
+        getattr(student, 'roommate_request_student_id_1', None),
+        getattr(student, 'roommate_request_student_id_2', None),
+        getattr(student, 'roommate_request_student_id_3', None),
+        getattr(student, 'roommate_request_student_id_4', None),
+        getattr(student, 'roommate_request_student_id_5', None),
+    }
+    roommate_ids.discard(None)
+    roommate_ids.discard('')
+    student_own_id = getattr(student, 'student_id', None)
+    student_city = (student.city or '').strip().lower()
+    student_group = _religion_group(student.requested_religion)
+    student_sector = _sector_group(getattr(student, 'placement_sector', None))
+    student_year_group = _year_group(getattr(student, 'study_points', None))
+    history = _student_transfer_history(student)
+    preferred_dorm_type_id = getattr(student, 'accepted_dorm_type_id', None)
+
+    # Ranking case "mutual request + capacity for both" requires knowing
+    # whether an UNASSIGNED requested roommate requested this student back -
+    # their stored lists are fetched once (bounded: at most 5 ids).
+    requested_roommate_lists = {}
+    if roommate_ids:
+        for rm in Student.objects.filter(student_id__in=roommate_ids):  # query #4 (<=5 rows)
+            ids = {
+                rm.roommate_request_student_id_1, rm.roommate_request_student_id_2,
+                rm.roommate_request_student_id_3, rm.roommate_request_student_id_4,
+                rm.roommate_request_student_id_5,
+            }
+            ids.discard(None); ids.discard('')
+            requested_roommate_lists[rm.student_id] = ids
+
+    assigned_requested_roommate_ids = {
+        r['student_id']
+        for residents in residents_by_apartment.values()
+        for r in residents
+        if r['student_id'] in roommate_ids
+    }
+    has_unassigned_mutual_roommate = bool(student_own_id) and any(
+        rm_id not in assigned_requested_roommate_ids and student_own_id in their_ids
+        for rm_id, their_ids in requested_roommate_lists.items()
+    )
+
+    apartment_dorm_type_ids = {}
+    for room in rooms:
+        apartment_dorm_type_ids[room.apartment_id] = room.apartment.building.dorm_type_id
+
+    def _score_apartment(apartment_id, other_residents, apartment_free_selectable):
+        """
+        One score per APARTMENT - all rooms in an apartment share the same
+        residents, hence the same warnings/reasons/score. Returns
+        (roommate_tier, score, warnings, matched_preferences, historical).
+        The tier ranks the roommate cases lexicographically; the score only
+        refines ordering within a tier and picks the recommendation level.
+        Neither is ever exposed to the client as a number.
+        """
+        warnings = []
+        matched_preferences = []
+        historical_reasons = []
+        score = MATCH_SCORE_WEIGHTS['base']
+        tier = 0
+
+        mutual = one_sided = False
+        for r in other_residents:
+            if r['student_id'] in roommate_ids:
+                one_sided = True
+                if student_own_id and student_own_id in r.get('roommate_ids', set()):
+                    mutual = True
+        if mutual:
+            tier = 3
+            score += MATCH_SCORE_WEIGHTS['roommate_match_mutual']
+            matched_preferences.append(_reason('mutual_roommate_request'))
+            matched_preferences.append(_reason('roommate_already_here'))
+        elif one_sided:
+            tier = 2
+            score += MATCH_SCORE_WEIGHTS['roommate_match_one_sided']
+            matched_preferences.append(_reason('roommate_already_here'))
+        elif has_unassigned_mutual_roommate and apartment_free_selectable >= 2:
+            # Mutual request, roommate not assigned anywhere yet, and this
+            # apartment really has two free REAL beds - both students fit.
+            tier = 1
+            score += MATCH_SCORE_WEIGHTS['roommate_future_capacity']
+            matched_preferences.append(_reason('roommate_future_capacity'))
+
+        if preferred_dorm_type_id and apartment_dorm_type_ids.get(apartment_id) == preferred_dorm_type_id:
+            # The dormitory the student was accepted to is their explicit
+            # dormitory preference - ranks above the remaining soft
+            # preferences but below every roommate tier.
+            score += MATCH_SCORE_WEIGHTS['preferred_dormitory']
+            matched_preferences.append(_reason('preferred_dormitory'))
+
+        if not other_residents:
+            score += MATCH_SCORE_WEIGHTS['empty_apartment']
+            matched_preferences.append(_reason('empty_apartment'))
+        else:
+            if student_group != 'unknown':
+                mismatch = any(_religion_group(r['religion']) not in (student_group, 'unknown') for r in other_residents)
+                if mismatch:
+                    warnings.append(_reason('religion_conflict'))
+                    score += MATCH_SCORE_WEIGHTS['religion_conflict_penalty']
+                else:
+                    score += MATCH_SCORE_WEIGHTS['religion_compatible']
+                    matched_preferences.append(_reason('religion_match'))
+
+            # sectorMatching - a coarser, separately-maintained placement
+            # field (staff may set it even when requested_religion is
+            # blank), so it is its own warning rather than reusing the
+            # religion-group check above.
+            if student_sector != 'unknown':
+                sector_mismatch = any(
+                    _sector_group(r['placement_sector']) not in (student_sector, 'unknown')
+                    for r in other_residents
+                )
+                if sector_mismatch:
+                    warnings.append(_reason('sector_conflict'))
+                    score += MATCH_SCORE_WEIGHTS['sector_conflict_penalty']
+                else:
+                    score += MATCH_SCORE_WEIGHTS['sector_compatible']
+                    matched_preferences.append(_reason('sector_match'))
+
+            # avoidYearMix - flag only the specific year1-with-year3_4
+            # combination (mirrors the solver); "other"/unknown academic
+            # standing never triggers this warning.
+            if student_year_group in ('year1', 'year3_4'):
+                year_mismatch = any(
+                    {_year_group(r['study_points']), student_year_group} == {'year1', 'year3_4'}
+                    for r in other_residents
+                )
+                if year_mismatch:
+                    warnings.append(_reason('year_mix_conflict'))
+                    score += MATCH_SCORE_WEIGHTS['year_mix_penalty']
+
+        if student_city and any((r['city'] or '').strip().lower() == student_city for r in other_residents):
+            score += MATCH_SCORE_WEIGHTS['city_match']
+            matched_preferences.append(_reason('city_match'))
+
+        if getattr(student, 'is_priority', False):
+            score += MATCH_SCORE_WEIGHTS['priority_student_bonus']
+            matched_preferences.append(_reason('priority_student'))
+
+        # Real stored history only (Transfer records) - never invented, and
+        # never based on identity/behavior unrelated to housing requests.
+        dorm_type_id = apartment_dorm_type_ids.get(apartment_id)
+        if dorm_type_id:
+            if dorm_type_id in history['requested_to']:
+                score += MATCH_SCORE_WEIGHTS['history_bonus']
+                historical_reasons.append(_reason('previously_requested_dormitory'))
+            if dorm_type_id in history['requested_away_from']:
+                historical_reasons.append(_reason('previously_transferred_away'))
+
+        return tier, max(0, min(100, score)), warnings, matched_preferences, historical_reasons
+
+    def _public_residents(other_residents):
+        # roommate_ids is internal matching detail (a set, and other
+        # students' private request lists) - never serialized to the client.
+        return [{k: v for k, v in r.items() if k != 'roommate_ids'} for r in other_residents]
+
+    # ---- pass 1: hard constraints + real-bed availability per room -------
+    valid_rooms_by_apartment = defaultdict(list)
+    conflict_rooms = []  # (room, apartment, residents, capacity_free, conflicts)
+    apartment_selectable_free = defaultdict(int)
+    integrity_rooms_missing = 0
+    integrity_missing_beds = 0
+    integrity_rooms_extra = 0
+
+    for room in rooms:
+        apartment = room.apartment
+        occupied_ids = occupied_bed_ids_by_room.get(room.id, set())
+        occupied_count = len(occupied_ids)
+        capacity_free = max(room.capacity - occupied_count, 0)
+        residents = residents_by_apartment.get(apartment.id, [])
+        conflicts = _room_conflicts(student, room, apartment, residents, capacity_free)
+
+        if conflicts:
+            # Hard-conflict rooms are never part of the normal result set.
+            # They are only surfaced (disabled, clearly marked) as a short
+            # explanation when there is nothing valid to show at all.
+            if explain_conflicts_if_empty and len(conflict_rooms) < MAX_CONFLICT_BUFFER:
+                conflict_rooms.append((room, apartment, residents, capacity_free, conflicts))
+            continue
+
+        real_beds = sorted(room.beds.all(), key=lambda b: b.id)  # from the prefetch - no query
+        free_real = [b for b in real_beds if b.id not in occupied_ids]
+        # Never offer more beds than the room's configured capacity allows,
+        # and never offer a bed that does not exist as a real row.
+        selectable = free_real[:capacity_free]
+        selectable_ids = {b.id for b in selectable}
+        missing = max(capacity_free - len(free_real), 0)
+        if missing:
+            integrity_rooms_missing += 1
+            integrity_missing_beds += missing
+        if len(free_real) > len(selectable):
+            integrity_rooms_extra += 1
+
+        apartment_selectable_free[apartment.id] += len(selectable)
+        valid_rooms_by_apartment[apartment.id].append({
+            'room': room,
+            'occupied_ids': occupied_ids,
+            'occupied_count': occupied_count,
+            'capacity_free': capacity_free,
+            'real_beds': real_beds,
+            'selectable_ids': selectable_ids,
+            'missing': missing,
+        })
+
+    # ---- pass 2: score each apartment once, aggregate into buildings -----
+    buildings_by_id = {}
+    level_counts = {'best_match': 0, 'empty': 0, 'valid': 0, 'warning': 0, 'conflict': 0}
+    fully_empty_count = 0
+    roommate_match_count = 0
+    total_apartments = 0
+    total_rooms = 0
+    total_valid_beds = 0
+
+    for apartment_id, room_entries in valid_rooms_by_apartment.items():
+        apartment = room_entries[0]['room'].apartment
+        building = apartment.building
+        residents = residents_by_apartment.get(apartment_id, [])
+        other_residents = [r for r in residents if r['id'] != getattr(student, 'id', None)]
+        apt_selectable = apartment_selectable_free.get(apartment_id, 0)
+
+        tier, score, warnings, matched_preferences, historical_reasons = _score_apartment(
+            apartment_id, other_residents, apt_selectable
+        )
+        is_empty = not other_residents
+        match_level = _classify_match_level(score, warnings, [], is_empty=is_empty)
+        rec_level, rec_label, rec_rank = RECOMMENDATION_LEVEL_MAP[match_level]
+
+        level_counts[match_level] += apt_selectable
+        if is_empty:
+            fully_empty_count += apt_selectable
+        if tier >= 2:
+            roommate_match_count += apt_selectable
+
+        rooms_payload = []
+        apt_capacity_free = 0
+        apt_missing = 0
+        for entry in sorted(room_entries, key=lambda e: str(e['room'].name)):
+            room = entry['room']
+            apt_capacity_free += entry['capacity_free']
+            apt_missing += entry['missing']
+            rooms_payload.append({
+                'room_id': room.id,
+                'room_name': room.name,
+                'capacity': room.capacity,
+                'occupied_beds_count': entry['occupied_count'],
+                'available_beds_count': len(entry['selectable_ids']),
+                'capacity_free_count': entry['capacity_free'],
+                'missing_bed_records': entry['missing'],
+                'beds': [
+                    {
+                        'bed_id': b.id,
+                        'bed_label': b.label,
+                        'is_occupied': b.id in entry['occupied_ids'],
+                        'occupant_name': occupant_name_by_bed_id.get(b.id),
+                        'is_selectable': b.id in entry['selectable_ids'],
+                    }
+                    for b in entry['real_beds']
+                ],
+            })
+
+        apartment_payload = {
+            'apartment_id': apartment.id,
+            'apartment_number': apartment.number,
+            'apartment_gender': apartment.category,
+            'apartment_type': apartment.apartment_type,
+            'residents': _public_residents(other_residents),
+            'match_level': match_level,
+            'recommendation_level': rec_level,
+            'recommendation_label': rec_label,
+            'recommendation_rank': rec_rank,
+            'matched_reasons': matched_preferences,
+            'warnings': warnings,
+            'historical_reasons': historical_reasons,
+            'available_bed_count': apt_selectable,
+            'capacity_free_count': apt_capacity_free,
+            'missing_bed_records': apt_missing,
+            'room_count': len(rooms_payload),
+            'has_roommate_match': tier >= 2,
+            'rooms': rooms_payload,
+            '_sort_key': (-tier, -score, -rec_rank, str(apartment.number)),
+        }
+
+        b = buildings_by_id.get(building.id)
+        if b is None:
+            dorm_type = building.dorm_type
+            region = dorm_type.region if dorm_type else None
+            b = buildings_by_id[building.id] = {
+                'building_id': building.id,
+                'building_number': building.number,
+                'building_name': (
+                    f'בניין {building.number}' if building.number is not None
+                    else f'בניין (מזהה {building.id})'
+                ),
+                'region': region.id if region else None,
+                'region_name': region.name if region else None,
+                'dorm_type': dorm_type.name if dorm_type else None,
+                'dorm_type_id': dorm_type.id if dorm_type else None,
+                'apartment_count': 0,
+                'room_count': 0,
+                'available_bed_count': 0,
+                'capacity_free_count': 0,
+                'missing_bed_records': 0,
+                'recommendation_level': rec_level,
+                'recommendation_label': rec_label,
+                'recommendation_rank': rec_rank,
+                'has_roommate_match': False,
+                'top_reasons': [],
+                'recommended_bed_count': 0,
+                'roommate_bed_count': 0,
+                'warning_free_bed_count': 0,
+                'apartments': [],
+                '_best_key': (-1, -1),
+            }
+
+        b['apartment_count'] += 1
+        b['room_count'] += len(rooms_payload)
+        b['available_bed_count'] += apt_selectable
+        b['capacity_free_count'] += apt_capacity_free
+        b['missing_bed_records'] += apt_missing
+        b['has_roommate_match'] = b['has_roommate_match'] or tier >= 2
+        if match_level in ('best_match', 'empty'):
+            b['recommended_bed_count'] += apt_selectable
+        if tier >= 2:
+            b['roommate_bed_count'] += apt_selectable
+        if match_level in ('best_match', 'empty', 'valid'):
+            b['warning_free_bed_count'] += apt_selectable
+        b['apartments'].append(apartment_payload)
+
+        apt_key = (tier, score)
+        if apt_key > tuple(b['_best_key']):
+            b['_best_key'] = apt_key
+            b['recommendation_level'] = rec_level
+            b['recommendation_label'] = rec_label
+            b['recommendation_rank'] = rec_rank
+            b['top_reasons'] = matched_preferences[:3]
+
+        total_apartments += 1
+        total_rooms += len(rooms_payload)
+        total_valid_beds += apt_selectable
+
+    # Distinct-PK totals by construction: buildings_by_id is keyed by
+    # Building.pk, and each apartment/room is visited exactly once.
+    ordered_buildings = sorted(
+        buildings_by_id.values(),
+        key=lambda b: (
+            -b['_best_key'][0], -b['_best_key'][1],
+            b['building_number'] if b['building_number'] is not None else 10 ** 9,
+            b['building_id'],
+        ),
+    )
+
+    total_buildings = len(ordered_buildings)
+    if limit:
+        page_buildings = ordered_buildings[offset:offset + limit]
+    else:
+        page_buildings = ordered_buildings[offset:]
+    loaded_buildings = offset + len(page_buildings)
+    has_more = loaded_buildings < total_buildings
+    next_offset = loaded_buildings if has_more else None
+
+    for b in page_buildings:
+        b['apartments'].sort(key=lambda a: a['_sort_key'])
+        for a in b['apartments']:
+            a.pop('_sort_key', None)
+        b.pop('_best_key', None)
+
+    conflict_examples = []
+    if not buildings_by_id and explain_conflicts_if_empty:
+        # Rank so the sample favors rooms that match the student's own
+        # housing type/gender and are merely full, over rooms rejected for
+        # an unrelated reason (e.g. wrong gender).
+        conflict_rooms.sort(key=lambda t: _conflict_priority(t[4]))
+        expected = _z_compatibility(student.housing_type)
+        for room, apartment, residents, capacity_free, conflicts in conflict_rooms[:MAX_CONFLICT_EXAMPLES]:
+            other_residents = [r for r in residents if r['id'] != getattr(student, 'id', None)]
+            _tier, _score, warnings, matched_preferences, historical_reasons = _score_apartment(
+                apartment.id, other_residents, apartment_selectable_free.get(apartment.id, 0)
+            )
+            # A requested roommate who does live in this exact apartment,
+            # but the apartment itself hard-fails one of the student's own
+            # constraints - say so explicitly instead of silently going
+            # quiet about why "the roommate's apartment" isn't recommended.
+            if roommate_ids and any(r['student_id'] in roommate_ids for r in other_residents):
+                conflicts = conflicts + [REASON_LABELS['roommate_incompatible_hard_rule']]
+            conflict_examples.append({
+                'building': apartment.building.number,
+                'building_id': apartment.building_id,
+                'apartment': apartment.number,
+                'apartment_id': apartment.id,
+                'room': room.name,
+                'room_id': room.id,
+                'region_name': (
+                    apartment.building.dorm_type.region.name
+                    if apartment.building.dorm_type and apartment.building.dorm_type.region else None
+                ),
+                'conflicts': conflicts,
+                'warnings': warnings,
+                'matched_reasons': matched_preferences,
+                'historical_reasons': historical_reasons,
+                'residents': _public_residents(other_residents),
+                'diagnostic': {
+                    'student_housing_type': student.housing_type,
+                    'student_housing_type_display': student.get_housing_type_display() if student.housing_type else None,
+                    'required_apartment_type': expected[0] if expected else None,
+                    'required_apartment_category': expected[1] if expected else None,
+                    'room_apartment_type': apartment.apartment_type,
+                    'room_apartment_category': apartment.category,
+                    'room_capacity': room.capacity,
+                    'bed_record_count': len(room.beds.all()),
+                    'active_assignment_count': len(occupied_bed_ids_by_room.get(room.id, set())),
+                    'available_beds_calculated': capacity_free,
+                    'failed_hard_constraints': conflicts,
+                },
+            })
+
+    return {
+        'buildings': page_buildings,
+        'loaded_buildings': loaded_buildings,
+        'total_buildings': total_buildings,
+        'total_apartments': total_apartments,
+        'total_rooms': total_rooms,
+        'total_valid_beds': total_valid_beds,
+        # Legacy alias: 'total_valid' has always meant "free beds" - kept so
+        # existing readers keep working while they migrate to the explicit
+        # 'total_valid_beds'.
+        'total_valid': total_valid_beds,
+        'limit': limit,
+        'offset': offset,
+        'has_more': has_more,
+        'next_offset': next_offset,
+        'conflict_examples': conflict_examples,
+        # Real, exact counts per filter chip, computed over every SELECTABLE
+        # bed (real Bed rows only) - never approximated from just one page.
+        'counts': {
+            'all': total_valid_beds,
+            'best_match': level_counts['best_match'],
+            'empty': level_counts['empty'],
+            'warning_free': level_counts['best_match'] + level_counts['empty'] + level_counts['valid'],
+            'with_warnings': level_counts['warning'],
+            'with_roommate': roommate_match_count,
+            'fully_empty': fully_empty_count,
+        },
+        # Rooms whose configured capacity exceeds their real Bed rows (or
+        # vice versa). Reported, never silently "fixed" - materializing
+        # missing rows is manage.py materialize_beds, an explicit admin
+        # operation.
+        'data_integrity': {
+            'rooms_missing_bed_records': integrity_rooms_missing,
+            'missing_bed_records': integrity_missing_beds,
+            'rooms_with_extra_bed_records': integrity_rooms_extra,
+        },
+    }
+
+
+def _create_student_from_request_data(data):
+    if not data:
+        raise ValueError('לא סופקו פרטי סטודנט חדש עבור בקשה זו.')
+
+    required = ['student_id', 'first_name', 'last_name', 'gender']
+    missing = [f for f in required if not data.get(f)]
+    if missing:
+        raise ValueError(f"חסרים שדות חובה עבור סטודנט חדש: {', '.join(missing)}")
+
+    if Student.objects.filter(student_id=data['student_id']).exists():
+        raise ValueError(f"סטודנט עם ת.ז {data['student_id']} כבר קיים במערכת.")
+
+    student = Student(
+        student_id=data['student_id'],
+        first_name=data['first_name'],
+        last_name=data['last_name'],
+        email=data.get('email', ''),
+        phone=data.get('phone', ''),
+        city=data.get('city', ''),
+        gender=data.get('gender'),
+        requested_religion=data.get('requested_religion') or data.get('religion') or Student.Religion.NOT_SPECIFIED,
+        housing_type=data.get('housing_type') or _infer_housing_type(data),
+        category=Student.StudentCategory.NEW,
+    )
+    student.full_clean()
+    student.save()
+    return student
+
+
+def _user_can_review_request(user, req):
+    if user.is_central_admin:
+        return True
+    if not user.is_boss or not user.region_id:
+        return False
+
+    if req.student_id and req.student.accepted_dorm_type_id:
+        return req.student.accepted_dorm_type.region_id == user.region_id
+
+    if req.target_room_id:
+        region = _room_region(req.target_room)
+        return bool(region) and region.id == user.region_id
+
+    # New add_student requests with no student/target room assigned yet:
+    # any boss may review, region is enforced once a target room is chosen.
+    return True
+
+
+def _student_current_region_id(student):
+    """
+    The region the student physically lives in RIGHT NOW (their assigned
+    room's region), falling back to their accepted region when unassigned.
+    This - not the accepted region - is what "the current region" means for
+    a same-region transfer.
+    """
+    if student is None:
+        return None
+    room = getattr(student, 'assigned_room', None)
+    if room is not None:
+        try:
+            return room.apartment.building.dorm_type.region_id
+        except AttributeError:
+            pass
+    return student.accepted_dorm_type.region_id if student.accepted_dorm_type_id else None
+
+
+def _assignment_snapshot(student):
+    """
+    JSON snapshot of the student's live assignment, persisted on the request
+    at creation time so the original placement remains known even after the
+    student is later moved.
+    """
+    if student is None or not student.assigned_room_id:
+        return {'assigned': False}
+    room = student.assigned_room
+    bed = student.current_bed
+    region = _room_region(room)
+    active = student.bed_assignments.filter(status=BedAssignment.Status.ACTIVE).first()
+    return {
+        'assigned': True,
+        'assignment_id': active.id if active else None,
+        'region_id': region.id if region else None,
+        'region_name': region.name if region else None,
+        'building_id': room.apartment.building_id,
+        'building_number': room.apartment.building.number,
+        'apartment_id': room.apartment_id,
+        'apartment_number': room.apartment.number,
+        'room_id': room.id,
+        'room_name': room.name,
+        'bed_id': bed.id if bed else None,
+        'bed_label': bed.label if bed else None,
+    }
+
+
+class StudentRequestViewSet(viewsets.ModelViewSet):
+    serializer_class = StudentRequestSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsPagination
+
+    def get_queryset(self):
+        queryset = StudentRequest.objects.select_related(
+            'student',
+            'student__assigned_room__apartment__building__dorm_type__region',
+            'student__accepted_dorm_type__region',
+            'target_room__apartment__building__dorm_type__region',
+            'swap_with_student', 'target_region',
+            'requested_by', 'requested_by__region', 'reviewed_by',
+        )
+
+        user = self.request.user
+        if not user.is_central_admin:
+            # A regional user's own region always wins - a region_id sent by
+            # the client is never trusted/consulted here.
+            if not user.region_id:
+                queryset = queryset.filter(requested_by=user)
+            else:
+                queryset = queryset.filter(
+                    Q(requested_by__region_id=user.region_id) |
+                    Q(student__accepted_dorm_type__region_id=user.region_id) |
+                    Q(target_room__apartment__building__dorm_type__region_id=user.region_id)
+                )
+        else:
+            # Central admins may explicitly narrow to one region (Requests
+            # page region selector); "all regions" is the default (no filter).
+            region_filter = self.request.query_params.get('region')
+            if region_filter and region_filter != 'all':
+                queryset = queryset.filter(
+                    Q(requested_by__region_id=region_filter) |
+                    Q(student__accepted_dorm_type__region_id=region_filter) |
+                    Q(target_room__apartment__building__dorm_type__region_id=region_filter)
+                )
+
+        status_filter = self.request.query_params.get('status')
+        if status_filter and status_filter != 'all':
+            queryset = queryset.filter(status=status_filter)
+
+        request_type_filter = self.request.query_params.get('request_type')
+        if request_type_filter and request_type_filter != 'all':
+            queryset = queryset.filter(request_type=request_type_filter)
+
+        student_filter = self.request.query_params.get('student')
+        if student_filter:
+            queryset = queryset.filter(student_id=student_filter)
+
+        date_from = self.request.query_params.get('date_from')
+        if date_from:
+            queryset = queryset.filter(created_at__date__gte=date_from)
+        date_to = self.request.query_params.get('date_to')
+        if date_to:
+            queryset = queryset.filter(created_at__date__lte=date_to)
+
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(request_number__icontains=search) |
+                Q(student__first_name__icontains=search) |
+                Q(student__last_name__icontains=search) |
+                Q(student__student_id__icontains=search) |
+                Q(student_data__student_id__icontains=search)
+            )
+
+        return queryset.distinct().order_by('-created_at')
+
+    def perform_create(self, serializer):
+        instance = serializer.save(requested_by=self.request.user)
+        if not instance.request_number:
+            instance.request_number = f"REQ-{instance.id:06d}"
+            instance.save(update_fields=['request_number'])
+
+        # Transfer requests persist their region context server-side (never
+        # trusted from the client): scope default, the source region the
+        # student lives in right now, and a snapshot of the current
+        # assignment - so the request stays meaningful after refreshes,
+        # restarts, and even after the student is eventually moved.
+        if instance.request_type in (StudentRequest.RequestType.ROOM, StudentRequest.RequestType.APARTMENT) \
+                and instance.student_id:
+            changed = []
+            if not instance.transfer_scope:
+                instance.transfer_scope = StudentRequest.TransferScope.SAME_REGION
+                changed.append('transfer_scope')
+            if not instance.source_region_id:
+                source = _student_current_region_id(instance.student)
+                if source:
+                    instance.source_region_id = source
+                    changed.append('source_region')
+            if instance.current_assignment_snapshot is None:
+                instance.current_assignment_snapshot = _assignment_snapshot(instance.student)
+                changed.append('current_assignment_snapshot')
+            if changed:
+                instance.save(update_fields=changed)
+
+    @staticmethod
+    def _pagination_params(source):
+        # limit/offset count BUILDINGS (the pagination unit of
+        # find_matching_room_options), not beds - one page of 10 buildings
+        # already carries its complete apartment/room/bed subtree.
+        try:
+            limit = int(source.get('limit', 10))
+        except (TypeError, ValueError):
+            limit = 10
+        try:
+            offset = int(source.get('offset', 0))
+        except (TypeError, ValueError):
+            offset = 0
+        return max(1, min(limit, 20)), max(0, offset)
+
+    @staticmethod
+    def _empty_match_payload(limit, offset):
+        """Zero-result shell in the exact shape of find_matching_room_options."""
+        return {
+            'buildings': [], 'loaded_buildings': 0,
+            'total_buildings': 0, 'total_apartments': 0, 'total_rooms': 0,
+            'total_valid_beds': 0, 'total_valid': 0,
+            'limit': limit, 'offset': offset,
+            'has_more': False, 'next_offset': None,
+            'conflict_examples': [], 'counts': None, 'data_integrity': None,
+        }
+
+    @staticmethod
+    def _match_reason(result, fallback):
+        """Human reason for an infeasible result, surfacing a Bed-record
+        data-integrity problem explicitly instead of a generic 'nothing
+        found'."""
+        if result['total_valid_beds'] > 0:
+            return ''
+        di = result.get('data_integrity') or {}
+        if di.get('missing_bed_records'):
+            return (
+                fallback +
+                ' שים לב: קיימים חדרים עם קיבולת פנויה אך ללא רשומות מיטה במסד הנתונים '
+                '(בעיית נתונים) - נדרשת פעולת אתחול מיטות ייעודית (manage.py materialize_beds).'
+            )
+        return fallback
+
+    @action(detail=False, methods=['post'], url_path='match-options')
+    def match_options(self, request):
+        student = None
+        student_value = request.data.get('student_id') or request.data.get('student')
+
+        if student_value:
+            try:
+                student = Student.objects.select_related(
+                    'assigned_room__apartment__building__dorm_type__region',
+                    'accepted_dorm_type__region',
+                ).get(pk=student_value)
+            except (Student.DoesNotExist, ValueError, TypeError):
+                return Response(
+                    {'feasible': False, 'buildings': [], 'reason': 'הסטודנט לא נמצא'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            if not request.user.is_central_admin:
+                # A student with no accepted_dorm_type at all has no region
+                # to check against - that's a missing-data problem (surfaced
+                # below by _student_assignment_blocker), not an
+                # authorization problem, so it must not be misreported as
+                # "no permission for this region".
+                if student.accepted_dorm_type_id:
+                    region_id = student.accepted_dorm_type.region_id
+                    if not request.user.region_id or region_id != request.user.region_id:
+                        return Response(
+                            {'feasible': False, 'buildings': [], 'reason': 'אין הרשאה לאזור זה'},
+                            status=status.HTTP_403_FORBIDDEN
+                        )
+
+        limit, offset = self._pagination_params(request.data)
+
+        if student:
+            blocker = _student_assignment_blocker(student)
+            if blocker:
+                blocking_field, message = blocker
+                return Response({
+                    'feasible': False,
+                    'reason': message,
+                    'blocking_field': blocking_field,
+                    **self._empty_match_payload(limit, offset),
+                })
+
+        student_data = request.data.get('student_data') or {}
+        same_apartment = request.data.get('same_apartment', None)
+
+        transfer_scope = request.data.get('transfer_scope') or None
+        raw_region_ids = request.data.get('region_ids')
+        if raw_region_ids is None:
+            raw_region_ids = []
+        elif not isinstance(raw_region_ids, (list, tuple)):
+            raw_region_ids = [raw_region_ids]
+        raw_region_ids = [r for r in raw_region_ids if r]
+
+        # Backend-enforced role rules (frontend role checks are never
+        # trusted): a regional user may not browse or perform a cross-region
+        # transfer, nor smuggle a foreign region id into the search.
+        if not request.user.is_central_admin:
+            foreign_multi = [r for r in raw_region_ids if str(r) != str(request.user.region_id)]
+            single = request.data.get('region_id')
+            foreign_single = single and str(single) != str(request.user.region_id)
+            if transfer_scope == StudentRequest.TransferScope.CROSS_REGION or foreign_multi or foreign_single:
+                return Response(
+                    {'detail': 'אין לך הרשאה לבצע מעבר לאזור אחר.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+        # A region override is only ever honored for central admins - a
+        # regional user's own region always wins inside _room_candidate_queryset,
+        # regardless of what region ids a direct API call might send.
+        region_id = request.data.get('region_id') if request.user.is_central_admin else None
+        region_ids = None
+        if transfer_scope == StudentRequest.TransferScope.CROSS_REGION:
+            # Central-admin-only (regional users were rejected above). Search
+            # ONLY the explicitly selected destination regions - the
+            # student's current region is never included implicitly.
+            if not raw_region_ids:
+                return Response(
+                    {'feasible': False, 'reason': 'יש לבחור לפחות אזור יעד אחד עבור מעבר לאזור אחר.',
+                     **self._empty_match_payload(limit, offset)},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            region_ids = raw_region_ids
+            region_id = None
+        elif transfer_scope == StudentRequest.TransferScope.SAME_REGION:
+            # The student's CURRENT region is used automatically - the
+            # region selector is neither needed nor honored in this mode.
+            current_region = _student_current_region_id(student)
+            region_ids = [current_region] if current_region else None
+            region_id = None
+        elif not region_id and student and student.accepted_dorm_type_id:
+            # Legacy default (assign/reassign flows without a transfer
+            # scope): the student's own accepted region rather than a
+            # nationwide scan. An explicit region_id always overrides.
+            region_id = student.accepted_dorm_type.region_id
+
+        result = find_matching_room_options(
+            request.user, student=student, student_data=student_data,
+            same_apartment=same_apartment, region_id=region_id, region_ids=region_ids,
+            limit=limit, offset=offset,
+        )
+        searched = region_ids or ([region_id] if region_id else [])
+        return Response({
+            'feasible': result['total_valid_beds'] > 0,
+            'reason': self._match_reason(result, 'לא נמצאו מיטות פנויות מתאימות עבור סטודנט זה.'),
+            'transfer_scope': transfer_scope,
+            'search_regions': [
+                {'id': r.id, 'name': r.name} for r in Region.objects.filter(id__in=searched)
+            ],
+            **result,
+        })
+
+    @action(detail=True, methods=['get'])
+    def feasibility(self, request, pk=None):
+        req = self.get_object()
+        limit, offset = self._pagination_params(request.query_params)
+
+        if req.student:
+            blocker = _student_assignment_blocker(req.student)
+            if blocker:
+                blocking_field, message = blocker
+                return Response({
+                    'feasible': False,
+                    'reason': message,
+                    'blocking_field': blocking_field,
+                    **self._empty_match_payload(limit, offset),
+                })
+
+        # Region scope comes from what is PERSISTED on the request - never
+        # from client-sent parameters: same-region searches the stored
+        # source region (falling back to the student's current region);
+        # cross-region searches exactly the stored destination regions.
+        # Regional users remain hard-scoped to their own region inside
+        # _room_candidate_queryset regardless of these values.
+        region_ids = None
+        if req.request_type in (StudentRequest.RequestType.ROOM, StudentRequest.RequestType.APARTMENT):
+            if req.transfer_scope == StudentRequest.TransferScope.CROSS_REGION:
+                region_ids = list(req.destination_regions.values_list('id', flat=True)) or None
+            else:
+                source = req.source_region_id or _student_current_region_id(req.student)
+                region_ids = [source] if source else None
+        elif req.request_type == StudentRequest.RequestType.REGION_TRANSFER and req.target_region_id:
+            region_ids = [req.target_region_id]
+
+        result = find_matching_room_options(
+            request.user,
+            student=req.student,
+            student_data=req.student_data,
+            same_apartment=req.same_apartment,
+            region_ids=region_ids,
+            limit=limit, offset=offset,
+        )
+        return Response({
+            'feasible': result['total_valid_beds'] > 0,
+            'reason': self._match_reason(result, 'לא נמצאו מיטות פנויות מתאימות עבור בקשה זו.'),
+            'transfer_scope': req.transfer_scope,
+            'search_regions': [
+                {'id': r.id, 'name': r.name} for r in Region.objects.filter(id__in=region_ids or [])
+            ],
+            **result,
+        })
+
+    @action(detail=True, methods=['put'])
+    def approve(self, request, pk=None):
+        if not request.user.is_boss:
+            return Response({'error': 'רק מנהל יכול לאשר בקשות'}, status=status.HTTP_403_FORBIDDEN)
+
+        req = self.get_object()
+        if req.status != StudentRequest.Status.PENDING:
+            return Response({'error': 'הבקשה כבר טופלה'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not _user_can_review_request(request.user, req):
+            return Response({'error': 'אין הרשאה לאשר בקשה זו'}, status=status.HTTP_403_FORBIDDEN)
+
+        target_room_id = request.data.get('target_room') or request.data.get('room_id')
+        target_room = None
+        if target_room_id:
+            try:
+                target_room = Room.objects.select_related(
+                    'apartment', 'apartment__building',
+                    'apartment__building__dorm_type', 'apartment__building__dorm_type__region',
+                ).get(pk=target_room_id)
+            except Room.DoesNotExist:
+                return Response({'error': 'החדר שנבחר לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+            if not _user_can_edit_room(request.user, target_room):
+                return Response({'error': 'אין הרשאה לערוך חדר באזור זה'}, status=status.HTTP_403_FORBIDDEN)
+
+        bed_id = request.data.get('bed_id')
+
+        try:
+            with transaction.atomic():
+                if req.request_type in (StudentRequest.RequestType.ROOM, StudentRequest.RequestType.APARTMENT):
+                    if not req.student:
+                        raise ValueError('לא נבחר סטודנט עבור בקשה זו')
+                    room = target_room or req.target_room
+                    if not room:
+                        raise ValueError('יש לבחור חדר יעד לפני האישור')
+
+                    # The stored transfer scope is authoritative at approval
+                    # time too - the destination room is revalidated against
+                    # it, and cross-region approval stays central-admin-only.
+                    room_region = _room_region(room)
+                    room_region_id = room_region.id if room_region else None
+                    if req.transfer_scope == StudentRequest.TransferScope.CROSS_REGION:
+                        if not request.user.is_central_admin:
+                            raise PermissionError('אין לך הרשאה לבצע מעבר לאזור אחר.')
+                        allowed_regions = set(req.destination_regions.values_list('id', flat=True))
+                        if allowed_regions and room_region_id not in allowed_regions:
+                            raise ValueError('החדר שנבחר אינו באזורי היעד שנבחרו בבקשה')
+                    elif req.transfer_scope == StudentRequest.TransferScope.SAME_REGION:
+                        source_id = req.source_region_id or _student_current_region_id(req.student)
+                        if source_id and room_region_id and room_region_id != source_id:
+                            raise ValueError('החדר שנבחר אינו באזור הנוכחי של הסטודנט (מעבר בתוך האזור)')
+
+                    new_assignment = assign_student_to_room(
+                        student=req.student, room=room, assigned_by=request.user,
+                        assignment_type=BedAssignment.AssignmentType.TRANSFER, bed_id=bed_id,
+                    )
+                    req.target_room = room
+                    req.final_assignment = new_assignment
+
+                elif req.request_type == StudentRequest.RequestType.ADD_STUDENT:
+                    if not req.student:
+                        req.student = _create_student_from_request_data(req.student_data)
+                    if target_room:
+                        req.final_assignment = assign_student_to_room(
+                            student=req.student, room=target_room, assigned_by=request.user,
+                            assignment_type=BedAssignment.AssignmentType.MANUAL, bed_id=bed_id,
+                        )
+                        req.target_room = target_room
+
+                elif req.request_type == StudentRequest.RequestType.REMOVE_STUDENT:
+                    if not req.student:
+                        raise ValueError('לא נבחר סטודנט עבור בקשה זו')
+                    current = req.student.bed_assignments.filter(status=BedAssignment.Status.ACTIVE).first()
+                    if current:
+                        current.status = BedAssignment.Status.ENDED
+                        current.ended_at = timezone.now()
+                        current.save(update_fields=['status', 'ended_at'])
+                    req.student.assigned_room = None
+                    req.student.save(update_fields=['assigned_room'])
+
+                elif req.request_type == StudentRequest.RequestType.SWAP:
+                    if not req.student or not req.swap_with_student:
+                        raise ValueError('בקשת החילוף חסרה סטודנט או שותף לחילוף')
+                    _execute_swap(req.student, req.swap_with_student, request.user)
+
+                elif req.request_type == StudentRequest.RequestType.REGION_TRANSFER:
+                    if not request.user.is_central_admin:
+                        raise PermissionError('רק מנהל מרכזי יכול לאשר העברה בין אזורים')
+                    if not req.student:
+                        raise ValueError('לא נבחר סטודנט עבור בקשה זו')
+                    room = target_room or req.target_room
+                    if not room:
+                        raise ValueError('יש לבחור חדר יעד באזור היעד לפני האישור')
+                    destination_region = _room_region(room)
+                    if req.target_region_id and destination_region and req.target_region_id != destination_region.id:
+                        raise ValueError('החדר שנבחר אינו באזור היעד שביקש הבקשה')
+                    req.final_assignment = assign_student_to_room(
+                        student=req.student, room=room, assigned_by=request.user,
+                        assignment_type=BedAssignment.AssignmentType.TRANSFER, bed_id=bed_id,
+                    )
+                    req.target_room = room
+
+                # 'other' requests are administrative only - no system action required.
+
+                req.status = StudentRequest.Status.APPROVED
+                req.reviewed_by = request.user
+                req.reviewed_at = timezone.now()
+                req.save()
+
+        except PermissionError as e:
+            return Response({'detail': str(e), 'error': str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except (ValueError, ValidationError) as e:
+            message = '; '.join(e.messages) if isinstance(e, ValidationError) and hasattr(e, 'messages') else str(e)
+            return Response({'error': message}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'message': 'הבקשה אושרה בהצלחה',
+            'request': StudentRequestSerializer(req).data,
+        })
+
+    @action(detail=True, methods=['put'])
+    def reject(self, request, pk=None):
+        if not request.user.is_boss:
+            return Response({'error': 'רק מנהל יכול לדחות בקשות'}, status=status.HTTP_403_FORBIDDEN)
+
+        req = self.get_object()
+        if req.status != StudentRequest.Status.PENDING:
+            return Response({'error': 'הבקשה כבר טופלה'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not _user_can_review_request(request.user, req):
+            return Response({'error': 'אין הרשאה לדחות בקשה זו'}, status=status.HTTP_403_FORBIDDEN)
+
+        req.status = StudentRequest.Status.REJECTED
+        req.reviewed_by = request.user
+        req.reviewed_at = timezone.now()
+        req.rejection_reason = request.data.get('reason', '')
+        req.save()
+
+        return Response({
+            'message': 'הבקשה נדחתה',
+            'request': StudentRequestSerializer(req).data,
         })
 
 
@@ -5563,6 +7240,7 @@ def assign_student_room(request):
             room=room,
             assigned_by=request.user,
             assignment_type=BedAssignment.AssignmentType.MANUAL,
+            bed_id=request.data.get('bed_id'),
         )
 
         return Response({
@@ -5604,6 +7282,7 @@ def move_student_room(request):
             room=room,
             assigned_by=request.user,
             assignment_type=BedAssignment.AssignmentType.MANUAL,
+            bed_id=request.data.get('bed_id'),
         )
 
         return Response({
@@ -5663,6 +7342,81 @@ def unassign_student_room(request):
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
+def _execute_swap(student_a, student_b, performed_by):
+    """
+    Atomically swap two students' active bed assignments. This is the single
+    swap implementation (§7, §14) - both the direct
+    /api/room-assignments/swap/ endpoint and StudentRequest SWAP approval
+    call this instead of duplicating the logic.
+
+    select_for_update() locks both BedAssignment rows for the duration of
+    the transaction, so a concurrent request cannot reassign either bed out
+    from under this swap. Both directions are validated with the same
+    validate_apartment_assignment() used everywhere else before *anything*
+    is written; if either direction is invalid (or the room-edit permission
+    check fails), the whole transaction rolls back and neither student's
+    original assignment is touched.
+
+    Raises: Student.DoesNotExist is not caught here (callers resolve
+    students first); BedAssignment.DoesNotExist if either lacks an active
+    assignment; PermissionError if the caller may not edit one of the rooms
+    (this is what makes a cross-region swap require a central admin -
+    _user_can_edit_room already restricts regional users to their own
+    region); ValueError for any hard-constraint violation.
+    """
+    with transaction.atomic():
+        # select_for_update(of=('self',)) locks only the BedAssignment row
+        # itself. Locking across the full select_related chain would fail on
+        # Postgres ("FOR UPDATE cannot be applied to the nullable side of an
+        # outer join") because Building.dorm_type and DormType.region are
+        # nullable FKs, which Django joins as LEFT OUTER JOIN - that join
+        # type can never be combined with FOR UPDATE, independent of whether
+        # any actual row has a null value there.
+        assignment_a = BedAssignment.objects.select_for_update(of=('self',)).select_related(
+            'bed__room__apartment__building__dorm_type__region'
+        ).get(student=student_a, status=BedAssignment.Status.ACTIVE)
+
+        assignment_b = BedAssignment.objects.select_for_update(of=('self',)).select_related(
+            'bed__room__apartment__building__dorm_type__region'
+        ).get(student=student_b, status=BedAssignment.Status.ACTIVE)
+
+        room_a = assignment_a.bed.room
+        room_b = assignment_b.bed.room
+
+        if room_a.id == room_b.id:
+            raise ValueError('שני הסטודנטים כבר נמצאים באותו חדר')
+
+        if not _user_can_edit_room(performed_by, room_a) or not _user_can_edit_room(performed_by, room_b):
+            raise PermissionError('אין הרשאה לערוך אחד מהחדרים')
+
+        validate_apartment_assignment(student_a, room_b)
+        validate_apartment_assignment(student_b, room_a)
+
+        now = timezone.now()
+        assignment_a.status = BedAssignment.Status.ENDED
+        assignment_a.ended_at = now
+        assignment_a.save(update_fields=['status', 'ended_at'])
+
+        assignment_b.status = BedAssignment.Status.ENDED
+        assignment_b.ended_at = now
+        assignment_b.save(update_fields=['status', 'ended_at'])
+
+        new_a = assign_student_to_room(
+            student=student_a,
+            room=room_b,
+            assigned_by=performed_by,
+            assignment_type=BedAssignment.AssignmentType.TRANSFER,
+        )
+        new_b = assign_student_to_room(
+            student=student_b,
+            room=room_a,
+            assigned_by=performed_by,
+            assignment_type=BedAssignment.AssignmentType.TRANSFER,
+        )
+
+    return new_a, new_b, room_a, room_b
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def swap_students_rooms(request):
@@ -5684,45 +7438,7 @@ def swap_students_rooms(request):
         except (Student.DoesNotExist, ValueError, TypeError):
             student_b = Student.objects.get(student_id=student_b_value)
 
-        with transaction.atomic():
-            assignment_a = BedAssignment.objects.select_for_update().select_related(
-                'bed__room__apartment__building__dorm_type__region'
-            ).get(student=student_a, status=BedAssignment.Status.ACTIVE)
-
-            assignment_b = BedAssignment.objects.select_for_update().select_related(
-                'bed__room__apartment__building__dorm_type__region'
-            ).get(student=student_b, status=BedAssignment.Status.ACTIVE)
-
-            room_a = assignment_a.bed.room
-            room_b = assignment_b.bed.room
-
-            if not _user_can_edit_room(request.user, room_a) or not _user_can_edit_room(request.user, room_b):
-                return Response({'error': 'אין הרשאה לערוך אחד מהחדרים'}, status=status.HTTP_403_FORBIDDEN)
-
-            validate_apartment_assignment(student_a, room_b)
-            validate_apartment_assignment(student_b, room_a)
-
-            now = timezone.now()
-            assignment_a.status = BedAssignment.Status.ENDED
-            assignment_a.ended_at = now
-            assignment_a.save(update_fields=['status', 'ended_at'])
-
-            assignment_b.status = BedAssignment.Status.ENDED
-            assignment_b.ended_at = now
-            assignment_b.save(update_fields=['status', 'ended_at'])
-
-            new_a = assign_student_to_room(
-                student=student_a,
-                room=room_b,
-                assigned_by=request.user,
-                assignment_type=BedAssignment.AssignmentType.MANUAL,
-            )
-            new_b = assign_student_to_room(
-                student=student_b,
-                room=room_a,
-                assigned_by=request.user,
-                assignment_type=BedAssignment.AssignmentType.MANUAL,
-            )
+        new_a, new_b, room_a, room_b = _execute_swap(student_a, student_b, request.user)
 
         return Response({
             'success': True,
@@ -5735,6 +7451,8 @@ def swap_students_rooms(request):
         return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
     except BedAssignment.DoesNotExist:
         return Response({'error': 'Both students must have active assignments before swapping'}, status=status.HTTP_400_BAD_REQUEST)
+    except PermissionError as e:
+        return Response({'error': str(e)}, status=status.HTTP_403_FORBIDDEN)
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -6037,9 +7755,17 @@ def _excel_response(buffer, filename):
     return response
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCentralAdmin])
 def dormify_report(request):
-    """Generate the complete Dormify Excel report."""
+    """
+    Generate the complete, all-regions Dormify Excel report.
+
+    Central-admin only: generate_dormify_report() has no region-filtering
+    capability at all, so - unlike the other report endpoints below, which
+    scope to the caller's region via _resolve_report_region - this one
+    cannot be safely offered to regional users without leaking every other
+    region's data (§9).
+    """
     from .report_exports import generate_dormify_report
 
     try:
@@ -6061,10 +7787,23 @@ def _resolve_report_region(request):
     """
     Resolve the optional report region query parameter.
 
+    §9/§16: a regional user's own region always wins here - a region_id
+    sent in the query string is only ever honored for central admins
+    (who may deliberately request "all regions" by omitting it, or any one
+    region). This prevents a regional employee from pulling another
+    region's report by editing the request directly.
+
     This helper intentionally has a report-specific name so it does not
     overwrite the existing allocation helper `_resolve_region(region_value)`.
     """
-    region_id = request.query_params.get('region_id') or None
+    user = request.user
+
+    if not user.is_central_admin:
+        if not user.region_id:
+            return None, None
+        region_id = user.region_id
+    else:
+        region_id = request.query_params.get('region_id') or None
 
     if not region_id:
         return None, None
@@ -6082,12 +7821,16 @@ def student_allocation_report(request):
     """
     Legacy endpoint retained for backward compatibility.
 
-    It delegates to the student-actions report generator.
+    It delegates to the student-actions report generator - region-scoped
+    the same way student_actions_report is (§9/§16), so a regional user
+    cannot use the legacy URL to bypass the region restriction.
     """
     from .report_exports import generate_student_actions_report
 
+    region_id, region_name = _resolve_report_region(request)
+
     try:
-        buffer = generate_student_actions_report()
+        buffer = generate_student_actions_report(region_id=region_id, region_name=region_name)
     except Exception as exc:
         return Response(
             {'error': str(exc)},
