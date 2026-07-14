@@ -1076,6 +1076,13 @@ def run_allocation(request):
                 category=Student.StudentCategory.LEAVING
             )
 
+        # Accessibility/disability students are imported and saved normally,
+        # but must never reach the OR-Tools solver — the dorm office
+        # allocates them manually. This is independent of is_priority (see
+        # priority_fields_from_special_statuses).
+        if 'accessibility_flag' in student_fields:
+            students_base = students_base.exclude(accessibility_flag=True)
+
         students_total_in_region = students_base.count()
         students = students_base
 
@@ -1506,6 +1513,12 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                 students_base = students_base.exclude(
                     category=Student.StudentCategory.LEAVING
                 )
+
+            # Accessibility/disability students are imported and saved
+            # normally, but must never reach the OR-Tools solver — the dorm
+            # office allocates them manually (independent of is_priority).
+            if 'accessibility_flag' in student_fields:
+                students_base = students_base.exclude(accessibility_flag=True)
 
             students_total_in_region = students_base.count()
             students = students_base
@@ -2074,11 +2087,12 @@ def allocation_summary(request):
     )
 
     # Keep the summary's actionable counts aligned with run_allocation:
-    # students who are leaving are reported in the breakdown but are never
-    # offered to the solver.
+    # students who are leaving, or who are accessibility/disability cases
+    # handled manually by the dorm office, are reported in the breakdown
+    # but are never offered to the solver.
     allocatable_students_qs = all_students_qs.exclude(
         category=Student.StudentCategory.LEAVING
-    )
+    ).exclude(accessibility_flag=True)
 
     total_students = allocatable_students_qs.count()
     assigned_students = allocatable_students_qs.filter(
@@ -3822,6 +3836,7 @@ COLUMN_ALIASES = {
     'accessibility_flag': ['החלטה-זקוק להנגשה'],
     'disability_percent': ['%נכות'],
     'medical_reason': ['סיבה רפואית מאושרת מרופאת הטכניון'],
+    'anier_flag': ['9108-אנייר'],
 
     'roommate_flag_1': ['בקשה לגור עם סטודנטים חבר1'],
     'roommate_flag_2': ['החלטה אחרונה: בקשה לגור עם סטודנטים חבר2'],
@@ -4248,6 +4263,46 @@ def is_accessibility_priority(row):
     return explicit_flag or (disability_percent is not None and disability_percent > 0) or bool(medical_reason)
 
 
+def _normalize_allocation_group_value(value):
+    """
+    Like normalize_compact, but additionally unifies dash characters
+    (Excel exports mix '-', '–' and '—' inconsistently across identical
+    category values) before whitespace-stripping/lowercasing.
+    """
+    text = safe_str(value).replace('–', '-').replace('—', '-')
+    return normalize_compact(text)
+
+
+# Exact allocation-group ("תיאור קבוצת הקצאה") category values confirmed to
+# mark a student as an accessibility/disability case handled manually by
+# the dorm office, even when the explicit accessibility columns
+# (accessibility_flag/disability_percent/medical_reason) are blank for
+# that row. These are official dorm-office category names, not merely
+# text that happens to mention disability — for example 'הסמכה – ותיקים+
+# חדשים שנפסלו כחדשים+בינלאומי מלאות2' is a confirmed accessibility
+# category despite not containing the word 'נכים' at all. Matched by EXACT
+# normalized value, not a substring rule, so an unrelated allocation group
+# (e.g. one that merely mentions 'הסמכה' on its own) is never
+# misclassified.
+ACCESSIBILITY_ALLOCATION_GROUP_VALUES = {
+    _normalize_allocation_group_value(value)
+    for value in (
+        'הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2',
+        'הסמכה - נכים',
+        'קדםאקדמי - כולל נכים',
+    )
+}
+
+
+def allocation_group_indicates_accessibility(allocation_group_value):
+    """
+    True only when allocation_group_value exactly matches (after dash/
+    whitespace/case normalization) one of the confirmed accessibility
+    allocation-group category values in ACCESSIBILITY_ALLOCATION_GROUP_VALUES.
+    """
+    return _normalize_allocation_group_value(allocation_group_value) in ACCESSIBILITY_ALLOCATION_GROUP_VALUES
+
+
 def priority_fields_from_special_statuses(*special_statuses):
     """
     is_priority/priority_reason are derived solely from special_status_1..4.
@@ -4258,6 +4313,32 @@ def priority_fields_from_special_statuses(*special_statuses):
     """
     non_empty = [status for status in special_statuses if status]
     return bool(non_empty), ' | '.join(non_empty)
+
+
+def inject_special_status_marker(special_statuses, marker):
+    """
+    Insert `marker` into the first blank slot among the 4 special_status
+    values, unless it is already present in one of them. Returns a new
+    4-tuple.
+
+    Some special-status signals (e.g. the 'אנייר' / anier group) arrive
+    via their own dedicated raw Excel column ('9108-אנייר' == 'X'), not
+    already embedded in the 'תאור סטטוס מיוחד1..4' description text the
+    way הסמכה/עתודאי already are. Without this, _has_anier_special_status
+    (and priority_fields_from_special_statuses) would never see the
+    marker, even though the student was correctly flagged in the source
+    file.
+    """
+    statuses = list(special_statuses)
+    if any(marker in status for status in statuses if status):
+        return tuple(statuses)
+    for index, status in enumerate(statuses):
+        if not status:
+            statuses[index] = marker
+            return tuple(statuses)
+    # All four slots occupied: append rather than silently dropping the marker.
+    statuses[-1] = f"{statuses[-1]} | {marker}"
+    return tuple(statuses)
 
 
 def filter_payload_to_student_fields(payload):
@@ -4291,10 +4372,24 @@ def build_student_payload_from_row(row, existing_student=None, sheet_name=''):
     placement_sector = parse_placement_sector(row)
     allocation_group_value = get_alias_value(row, 'allocation_group', default='')
 
+    # Some allocation groups (e.g. 'הסמכה - נכים') mark accessibility even
+    # when the explicit accessibility columns are blank for this row.
+    if allocation_group_indicates_accessibility(allocation_group_value):
+        accessibility_flag = True
+
     special_status_1 = safe_str(get_alias_value(row, 'special_status_1'))
     special_status_2 = safe_str(get_alias_value(row, 'special_status_2'))
     special_status_3 = safe_str(get_alias_value(row, 'special_status_3'))
     special_status_4 = safe_str(get_alias_value(row, 'special_status_4'))
+
+    if parse_yes_no_code(get_alias_value(row, 'anier_flag', default='')):
+        special_status_1, special_status_2, special_status_3, special_status_4 = (
+            inject_special_status_marker(
+                (special_status_1, special_status_2, special_status_3, special_status_4),
+                'אנייר',
+            )
+        )
+
     is_priority, priority_reason = priority_fields_from_special_statuses(
         special_status_1, special_status_2, special_status_3, special_status_4,
     )

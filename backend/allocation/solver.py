@@ -21,6 +21,7 @@ MAX_SOLVER_TIME_SECONDS = 500
 NUM_SEARCH_WORKERS = 2
 
 
+
 EXCLUSIVE_HOUSING_TYPES = {
     Student.HousingType.COUPLE,
     Student.HousingType.FAMILY,
@@ -31,15 +32,19 @@ EXCLUSIVE_HOUSING_TYPES = {
 # ---------------------------------------------------------------------------
 # Upper Dorm Office / building-179 exclusive-group policy
 #
-# ASSUMPTION (see final report): no region record for the "Upper Dorm
-# Office" exists anywhere in this repository (models.py, migrations,
-# seed.py, fixtures or tests only reference canada/hasmaha/mizrah/...).
-# Until the real identifier is confirmed, the Upper Dorm Office region is
-# recognized by a conventional id, or by a marker in its Hebrew/English
-# name, using the same free-text convention already used for
-# special_status_1..4 (see _is_hasmaha / _is_atudai below).
+# Building 179 (confirmed correct, real production value) belongs to the
+# Upper Dorm Office. That office's Region, however, is a generic region
+# record with no distinguishing name/id of its own — the one confirmed,
+# non-guessed "Upper Dorm Office" identifier in this system is a DormType
+# named "עליון עמים" with code 11 (see EXCEL_DORM_NAME_TO_OFFICIAL_CODE in
+# api/views.py). Recognition must therefore key off DormType.code == 11
+# (_is_upper_dorm_office_dorm_type), not the region's own name/id. The
+# region-name/id keyword heuristic below is kept as an additional,
+# harmless fallback for any environment/test where the region itself does
+# carry such a marker, but it is not the primary signal in production.
 # ---------------------------------------------------------------------------
 BUILDING_179_NUMBER = 179
+UPPER_DORM_OFFICE_DORM_TYPE_CODE = 11
 PRIORITY_BUILDING_CLUSTER_WEIGHT = 3
 
 UPPER_DORM_OFFICE_REGION_IDS = frozenset({"upper_dorm_office", "upper_office"})
@@ -200,8 +205,6 @@ def _has_anier_special_status(student):
     business requirement.
     """
     return "אנייר" in _collect_special_status_text(student)
-
-
 
 def _normalize_roommate_identifier(value):
     if value is None:
@@ -627,8 +630,13 @@ def _get_apartment_region(apartment):
     return getattr(dorm_type, "region", None)
 
 
+def _get_apartment_dorm_type(apartment):
+    building = getattr(apartment, "building", None)
+    return getattr(building, "dorm_type", None)
+
+
 def _is_upper_dorm_office_region(region):
-    """See the "Upper Dorm Office / building-179" ASSUMPTION note above."""
+    """Region-name/id fallback heuristic — see the module-level note above."""
     if region is None:
         return False
     region_id = _safe_lower(getattr(region, "id", region))
@@ -638,35 +646,83 @@ def _is_upper_dorm_office_region(region):
     return any(keyword in name for keyword in UPPER_DORM_OFFICE_NAME_KEYWORDS)
 
 
-def _is_building_179_exclusive_student(student, region):
+def _is_upper_dorm_office_dorm_type(dorm_type):
     """
-    True only when all four Upper-Dorm-Office building-179 characteristics
-    hold: the student is flagged priority, belongs to הסמכה, carries the
-    אנייר special status, and the allocation region is the Upper Dorm
-    Office region. is_priority alone must never grant building-179 access.
+    DormType.code == 11 ("עליון עמים") is the confirmed, real "Upper Dorm
+    Office" identifier in this system — the primary signal (see the
+    module-level note above).
+    """
+    if dorm_type is None:
+        return False
+    return getattr(dorm_type, "code", None) == UPPER_DORM_OFFICE_DORM_TYPE_CODE
+
+
+def _apartment_in_upper_dorm_office(apartment):
+    """
+    True when this apartment's building belongs to the Upper Dorm Office,
+    recognized either by its DormType.code (primary, real signal) or by
+    its Region's own name/id (fallback heuristic).
+    """
+    return _is_upper_dorm_office_dorm_type(
+        _get_apartment_dorm_type(apartment)
+    ) or _is_upper_dorm_office_region(_get_apartment_region(apartment))
+
+
+def _is_anier_exclusive_student(student):
+    """
+    True when this student's OWN attributes — independent of any apartment
+    being evaluated — qualify them for the building-179 Upper-Dorm-Office
+    exclusive group: flagged priority, belongs to הסמכה, and carries the
+    אנייר special status. is_priority alone must never grant building-179
+    access.
+
+    This must stay apartment-independent: whether a *specific* candidate
+    apartment happens to sit in the Upper Dorm Office is a separate,
+    apartment-level question (see _apartment_in_upper_dorm_office). Bundling
+    the two together here would make "is this student exclusive" flip
+    depending on which apartment is currently being checked — silently
+    letting an eligible Anir student into an ordinary building the moment
+    that ordinary building's own dorm type/region doesn't match the Upper
+    Dorm Office (previously the case; fixed by this split).
     """
     return (
         _get_student_priority(student)
         and _is_hasmaha(student)
         and _has_anier_special_status(student)
-        and _is_upper_dorm_office_region(region)
     )
+
+
+def _is_building_179_exclusive_student(student, apartment):
+    """
+    True when the student's own exclusive-group attributes hold (see
+    _is_anier_exclusive_student) AND this specific apartment belongs to
+    the Upper Dorm Office (DormType.code==11, or the region-name
+    fallback) — i.e. this student, evaluated against this apartment, is
+    inside their own reserved building.
+    """
+    return _is_anier_exclusive_student(student) and _apartment_in_upper_dorm_office(apartment)
 
 
 def _may_enter_building_179(student, apartment):
     """
     Building-179 is a building-level exclusive policy for the Upper Dorm
-    Office region (not an Apartment.InactiveReason.RESERVED substitute):
+    Office (not an Apartment.InactiveReason.RESERVED substitute):
       • only exact exclusive-group students may occupy ANY bed in this
         building — every apartment, not merely apartments marked RESERVED;
-      • exclusive-group students may only be assigned within this building.
+      • exclusive-group students may only be assigned within this building
+        — never falling back to any other, otherwise-compatible building.
 
-    A building numbered 179 that belongs to a different region is an
-    ordinary building and is not affected by this rule.
+    A building numbered 179 that does not belong to the Upper Dorm Office
+    is an ordinary building and is not affected by this rule.
+
+    is_exclusive_student is evaluated purely from the student's own
+    attributes (_is_anier_exclusive_student), NOT from this apartment —
+    otherwise an eligible Anir student would incorrectly appear "not
+    exclusive" whenever checked against a non-upper-office apartment, and
+    be let in there instead of being confined to building 179.
     """
-    region = _get_apartment_region(apartment)
-    is_179_upper_office = _is_building_179(apartment.building) and _is_upper_dorm_office_region(region)
-    is_exclusive_student = _is_building_179_exclusive_student(student, region)
+    is_179_upper_office = _is_building_179(apartment.building) and _apartment_in_upper_dorm_office(apartment)
+    is_exclusive_student = _is_anier_exclusive_student(student)
 
     if is_exclusive_student:
         return is_179_upper_office
@@ -700,13 +756,12 @@ def _building_179_existing_occupant_warnings(apartments, existing_assignments_by
     """
     warnings = []
     for apartment in apartments:
-        region = _get_apartment_region(apartment)
-        if not (_is_building_179(apartment.building) and _is_upper_dorm_office_region(region)):
+        if not (_is_building_179(apartment.building) and _apartment_in_upper_dorm_office(apartment)):
             continue
 
         for assignment in existing_assignments_by_apartment.get(apartment.id, []):
             occupant = assignment.student
-            if not _is_building_179_exclusive_student(occupant, region):
+            if not _is_building_179_exclusive_student(occupant, apartment):
                 warnings.append(
                     "Building 179 (Upper Dorm Office) apartment "
                     f"{_safe_str(apartment.number)} already has an existing "
@@ -715,6 +770,63 @@ def _building_179_existing_occupant_warnings(apartments, existing_assignments_by
                     "assignment was preserved unchanged."
                 )
     return warnings
+
+
+def _anier_building_179_diagnostics(students, apartments, student_candidates, free_capacity_by_apartment):
+    """
+    Diagnostic counters for the building-179 / Upper Dorm Office Anir
+    (אנייר) policy, computed on every solver run so a broken upload
+    mapping or a missing/misconfigured reserved building shows up
+    immediately instead of silently producing zero Anir assignments:
+
+      imported_anier_students             — students in this run carrying
+                                             the אנייר special status.
+      eligible_anier_students              — of those, how many also carry
+                                             is_priority and הסמכה (the
+                                             full exclusive-group criteria,
+                                             independent of any apartment).
+      reserved_building_found              — whether an apartment matching
+                                             building 179 in the Upper Dorm
+                                             Office actually exists in this
+                                             run's room inventory.
+      reserved_building_available_beds     — free beds in that building.
+      eligible_anier_students_sent_to_solver — eligible students who
+                                             actually have that building
+                                             as a CP-SAT candidate (i.e.
+                                             both the upload mapping AND
+                                             the building/region match
+                                             connected end-to-end).
+    """
+    imported_anier_students = [
+        student for student in students if _has_anier_special_status(student)
+    ]
+    eligible_anier_students = [
+        student for student in imported_anier_students
+        if _get_student_priority(student) and _is_hasmaha(student)
+    ]
+
+    reserved_building_179_apartment_ids = {
+        apartment.id
+        for apartment in apartments
+        if _is_building_179(apartment.building) and _apartment_in_upper_dorm_office(apartment)
+    }
+    reserved_building_available_beds = sum(
+        free_capacity_by_apartment.get(apartment_id, 0)
+        for apartment_id in reserved_building_179_apartment_ids
+    )
+
+    eligible_anier_sent_to_solver = [
+        student for student in eligible_anier_students
+        if reserved_building_179_apartment_ids & set(student_candidates.get(student.id, []))
+    ]
+
+    return {
+        "imported_anier_students": len(imported_anier_students),
+        "eligible_anier_students": len(eligible_anier_students),
+        "reserved_building_found": bool(reserved_building_179_apartment_ids),
+        "reserved_building_available_beds": reserved_building_available_beds,
+        "eligible_anier_students_sent_to_solver": len(eligible_anier_sent_to_solver),
+    }
 
 
 def _gender_restricted_building_existing_occupant_warnings(apartments, existing_assignments_by_apartment):
@@ -1370,8 +1482,7 @@ def _add_priority_building_clustering(
             if apartment is None:
                 continue
 
-            region = _get_apartment_region(apartment)
-            if _is_building_179_exclusive_student(student, region):
+            if _is_building_179_exclusive_student(student, apartment):
                 # Exclusive-group students are governed entirely by the
                 # building-179 hard rule; they never participate in the
                 # "spread across as few buildings as possible" preference.
@@ -1611,6 +1722,13 @@ def run_improved_ortools_allocation(
         "assignments": [],
         "warnings": [],
         "students_with_no_feasible_beds": [],
+        "anier_building_179_diagnostics": {
+            "imported_anier_students": 0,
+            "eligible_anier_students": 0,
+            "reserved_building_found": False,
+            "reserved_building_available_beds": 0,
+            "eligible_anier_students_sent_to_solver": 0,
+        },
     }
 
     if not students:
@@ -1684,6 +1802,14 @@ def run_improved_ortools_allocation(
     for student in students:
         if not student_candidates.get(student.id):
             results["students_with_no_feasible_beds"].append(student.id)
+
+    results["anier_building_179_diagnostics"] = _anier_building_179_diagnostics(
+        students, apartments, student_candidates, free_capacity_by_apartment,
+    )
+    _solver_log(
+        "anier_building_179_diagnostics",
+        **results["anier_building_179_diagnostics"],
+    )
 
     roommate_pairs, unmatched_roommate_targets = _build_relevant_roommate_pairs(students)
     if unmatched_roommate_targets:
