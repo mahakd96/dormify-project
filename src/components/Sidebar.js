@@ -1,7 +1,6 @@
 import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { regions } from '../data/mockData';
 
 import {
   LayoutDashboard,
@@ -42,17 +41,10 @@ function Sidebar({ collapsed, onToggle, language }) {
     navigate('/login');
   };
 
-  // ✅ FIX: user region may be user.region OR user.regionId
-  const userRegionId = user?.regionId ?? user?.region ?? null;
-
-  const region = regions.find((r) => String(r.id) === String(userRegionId));
-  const regionName = region
-    ? language === 'he'
-      ? region.name
-      : region.nameEn
-    : language === 'he'
-      ? 'כל האזורים'
-      : 'All Regions';
+  // Region name comes straight from the backend user object (real data,
+  // loaded from the DB) - no more hardcoded mockData region lookup table.
+  const regionName = user?.region_name
+    || (language === 'he' ? 'כל האזורים' : 'All Regions');
 
   const getRoleName = () => {
     switch (user?.role) {

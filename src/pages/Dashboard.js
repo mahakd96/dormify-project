@@ -20,10 +20,9 @@ function Dashboard({ language }) {
 
       if (isCentralAdmin()) {
         const [transfersRes, batchesRes] = await Promise.all([
-          api.get('/api/transfers/'),
+          api.get('/api/requests/'),
           api.get('/api/batches/'),
         ]);
-
         setTransfers(transfersRes.data?.results || transfersRes.data || []);
         setBatches(batchesRes.data?.batches || []);
       } else {
@@ -38,7 +37,7 @@ function Dashboard({ language }) {
   };
 
   fetchData();
-}, []);
+}, []); // eslint-disable-line
 
   const t = {
     he: {
@@ -91,7 +90,7 @@ inactiveBuildings: 'Inactive Buildings',
     }
   }[language] || {};
 
-  // Build recent activity from transfers + batches
+  // Build recent activity from requests + batches
   const buildActivity = () => {
     const activities = [];
 
@@ -102,7 +101,7 @@ inactiveBuildings: 'Inactive Buildings',
         icon: ArrowLeftRight,
         color: '#f97316',
         bg: '#fed7aa',
-        text: `${t.student?.first_name || ''} ${t.student?.last_name || ''} - ${language === 'he' ? 'בקשת מעבר' : 'Transfer request'}`,
+        text: `${t.student_name || ''} - ${language === 'he' ? 'בקשת מעבר' : 'Transfer request'}`,
         sub: t.reason || '',
         status: t.status,
         time: t.created_at,
@@ -267,7 +266,7 @@ inactiveBuildings: 'Inactive Buildings',
               <div className="transfer-icon"><ArrowLeftRight size={16} /></div>
               <div className="transfer-info">
                 <span className="student-name">
-                  {transfer.student?.first_name} {transfer.student?.last_name}
+                  {transfer.student_name}
                 </span>
                 <span className="transfer-details">{transfer.reason}</span>
               </div>
