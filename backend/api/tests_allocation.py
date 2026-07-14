@@ -2210,7 +2210,7 @@ class SolverBuilding179PriorityTest(TestCase):
                     )
                     if value
                 ) or "-"
-                is_exclusive = _is_building_179_exclusive_student(student, region)
+                is_exclusive = _is_building_179_exclusive_student(student, apartment)
                 print(
                     f"{str(apartment.building.number):<6} "
                     f"{apartment.building.dorm_type.name:<16} "
@@ -4695,4 +4695,862 @@ class HouseholdExclusivityTest(TestCase):
 
         with self.assertRaises(ValueError):
             validate_apartment_assignment(other_z6, rooms[0])
+
+
+# ---------------------------------------------------------------------------
+# Accessibility / disability: saved normally, never sent to the solver.
+# ---------------------------------------------------------------------------
+class AccessibilityAllocationExclusionTest(TestCase):
+    """
+    Two related bugs in accessibility/disability handling:
+
+    1. Some allocation-group values (e.g. 'הסמכה - נכים', 'קדם אקדמי - כולל
+       נכים') mark a student as an accessibility/disability case even when
+       the explicit accessibility columns are blank for that row. Before
+       this fix, only the explicit columns (accessibility_flag/
+       disability_percent/medical_reason, via read_accessibility_fields)
+       were read, so these students were imported as ordinary students.
+    2. Even a correctly-flagged accessibility_flag=True student was still
+       sent to the solver — neither api.views.run_allocation nor
+       api.views._execute_allocation_background excluded
+       accessibility_flag from the student queryset before calling
+       allocation.solver.run_improved_ortools_allocation. Accessibility
+       students must be saved/imported normally, but allocated manually by
+       the dorm office, never by OR-Tools.
+
+    Both fixes must never affect is_priority (see
+    priority_fields_from_special_statuses / StudentPriorityImportTest),
+    which is derived solely from special_status_1..4.
+    """
+
+    def _make_row(self, **overrides):
+        import pandas as pd
+
+        values = {
+            'ת"ז ישראלית': overrides.pop('student_id', 'ACCROW1'),
+            'שם פרטי': overrides.pop('first_name', 'Test'),
+            'שם משפחה': overrides.pop('last_name', 'Student'),
+            'תיאור סוג מגורים': overrides.pop('housing_type', 'רווקות'),
+        }
+
+        alias_to_header = {
+            'accessibility_flag': 'החלטה-זקוק להנגשה',
+            'disability_percent': '%נכות',
+            'medical_reason': 'סיבה רפואית מאושרת מרופאת הטכניון',
+            'allocation_group': 'תיאור קבוצת הקצאה',
+            'special_status_1': 'תאור סטטוס מיוחד1',
+        }
+        for key, header in alias_to_header.items():
+            if key in overrides:
+                values[header] = overrides.pop(key)
+
+        assert not overrides, f"Unrecognized row overrides: {overrides}"
+        return pd.Series(values)
+
+    # ------------------------------------------------------------------
+    # 1. allocation_group values containing נכים mark accessibility.
+    # ------------------------------------------------------------------
+
+    def test_allocation_group_hasmaha_nichim_marks_accessibility(self):
+        """allocation_group='הסמכה - נכים' (no explicit accessibility
+        columns) must still set accessibility_flag=True — an EXACT
+        confirmed accessibility category value."""
+        from api.views import build_student_payload_from_row
+
+        row = self._make_row(student_id='ACC_GRP1', allocation_group='הסמכה - נכים')
+        payload = build_student_payload_from_row(row)
+        self.assertTrue(payload['accessibility_flag'])
+
+    def test_allocation_group_kdam_academi_nichim_marks_accessibility(self):
+        """allocation_group='קדםאקדמי - כולל נכים' must also set
+        accessibility_flag=True — an EXACT confirmed accessibility
+        category value."""
+        from api.views import build_student_payload_from_row
+
+        row = self._make_row(student_id='ACC_GRP2', allocation_group='קדםאקדמי - כולל נכים')
+        payload = build_student_payload_from_row(row)
+        self.assertTrue(payload['accessibility_flag'])
+
+    def test_allocation_group_hasmaha_veterans_new_disqualified_marks_accessibility(self):
+        """
+        allocation_group='הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי
+        מלאות2' is a CONFIRMED accessibility category, even though it does
+        not contain the word 'נכים' at all — this is why accessibility
+        detection must be an explicit whitelist of confirmed category
+        values (ACCESSIBILITY_ALLOCATION_GROUP_VALUES), not a 'נכים'
+        substring heuristic, which would have missed this exact value.
+        """
+        from api.views import build_student_payload_from_row
+
+        row = self._make_row(
+            student_id='ACC_GRP3',
+            allocation_group='הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2',
+        )
+        payload = build_student_payload_from_row(row)
+        self.assertTrue(payload['accessibility_flag'])
+
+    def test_allocation_group_dash_variant_still_matches(self):
+        """The same confirmed category value, but with a plain hyphen
+        instead of an en-dash (a real Excel-export inconsistency), must
+        still match — proving normalization is dash-insensitive."""
+        from api.views import build_student_payload_from_row
+
+        row = self._make_row(
+            student_id='ACC_GRP3B',
+            allocation_group='הסמכה - ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2',
+        )
+        payload = build_student_payload_from_row(row)
+        self.assertTrue(payload['accessibility_flag'])
+
+    def test_allocation_group_unrelated_value_does_not_mark_accessibility(self):
+        """An ordinary, unrelated allocation-group value must not be
+        treated as accessibility."""
+        from api.views import build_student_payload_from_row
+
+        row = self._make_row(student_id='ACC_GRP5', allocation_group='רגילים')
+        payload = build_student_payload_from_row(row)
+        self.assertFalse(payload['accessibility_flag'])
+
+    def test_allocation_group_partial_match_does_not_mark_accessibility(self):
+        """
+        A value that merely SHARES WORDS with a confirmed accessibility
+        category (e.g. 'הסמכה' alone, or 'הסמכה - אחר') must NOT be
+        treated as accessibility — the match is an exact confirmed
+        category value, never a broad substring/partial rule that could
+        misclassify ordinary הסמכה students who are not in the
+        accessibility cohort.
+        """
+        from api.views import build_student_payload_from_row
+
+        row_bare = self._make_row(student_id='ACC_GRP6', allocation_group='הסמכה')
+        self.assertFalse(build_student_payload_from_row(row_bare)['accessibility_flag'])
+
+        row_other = self._make_row(student_id='ACC_GRP7', allocation_group='הסמכה - אחר')
+        self.assertFalse(build_student_payload_from_row(row_other)['accessibility_flag'])
+
+    def test_allocation_group_accessibility_does_not_set_priority(self):
+        """Accessibility derived from allocation_group text must never set
+        is_priority — only special_status_1..4 may do that. Checked
+        against all three confirmed accessibility category values."""
+        from api.views import build_student_payload_from_row
+
+        for index, allocation_group in enumerate((
+            'הסמכה - נכים',
+            'קדםאקדמי - כולל נכים',
+            'הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2',
+        ), start=1):
+            row = self._make_row(student_id=f'ACC_GRP_PRI{index}', allocation_group=allocation_group)
+            payload = build_student_payload_from_row(row)
+            self.assertTrue(payload['accessibility_flag'], allocation_group)
+            self.assertFalse(payload['is_priority'], allocation_group)
+            self.assertEqual(payload['priority_reason'], '', allocation_group)
+
+    # ------------------------------------------------------------------
+    # 2. Real Excel upload still saves accessibility students normally.
+    # ------------------------------------------------------------------
+
+    def test_upload_excel_saves_accessibility_student_via_allocation_group(self):
+        """End-to-end: /api/upload/excel/ with a real .xlsx row whose only
+        accessibility signal is the allocation-group text must still save
+        accessibility_flag=True and is_priority=False."""
+        import io
+
+        import pandas as pd
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        buffer = io.BytesIO()
+        pd.DataFrame([{
+            'ת"ז ישראלית': 'ACC_UP1',
+            'שם פרטי': 'Test',
+            'שם משפחה': 'Upload',
+            'תיאור סוג מגורים': 'רווקות',
+            'תיאור קבוצת הקצאה': 'הסמכה - נכים',
+        }]).to_excel(buffer, index=False, sheet_name='נכנסים חדשים')
+        buffer.seek(0)
+
+        try:
+            pd.ExcelFile(buffer)
+        except ImportError as exc:
+            self.skipTest(
+                f"openpyxl/pandas version mismatch in this environment ({exc}); "
+                "this pre-existing environment issue is unrelated to the fix — "
+                "see build_student_payload_from_row unit tests above for full "
+                "coverage of the actual shared mapping logic."
+            )
+        buffer.seek(0)
+
+        admin = _make_central_admin()
+        client = APIClient()
+        client.force_authenticate(user=admin)
+
+        upload_file = SimpleUploadedFile(
+            'accessibility.xlsx', buffer.read(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+
+        response = client.post('/api/upload/excel/', {'file': upload_file}, format='multipart')
+        self.assertEqual(response.status_code, 200, response.data)
+
+        student = Student.objects.get(student_id='ACC_UP1')
+        self.assertTrue(student.accessibility_flag)
+        self.assertFalse(student.is_priority)
+
+    # ------------------------------------------------------------------
+    # 3. accessibility_flag=True students are excluded from allocation.
+    # ------------------------------------------------------------------
+
+    def test_run_allocation_excludes_accessibility_students(self):
+        """/api/allocation/run/ (views.run_allocation) must never send an
+        accessibility_flag=True student to the solver, even though they
+        have a perfectly valid candidate bed available. An ordinary
+        student in the same room must still be assigned."""
+        region = _make_region('AccessRegion')
+        boss = _make_region_boss(region)
+        dorm_type = DormType.objects.create(name='AccessDorm', region=region)
+        building = Building.objects.create(number=901, dorm_type=dorm_type)
+        apartment = Apartment.objects.create(
+            building=building, number='1', category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
+        )
+        room = Room.objects.create(apartment=apartment, name='A', capacity=2)
+        Bed.objects.create(room=room, label='1')
+        Bed.objects.create(room=room, label='2')
+
+        ordinary = Student.objects.create(
+            student_id='ACC_ORD1', first_name='Ord', last_name='Student',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            accepted_dorm_type=dorm_type,
+        )
+        accessible = Student.objects.create(
+            student_id='ACC_EXCL1', first_name='Acc', last_name='Student',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            accepted_dorm_type=dorm_type, accessibility_flag=True,
+        )
+
+        patcher = patch('allocation.solver.close_old_connections')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.post('/api/allocation/run/', {'region': region.id}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+
+        ordinary.refresh_from_db()
+        accessible.refresh_from_db()
+        self.assertTrue(ordinary.is_assigned)
+        self.assertFalse(accessible.is_assigned)
+
+
+# ---------------------------------------------------------------------------
+# Anir (אנייר) reserved-building policy: upload mapping + solver detection.
+# ---------------------------------------------------------------------------
+class AnierBuildingMappingTest(TestCase):
+    """
+    Root cause of the reserved Anir (building 179) building receiving zero
+    students — two independent defects, both required to be fixed:
+
+    1. Upload mapping: the main upload's Excel column '9108-אנייר' (an 'X'
+       flag) was never read anywhere — COLUMN_ALIASES had no entry for it,
+       so no student ever got the 'אנייר' marker recorded in
+       special_status_1..4, and _has_anier_special_status was always False
+       for everyone. Fixed by adding the 'anier_flag' alias and injecting
+       the marker via inject_special_status_marker in
+       build_student_payload_from_row — shared by both
+       /api/upload/excel/ and /api/upload/additions-excel/ (both call this
+       same function, so one fix covers both flows).
+
+    2. Solver region detection: allocation.solver._is_upper_dorm_office_region
+       only recognized the allocation Region's own name/id. Confirmed by
+       inspection: in production, the Region itself carries no such
+       marker — only a DormType named 'עליון עמים' (code 11) does, and
+       building 179 (confirmed correct) sits under that DormType. So even
+       a correctly-flagged, eligible Anir student could never be
+       recognized as an exclusive-group member. Fixed by
+       allocation.solver._is_upper_dorm_office_dorm_type (DormType.code==11),
+       used together with (not instead of) the region-name fallback.
+    """
+
+    def _make_row(self, **overrides):
+        import pandas as pd
+
+        values = {
+            'ת"ז ישראלית': overrides.pop('student_id', 'ANIERROW1'),
+            'שם פרטי': overrides.pop('first_name', 'Test'),
+            'שם משפחה': overrides.pop('last_name', 'Student'),
+            'תיאור סוג מגורים': overrides.pop('housing_type', 'רווקות'),
+        }
+
+        alias_to_header = {
+            'anier_flag': '9108-אנייר',
+            'special_status_1': 'תאור סטטוס מיוחד1',
+            'special_status_2': 'תאור סטטוס מיוחד2',
+            'special_status_3': 'תאור סטטוס מיוחד3',
+            'special_status_4': 'תאור סטטוס מיוחד4',
+        }
+        for key, header in alias_to_header.items():
+            if key in overrides:
+                values[header] = overrides.pop(key)
+
+        assert not overrides, f"Unrecognized row overrides: {overrides}"
+        return pd.Series(values)
+
+    # ------------------------------------------------------------------
+    # 1. The 9108-אנייר column injects the אנייר marker.
+    # ------------------------------------------------------------------
+
+    def test_anier_column_flag_injects_special_status(self):
+        """A bare '9108-אנייר'='X' flag, with no other special status, must
+        result in 'אנייר' recorded in special_status_1..4, is_priority=True,
+        and priority_reason == 'אנייר'."""
+        from api.views import build_student_payload_from_row
+
+        row = self._make_row(student_id='ANIER1', anier_flag='X')
+        payload = build_student_payload_from_row(row)
+
+        statuses = [
+            payload['special_status_1'], payload['special_status_2'],
+            payload['special_status_3'], payload['special_status_4'],
+        ]
+        self.assertIn('אנייר', statuses)
+        self.assertTrue(payload['is_priority'])
+        self.assertEqual(payload['priority_reason'], 'אנייר')
+
+    def test_anier_flag_combines_with_existing_special_status(self):
+        """An existing הסמכה special status plus the אנייר column flag must
+        produce BOTH markers, joined in priority_reason."""
+        from api.views import build_student_payload_from_row
+
+        row = self._make_row(student_id='ANIER2', special_status_1='הסמכה', anier_flag='X')
+        payload = build_student_payload_from_row(row)
+
+        statuses = [
+            payload['special_status_1'], payload['special_status_2'],
+            payload['special_status_3'], payload['special_status_4'],
+        ]
+        self.assertIn('הסמכה', statuses)
+        self.assertIn('אנייר', statuses)
+        self.assertEqual(payload['priority_reason'], 'הסמכה | אנייר')
+
+    def test_anier_flag_not_duplicated_when_already_present(self):
+        """If 'אנייר' is already present as a special-status value (legacy
+        data), the column flag must not create a duplicate entry."""
+        from api.views import build_student_payload_from_row
+
+        row = self._make_row(student_id='ANIER3', special_status_2='אנייר', anier_flag='X')
+        payload = build_student_payload_from_row(row)
+
+        statuses = [
+            payload['special_status_1'], payload['special_status_2'],
+            payload['special_status_3'], payload['special_status_4'],
+        ]
+        self.assertEqual(statuses.count('אנייר'), 1)
+
+    def test_anier_flag_absent_leaves_special_status_untouched(self):
+        """A blank/absent 9108-אנייר column must not add anything."""
+        from api.views import build_student_payload_from_row
+
+        row = self._make_row(student_id='ANIER4', special_status_1='הסמכה')
+        payload = build_student_payload_from_row(row)
+
+        statuses = [
+            payload['special_status_1'], payload['special_status_2'],
+            payload['special_status_3'], payload['special_status_4'],
+        ]
+        self.assertNotIn('אנייר', statuses)
+
+    # ------------------------------------------------------------------
+    # 2. Real Excel upload end-to-end — proves the column-name mapping
+    #    survives the actual pandas read_excel round trip, not just a
+    #    hand-built pandas Series.
+    # ------------------------------------------------------------------
+
+    def test_upload_excel_saves_anier_student_via_real_column(self):
+        import io
+
+        import pandas as pd
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        buffer = io.BytesIO()
+        pd.DataFrame([{
+            'ת"ז ישראלית': 'ANIER_UP1',
+            'שם פרטי': 'Test',
+            'שם משפחה': 'Upload',
+            'תיאור סוג מגורים': 'רווקות',
+            '9108-אנייר': 'X',
+        }]).to_excel(buffer, index=False, sheet_name='נכנסים חדשים')
+        buffer.seek(0)
+
+        try:
+            pd.ExcelFile(buffer)
+        except ImportError as exc:
+            self.skipTest(
+                f"openpyxl/pandas version mismatch in this environment ({exc}); "
+                "this pre-existing environment issue is unrelated to the fix — "
+                "see build_student_payload_from_row unit tests above for full "
+                "coverage of the actual shared mapping logic."
+            )
+        buffer.seek(0)
+
+        admin = _make_central_admin()
+        client = APIClient()
+        client.force_authenticate(user=admin)
+
+        upload_file = SimpleUploadedFile(
+            'anier.xlsx', buffer.read(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response = client.post('/api/upload/excel/', {'file': upload_file}, format='multipart')
+        self.assertEqual(response.status_code, 200, response.data)
+
+        student = Student.objects.get(student_id='ANIER_UP1')
+        self.assertTrue(student.is_priority)
+        self.assertIn('אנייר', [
+            student.special_status_1, student.special_status_2,
+            student.special_status_3, student.special_status_4,
+        ])
+
+    # ------------------------------------------------------------------
+    # 3. Solver: DormType.code==11 recognition (the real production
+    #    signal), independent of the Region's own name/id.
+    # ------------------------------------------------------------------
+
+    UPPER_OFFICE_CONFIG = {
+        'sameGender': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
+        'priorityFirst': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
+        'roommatePositiveOnly': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
+        'ReligiousTogether': {'enabled': False},
+    }
+
+    def _make_upper_office_building_179(self, region_id, region_name, dorm_name, beds=1):
+        """
+        The Region deliberately carries NO 'Upper Dorm Office' marker of
+        its own (generic id/name) — only the DormType (code=11) does,
+        matching confirmed production data (building 179 is confirmed
+        correct; the Region itself is generic).
+        """
+        region = Region.objects.create(id=region_id, name=region_name)
+        dorm_type = DormType.objects.create(name=dorm_name, code=11, region=region)
+        building = Building.objects.create(number=179, dorm_type=dorm_type)
+        apartment = Apartment.objects.create(
+            building=building, number='1', category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
+        )
+        room = Room.objects.create(apartment=apartment, name='A', capacity=beds)
+        for index in range(beds):
+            Bed.objects.create(room=room, label=str(index + 1))
+        return region, dorm_type, building, apartment, room
+
+    def _make_eligible_anier(self, student_id):
+        return Student.objects.create(
+            student_id=student_id, first_name='T', last_name='S',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            is_priority=True, special_status_1='הסמכה', special_status_2='אנייר',
+        )
+
+    def _patch_close_old_connections(self):
+        patcher = patch('allocation.solver.close_old_connections')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    # ------------------------------------------------------------------
+    # 3a. An eligible Anir student CAN enter building 179.
+    # ------------------------------------------------------------------
+
+    def test_eligible_anier_student_can_enter_building_179(self):
+        """An eligible Anir student (is_priority + הסמכה + אנייר) is
+        recognized purely via DormType.code==11 — the Region carries no
+        marker of its own — and is assigned into building 179."""
+        from allocation.solver import run_improved_ortools_allocation
+
+        _, _, _, _, room = self._make_upper_office_building_179(
+            'anier_region_a', 'Region A', 'עליון עמים A', beds=1,
+        )
+        eligible_anier = self._make_eligible_anier('ANIER_OK1')
+
+        self._patch_close_old_connections()
+        result = run_improved_ortools_allocation([eligible_anier], [room], self.UPPER_OFFICE_CONFIG)
+
+        assigned_ids = {item['student_db_id'] for item in result['proposed_assignments']}
+        self.assertIn(eligible_anier.id, assigned_ids)
+
+    # ------------------------------------------------------------------
+    # 3b. A non-Anir student can NEVER enter building 179.
+    # ------------------------------------------------------------------
+
+    def test_non_anier_student_never_enters_building_179(self):
+        """An ordinary student — even one flagged priority — must never
+        be assigned into building 179 when they are not the exclusive
+        Anir group (missing הסמכה/אנייר)."""
+        from allocation.solver import run_improved_ortools_allocation
+
+        _, _, _, _, room = self._make_upper_office_building_179(
+            'anier_region_b', 'Region B', 'עליון עמים B', beds=1,
+        )
+        ordinary_priority = Student.objects.create(
+            student_id='ANIER_REJ1', first_name='T', last_name='S',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            is_priority=True,
+        )
+
+        self._patch_close_old_connections()
+        result = run_improved_ortools_allocation([ordinary_priority], [room], self.UPPER_OFFICE_CONFIG)
+
+        assigned_ids = {item['student_db_id'] for item in result['proposed_assignments']}
+        self.assertNotIn(ordinary_priority.id, assigned_ids)
+        self.assertIn(ordinary_priority.id, result['students_with_no_feasible_beds'])
+
+    # ------------------------------------------------------------------
+    # 3c. Building 179 may remain partially empty.
+    # ------------------------------------------------------------------
+
+    def test_building_179_may_remain_partially_empty(self):
+        """Building 179 has capacity for 3, but only 1 eligible Anir
+        student exists. The other 2 beds must remain empty — an ordinary
+        student must never be backfilled into them."""
+        from allocation.solver import run_improved_ortools_allocation
+
+        _, _, _, _, room = self._make_upper_office_building_179(
+            'anier_region_c', 'Region C', 'עליון עמים C', beds=3,
+        )
+        eligible_anier = self._make_eligible_anier('ANIER_PARTIAL1')
+        ordinary = Student.objects.create(
+            student_id='ANIER_PARTIAL_ORD1', first_name='T', last_name='S',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+        )
+
+        self._patch_close_old_connections()
+        result = run_improved_ortools_allocation(
+            [eligible_anier, ordinary], [room], self.UPPER_OFFICE_CONFIG,
+        )
+
+        assigned_ids = {item['student_db_id'] for item in result['proposed_assignments']}
+        self.assertIn(eligible_anier.id, assigned_ids)
+        self.assertNotIn(ordinary.id, assigned_ids)
+        self.assertEqual(result['successful_assignments'], 1)
+
+        diagnostics = result['anier_building_179_diagnostics']
+        self.assertTrue(diagnostics['reserved_building_found'])
+        self.assertEqual(diagnostics['reserved_building_available_beds'], 3)
+
+    # ------------------------------------------------------------------
+    # 3d. Exclusive Anir students are NOT assigned to another building.
+    # ------------------------------------------------------------------
+
+    def test_eligible_anier_student_not_assigned_to_another_building_when_179_full(self):
+        """
+        When building 179's only bed is already occupied by another
+        exclusive-group member, a NEW eligible Anir student must remain
+        UNASSIGNED rather than fall back to a separate, otherwise fully
+        compatible ordinary building/apartment that is also available.
+
+        Regression test for a real pre-existing bug: the exclusivity
+        check previously evaluated "is this student exclusive" bundled
+        together with "is THIS SPECIFIC candidate apartment the Upper
+        Dorm Office" (allocation.solver._is_building_179_exclusive_student
+        took an apartment/region argument and folded its own upper-office
+        check into the same boolean). That meant an eligible Anir student
+        was judged "not exclusive" the instant they were evaluated against
+        an ordinary, non-upper-office apartment — incorrectly admitting
+        them there. Fixed by _is_anier_exclusive_student, a purely
+        student-level predicate independent of any apartment.
+        """
+        from allocation.solver import run_improved_ortools_allocation
+
+        region, dorm_type_11, building_179, apartment_179, room_179 = self._make_upper_office_building_179(
+            'anier_region_d', 'Region D', 'עליון עמים D', beds=1,
+        )
+        existing_occupant = self._make_eligible_anier('ANIER_EXIST1')
+        existing_bed = room_179.beds.first()
+        BedAssignment.objects.create(
+            student=existing_occupant, bed=existing_bed,
+            status=BedAssignment.Status.ACTIVE, assignment_type=BedAssignment.AssignmentType.MANUAL,
+        )
+
+        # A separate, otherwise-compatible ordinary building in the SAME
+        # region (region-level matching would incorrectly treat this as
+        # upper-office too, if the bug were still present).
+        other_dorm_type = DormType.objects.create(name='OrdinaryDorm', region=region)
+        other_building = Building.objects.create(number=50, dorm_type=other_dorm_type)
+        other_apartment = Apartment.objects.create(
+            building=other_building, number='1', category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
+        )
+        other_room = Room.objects.create(apartment=other_apartment, name='A', capacity=1)
+        Bed.objects.create(room=other_room, label='1')
+
+        new_eligible_anier = self._make_eligible_anier('ANIER_NOFALLBACK1')
+
+        self._patch_close_old_connections()
+        result = run_improved_ortools_allocation(
+            [new_eligible_anier], [room_179, other_room], self.UPPER_OFFICE_CONFIG,
+        )
+
+        assigned_ids = {item['student_db_id'] for item in result['proposed_assignments']}
+        self.assertNotIn(new_eligible_anier.id, assigned_ids)
+        self.assertIn(new_eligible_anier.id, result['students_with_no_feasible_beds'])
+
+    # ------------------------------------------------------------------
+    # 3e. Anir status alone (missing another required condition) must
+    #      NOT be treated as eligible.
+    # ------------------------------------------------------------------
+
+    def test_anier_without_hasmaha_is_not_treated_as_eligible(self):
+        """A student flagged priority + אנייר but WITHOUT הסמכה must not
+        be treated as an exclusive-group member — they must not enter
+        building 179, and must be assigned normally elsewhere."""
+        from allocation.solver import run_improved_ortools_allocation
+
+        _, _, _, _, room_179 = self._make_upper_office_building_179(
+            'anier_region_e', 'Region E', 'עליון עמים E', beds=1,
+        )
+        no_hasmaha = Student.objects.create(
+            student_id='ANIER_NOHASMAHA1', first_name='T', last_name='S',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            is_priority=True, special_status_1='אנייר',
+        )
+
+        other_dorm_type = DormType.objects.create(name='OrdinaryDormE')
+        other_building = Building.objects.create(number=51, dorm_type=other_dorm_type)
+        other_apartment = Apartment.objects.create(
+            building=other_building, number='1', category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
+        )
+        other_room = Room.objects.create(apartment=other_apartment, name='A', capacity=1)
+        Bed.objects.create(room=other_room, label='1')
+
+        self._patch_close_old_connections()
+        result = run_improved_ortools_allocation(
+            [no_hasmaha], [room_179, other_room], self.UPPER_OFFICE_CONFIG,
+        )
+
+        assigned_ids = {item['student_db_id'] for item in result['proposed_assignments']}
+        self.assertIn(no_hasmaha.id, assigned_ids)
+        assigned_building_id = self._resolve_assignment_location(
+            next(a for a in result['proposed_assignments'] if a['student_db_id'] == no_hasmaha.id)
+        )[0].building_id
+        self.assertEqual(assigned_building_id, other_building.id)
+
+    def test_anier_without_priority_is_not_treated_as_eligible(self):
+        """A student with הסמכה + אנייר but is_priority=False must not be
+        treated as an exclusive-group member either — is_priority is one
+        of the four required conditions, not optional."""
+        from allocation.solver import run_improved_ortools_allocation
+
+        _, _, _, _, room_179 = self._make_upper_office_building_179(
+            'anier_region_f', 'Region F', 'עליון עמים F', beds=1,
+        )
+        no_priority = Student.objects.create(
+            student_id='ANIER_NOPRIORITY1', first_name='T', last_name='S',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            is_priority=False, special_status_1='הסמכה', special_status_2='אנייר',
+        )
+
+        other_dorm_type = DormType.objects.create(name='OrdinaryDormF')
+        other_building = Building.objects.create(number=52, dorm_type=other_dorm_type)
+        other_apartment = Apartment.objects.create(
+            building=other_building, number='1', category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
+        )
+        other_room = Room.objects.create(apartment=other_apartment, name='A', capacity=1)
+        Bed.objects.create(room=other_room, label='1')
+
+        self._patch_close_old_connections()
+        result = run_improved_ortools_allocation(
+            [no_priority], [room_179, other_room], self.UPPER_OFFICE_CONFIG,
+        )
+
+        assigned_ids = {item['student_db_id'] for item in result['proposed_assignments']}
+        self.assertIn(no_priority.id, assigned_ids)
+        assigned_building_id = self._resolve_assignment_location(
+            next(a for a in result['proposed_assignments'] if a['student_db_id'] == no_priority.id)
+        )[0].building_id
+        self.assertEqual(assigned_building_id, other_building.id)
+
+    def _resolve_assignment_location(self, assignment):
+        bed = Bed.objects.select_related(
+            'room', 'room__apartment', 'room__apartment__building',
+        ).get(id=assignment['bed_id'])
+        return bed.room.apartment, bed.room, bed
+
+    # ------------------------------------------------------------------
+    # 4. Diagnostics: surfaced on every solver run.
+    # ------------------------------------------------------------------
+
+    def test_anier_building_179_diagnostics(self):
+        """run_improved_ortools_allocation must report accurate Anir/
+        building-179 diagnostics: counts of imported/eligible Anir
+        students, whether the reserved building was found, its available
+        beds, and how many eligible students actually got a candidate
+        connecting them to it."""
+        from allocation.solver import run_improved_ortools_allocation
+
+        generic_region = Region.objects.create(id='generic_region_2', name='Region Two')
+        dorm_type_11 = DormType.objects.create(name='עליון עמים 2', code=11, region=generic_region)
+        building_179 = Building.objects.create(number=179, dorm_type=dorm_type_11)
+        apartment = Apartment.objects.create(
+            building=building_179, number='1', category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
+        )
+        room = Room.objects.create(apartment=apartment, name='A', capacity=3)
+        for label in ('1', '2', '3'):
+            Bed.objects.create(room=room, label=label)
+
+        eligible_anier = Student.objects.create(
+            student_id='DIAG_ANIER1', first_name='T', last_name='S',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            is_priority=True, special_status_1='הסמכה', special_status_2='אנייר',
+        )
+        imported_but_not_eligible = Student.objects.create(
+            student_id='DIAG_ANIER2', first_name='T', last_name='S',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            is_priority=False, special_status_1='אנייר',
+        )
+
+        patcher = patch('allocation.solver.close_old_connections')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        config = {
+            'sameGender': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
+            'priorityFirst': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
+            'roommatePositiveOnly': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
+            'ReligiousTogether': {'enabled': False},
+        }
+        result = run_improved_ortools_allocation(
+            [eligible_anier, imported_but_not_eligible], [room], config,
+        )
+
+        diagnostics = result['anier_building_179_diagnostics']
+        self.assertEqual(diagnostics['imported_anier_students'], 2)
+        self.assertEqual(diagnostics['eligible_anier_students'], 1)
+        self.assertTrue(diagnostics['reserved_building_found'])
+        self.assertEqual(diagnostics['reserved_building_available_beds'], 3)
+        self.assertEqual(diagnostics['eligible_anier_students_sent_to_solver'], 1)
+
+    def test_anier_building_179_diagnostics_when_building_missing(self):
+        """When no building 179 / Upper Dorm Office apartment exists in
+        this run's inventory, diagnostics must report
+        reserved_building_found=False and available beds=0, even though
+        eligible Anir students are present — surfacing the exact symptom
+        of the original bug."""
+        from allocation.solver import run_improved_ortools_allocation
+
+        ordinary_region = Region.objects.create(id='ordinary_region_1', name='Ordinary Region')
+        ordinary_dorm = DormType.objects.create(name='OrdinaryDorm', region=ordinary_region)
+        ordinary_building = Building.objects.create(number=42, dorm_type=ordinary_dorm)
+        apartment = Apartment.objects.create(
+            building=ordinary_building, number='1', category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
+        )
+        room = Room.objects.create(apartment=apartment, name='A', capacity=1)
+        Bed.objects.create(room=room, label='1')
+
+        eligible_anier = Student.objects.create(
+            student_id='DIAG_ANIER3', first_name='T', last_name='S',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            is_priority=True, special_status_1='הסמכה', special_status_2='אנייר',
+        )
+
+        patcher = patch('allocation.solver.close_old_connections')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        config = {
+            'sameGender': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
+            'priorityFirst': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
+            'roommatePositiveOnly': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
+            'ReligiousTogether': {'enabled': False},
+        }
+        result = run_improved_ortools_allocation([eligible_anier], [room], config)
+
+        diagnostics = result['anier_building_179_diagnostics']
+        self.assertEqual(diagnostics['imported_anier_students'], 1)
+        self.assertEqual(diagnostics['eligible_anier_students'], 1)
+        self.assertFalse(diagnostics['reserved_building_found'])
+        self.assertEqual(diagnostics['reserved_building_available_beds'], 0)
+        self.assertEqual(diagnostics['eligible_anier_students_sent_to_solver'], 0)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end proof that /api/upload/additions-excel/ shares the identical
+# accessibility + אנייר mapping as /api/upload/excel/ (both call
+# build_student_payload_from_row).
+# ---------------------------------------------------------------------------
+class AdditionsUploadSharedMappingTest(TestCase):
+    """
+    /api/upload/excel/ and /api/upload/additions-excel/ both route every
+    row through api.views.build_student_payload_from_row — one shared
+    mapping, per the requirement that both upload flows use the same
+    logic. This test exercises the additions endpoint specifically (a
+    real .xlsx upload, not a hand-built pandas Series) and verifies, from
+    the saved Student record, that:
+      - accessibility fields (accessibility_flag/disability_percent/
+        medical_reason) are saved correctly;
+      - the 9108-אנייר='X' column creates the canonical 'אנייר'
+        special-status value;
+      - a pre-existing special status (special_status_1='הסמכה') is
+        preserved alongside the injected 'אנייר' marker;
+      - is_priority and priority_reason are derived correctly from the
+        combined special statuses.
+    """
+
+    def test_upload_additions_excel_saves_accessibility_and_anier_correctly(self):
+        import io
+        from decimal import Decimal
+
+        import pandas as pd
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        region = Region.objects.create(id='additions_region', name='Additions Region')
+        dorm_type = DormType.objects.create(name='AdditionsDorm', code=77, region=region)
+        Building.objects.create(number=200, dorm_type=dorm_type, is_active=True)
+
+        admin = _make_central_admin()
+        client = APIClient()
+        client.force_authenticate(user=admin)
+
+        buffer = io.BytesIO()
+        pd.DataFrame([{
+            'ת"ז ישראלית': 'ADD_ANIER1',
+            'שם פרטי': 'Test',
+            'שם משפחה': 'Additions',
+            'תיאור סוג מגורים': 'רווקות',
+            'החלטה-החלטת מעונות - תאור': 'החלטה חיובית',
+            'החלטה-תוכן החלטה – מעונות': '77',
+            'תאור סטטוס מיוחד1': 'הסמכה',
+            '9108-אנייר': 'X',
+            'החלטה-זקוק להנגשה': 'כן',
+            '%נכות': '30',
+            'סיבה רפואית מאושרת מרופאת הטכניון': 'מצב רפואי מאושר',
+        }]).to_excel(buffer, index=False, sheet_name='תוספות')
+        buffer.seek(0)
+
+        upload_file = SimpleUploadedFile(
+            'additions.xlsx', buffer.read(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response = client.post('/api/upload/additions-excel/', {'file': upload_file}, format='multipart')
+        self.assertEqual(response.status_code, 200, response.data)
+
+        student = Student.objects.get(student_id='ADD_ANIER1')
+
+        # Accessibility fields saved correctly.
+        self.assertTrue(student.accessibility_flag)
+        self.assertEqual(student.disability_percent, Decimal('30'))
+        self.assertEqual(student.medical_reason, 'מצב רפואי מאושר')
+
+        # 9108-אנייר='X' created the canonical 'אנייר' status, and the
+        # pre-existing 'הסמכה' status was preserved (not overwritten).
+        statuses = [
+            student.special_status_1, student.special_status_2,
+            student.special_status_3, student.special_status_4,
+        ]
+        self.assertIn('הסמכה', statuses)
+        self.assertIn('אנייר', statuses)
+
+        # is_priority/priority_reason derived correctly from the combined
+        # special statuses (never from the accessibility columns).
+        self.assertTrue(student.is_priority)
+        self.assertEqual(student.priority_reason, 'הסמכה | אנייר')
 
