@@ -2100,6 +2100,8 @@ class SolverBuilding179PriorityTest(TestCase):
             if gender == Student.Gender.MALE
             else Student.HousingType.SINGLE_FEMALE
         )
+        room_f = self._make_room(female_apartment, 'A', capacity=2)
+        room_m = self._make_room(conflicting_apartment, 'A', capacity=2)
 
         return Student.objects.create(
             student_id=student_id,

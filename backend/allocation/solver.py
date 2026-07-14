@@ -206,8 +206,6 @@ def _has_anier_special_status(student):
     """
     return "אנייר" in _collect_special_status_text(student)
 
-
-
 def _normalize_roommate_identifier(value):
     if value is None:
         return ""
