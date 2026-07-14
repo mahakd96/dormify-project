@@ -7,7 +7,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from .models import (
     User, Region, Building, Apartment, Room, Bed, Student, BedAssignment,
-    MovementRequest, Transfer, AllocationRun, ImportBatch, RegionInbox, DormType
+    MovementRequest, Transfer, StudentRequest, AllocationRun, ImportBatch, RegionInbox, DormType
 )
 
 
@@ -211,6 +211,17 @@ class TransferAdmin(admin.ModelAdmin):
     list_filter = ['status', 'student']
     search_fields = ['student__first_name', 'student__last_name', 'student__student_id']
     readonly_fields = ['created_at', 'updated_at']
+
+
+# ===========================================
+# STUDENT REQUEST ADMIN
+# ===========================================
+@admin.register(StudentRequest)
+class StudentRequestAdmin(admin.ModelAdmin):
+    list_display = ['request_number', 'request_type', 'student', 'status', 'priority', 'requested_by', 'created_at']
+    list_filter = ['request_type', 'status', 'priority']
+    search_fields = ['request_number', 'student__first_name', 'student__last_name', 'student__student_id']
+    readonly_fields = ['request_number', 'created_at', 'updated_at']
 
 
 # ===========================================

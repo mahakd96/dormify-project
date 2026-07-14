@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import FiltersDrawer from '../components/FiltersDrawer';
-import { studentsAPI, requestsAPI } from '../services/api';
+import BedMatchPicker, { assignActionLabel, mergeBuildings } from '../components/BedMatchPicker';
+import { studentsAPI, requestsAPI, regionsAPI, api } from '../services/api';
+import { useAuth } from '../context/AuthContext';
 import {
   Search, Star, X, Users, Phone, Mail, Home, MapPin,
   BedDouble, Building2, User, Loader2, ArrowLeft, Contact2, Plus,
   DoorOpen, Tag, FileText, Calendar, LogIn, LogOut, RefreshCw,
-  UserPlus, FileSearch, Filter, UserCheck, UserMinus,
+  UserPlus, FileSearch, Filter, UserCheck, UserMinus, AlertTriangle,
 } from 'lucide-react';
 
 // ============================================================
@@ -46,21 +48,30 @@ const CATEGORY_META = {
 // Component
 // ============================================================
 function StudentsPage({ language }) {
+  const { user, isCentralAdmin } = useAuth();
   // ---------- STATE ----------
   const [activeTab, setActiveTab] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [list, setList] = useState([]);
+  // Backend now paginates (StandardResultsPagination, 25/page) - listTotal
+  // is the real server-side count (for the header/results text), separate
+  // from list.length (just the currently-loaded page(s)).
+  const [listTotal, setListTotal] = useState(0);
+  const [listNextUrl, setListNextUrl] = useState(null);
+  const [loadingMoreStudents, setLoadingMoreStudents] = useState(false);
   const [counts, setCounts] = useState({ all: 0, new: 0, continuing: 0, transfer: 0, leaving: 0 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
   const debounceRef = useRef(null);
-  const [aptTenants, setAptTenants] = useState([]);
-  const [loadingTenants, setLoadingTenants] = useState(false);
-  const [bedMatchFilter, setBedMatchFilter] = useState('all');
-  const [selectedApartment, setSelectedApartment] = useState(null);
+  // Cancels the in-flight list request when a new search/filter fires before
+  // it resolves, so a slow earlier response can never overwrite fresher
+  // results (previously a real race: fast typing could show stale results).
+  const listAbortRef = useRef(null);
   const [selectedRoomInApt, setSelectedRoomInApt] = useState(null);
+  const [studentRequests, setStudentRequests] = useState([]);
+  const [loadingStudentRequests, setLoadingStudentRequests] = useState(false);
   // Filter state
   const [filterOptions, setFilterOptions] = useState(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -74,7 +85,9 @@ function StudentsPage({ language }) {
     const [showAddStudentModal, setShowAddStudentModal] = useState(false);
     const [addStudentLoading, setAddStudentLoading] = useState(false);
     const [addStudentError, setAddStudentError] = useState('');
+    const [addStudentFieldErrors, setAddStudentFieldErrors] = useState({});
     const [addStudentSuccess, setAddStudentSuccess] = useState('');
+    const [addStudentRegions, setAddStudentRegions] = useState([]);
     const [addStudentForm, setAddStudentForm] = useState({
       student_id: '',
       first_name: '',
@@ -84,28 +97,75 @@ function StudentsPage({ language }) {
       city: '',
       gender: '',
       requested_religion: 'not_specified',
+      region: '',
       accepted_dorm_type: '',
+      housing_type: '',
       category: 'new',
       reason: '',
     });
+
+    // Edit Student modal state - shares field shape with Add Student, but
+    // pre-filled from an existing student and saved via PATCH. Reachable
+    // both from the student detail page and from the "missing data" blocking
+    // message inside the Assign Bed modal (§3).
+    const [showEditStudentModal, setShowEditStudentModal] = useState(false);
+    const [editStudentLoading, setEditStudentLoading] = useState(false);
+    const [editStudentError, setEditStudentError] = useState('');
+    const [editStudentFieldErrors, setEditStudentFieldErrors] = useState({});
+    const [editStudentSuccess, setEditStudentSuccess] = useState('');
+    const [editStudentTarget, setEditStudentTarget] = useState(null);
+    const [editStudentForm, setEditStudentForm] = useState({
+      first_name: '', last_name: '', phone: '', email: '', city: '',
+      gender: '',
+      requested_religion: 'not_specified',
+      region: '', accepted_dorm_type: '', housing_type: '', category: 'new',
+    });
+    // When Edit Student is opened from the Assign Bed "missing data"
+    // blocking message, remember that so saving can re-open the assign
+    // modal and re-run match-options instead of just closing.
+    const [editStudentReturnToAssign, setEditStudentReturnToAssign] = useState(false);
+
   const [showAddRequest, setShowAddRequest] = useState(false);
-  const [reqType, setReqType] = useState('room');
-  const [reqSameApt, setReqSameApt] = useState(null);
+  const [reqType, setReqType] = useState('transfer');
+  // Unified transfer scope: same_apartment / same_region / cross_region -
+  // maps onto the existing request fields (request_type / same_apartment /
+  // transfer_scope / destination_regions), no new backend fields.
+  const [reqScope, setReqScope] = useState(null);
+  // Holds the selected target region ID as a NUMBER (never a name/string) -
+  // the backend expects real Region PKs in destination_regions.
+  const [reqTargetRegion, setReqTargetRegion] = useState(null);
+  const [reqRegions, setReqRegions] = useState([]);
   const [reqOtherDesc, setReqOtherDesc] = useState('');
   const [reqReason, setReqReason] = useState('');
   const [reqSubmitting, setReqSubmitting] = useState(false);
   const [reqError, setReqError] = useState('');
   const [reqSuccess, setReqSuccess] = useState('');
 
-  // Assign Bed modal state
+  // Assign Bed modal state - buildings are the pagination unit; each loaded
+  // building carries its complete apartment/room/bed subtree.
   const [showAssignBed, setShowAssignBed] = useState(false);
-  const [availableBeds, setAvailableBeds] = useState([]);
+  const [availableBuildings, setAvailableBuildings] = useState([]);
+  const [bedResultMeta, setBedResultMeta] = useState({
+    total_valid_beds: 0, total_buildings: 0, total_apartments: 0, total_rooms: 0,
+    has_more: false, conflict_examples: [], counts: null, data_integrity: null,
+  });
+  const [loadMoreBedsError, setLoadMoreBedsError] = useState('');
+  const [assignBedStudent, setAssignBedStudent] = useState(null);
   const [loadingBeds, setLoadingBeds] = useState(false);
-  const [selectedRoom, setSelectedRoom] = useState(null);
+  const [loadingMoreBeds, setLoadingMoreBeds] = useState(false);
   const [assigningBed, setAssigningBed] = useState(false);
   const [assignBedError, setAssignBedError] = useState('');
   const [assignBedSuccess, setAssignBedSuccess] = useState('');
-  const [bedSearchQuery, setBedSearchQuery] = useState('');
+  // Set when match-options returns a single student-level blocking reason
+  // (missing housing_type/region/etc.) instead of per-room results - the
+  // modal then shows one clear message + an edit-student shortcut instead
+  // of listing the same conflict on every candidate room (§3).
+  const [assignBedBlockingField, setAssignBedBlockingField] = useState(null);
+  // Central-admin-only region override for the assign/reassign search - null
+  // means "use the student's own home region" (the backend default). Never
+  // sent for regional users; the backend ignores/locks it to their own
+  // region regardless, but the selector itself is simply not shown to them.
+  const [assignRegionOverride, setAssignRegionOverride] = useState(null);
 
   // ---------- TRANSLATIONS ----------
   const t = ({
@@ -126,6 +186,8 @@ function StudentsPage({ language }) {
       housing: 'פרטי מגורים',
       roommates: 'שותפים לחדר', personal: 'פרטים אישיים',
       roommateRequests: 'בקשות שותפים',
+      studentRequestsTitle: 'בקשות עבור סטודנט זה',
+      loading: 'טוען...',
       phone: 'טלפון', email: 'אימייל', city: 'עיר',
       building: 'בניין', apartment: 'דירה', room: 'חדר', bed: 'מיטה', dormType: 'סוג מעון',
       gender: 'מגדר', religion: 'דת', category: 'קטגוריה',
@@ -135,12 +197,20 @@ function StudentsPage({ language }) {
       priority: 'עדיפות', currentAssignment: 'פרטי השיבוץ הנוכחי',
       addRequest: 'הוסף בקשה', newRequestTitle: 'בקשה חדשה',
       requestType: 'סוג בקשה',
-      typeRoom: 'שינוי חדר', typeApartment: 'מעבר מהדירה', typeOther: 'בקשה אחרת',
+      typeTransfer: 'בקשת מעבר', typeOther: 'בקשה אחרת',
       typeRemoveStudent: 'הסרה מהמעונות',
+      scopeLabel: 'סוג המעבר',
+      scopeSameApt: 'בתוך אותה דירה',
+      scopeSameRegion: 'לדירה אחרת באותו אזור',
+      scopeCrossRegion: 'לאזור אחר',
+      targetRegionLabel: 'אזור יעד',
+      selectTargetRegion: 'בחר אזור יעד',
+      missingScope: 'יש לבחור את סוג המעבר',
+      missingTargetRegion: 'יש לבחור אזור יעד',
+      centralOnlyCross: 'רק מנהל מרכזי יכול ליצור מעבר לאזור אחר',
+      crossRegionLockedNote: 'משתמש אזורי מוגבל לאזור המורשה שלו',
       removeStudentNote: 'הסטודנט יוסר מהמעונות ומיטתו תתפנה לאחר אישור המנהל.',
       removeReasonPlaceholder: 'סיבת ההסרה מהמעונות...',
-      sameApartmentLabel: 'איפה החדר החדש?',
-      sameApt: 'באותה דירה', diffApt: 'בדירה אחרת', eitherApt: 'לא משנה',
       otherDescLabel: 'תיאור הבקשה',
       otherDescPlaceholder: 'תאר את הבקשה...',
       reasonLabel: 'סיבה', reasonPlaceholder: 'הסבר את סיבת הבקשה...',
@@ -160,12 +230,13 @@ function StudentsPage({ language }) {
       confirmAssign: 'אשר שיבוץ',
       selectRoomFirst: 'בחר חדר תחילה',
       availableBedCount: 'מיטות פנויות',
-      addStudentRequest: 'בקשת הוספת סטודנט',
-      createAddStudentRequest: 'יצירת בקשת הוספת סטודנט',
+      addStudentRequest: 'הוספת סטודנט',
+      createAddStudentRequest: 'הוספת סטודנט חדש',
+      addStudentSubtitle: 'הסטודנט יישמר במערכת באופן מיידי.',
       studentIdentity: 'פרטי הסטודנט',
       contact: 'פרטי קשר',
       housingPlacement: 'שיבוץ ומעונות',
-      requestReason: 'סיבת הבקשה',
+      requestReason: 'הערות',
       studentId: 'מספר סטודנט',
       firstName: 'שם פרטי',
       lastName: 'שם משפחה',
@@ -176,7 +247,7 @@ function StudentsPage({ language }) {
       religion: 'דת',
       dormType: 'סוג מעון',
       category: 'קטגוריה',
-      reason: 'סיבה',
+      reason: 'הערות',
       selectGender: 'בחר מגדר',
       male: 'זכר',
       female: 'נקבה',
@@ -186,17 +257,34 @@ function StudentsPage({ language }) {
       christian: 'נוצרי',
       druze: 'דרוזי',
       selectDormType: 'בחר סוג מעון',
+      selectRegionFirst: 'בחר אזור תחילה',
       newCategory: 'חדש',
       stayingCategory: 'ממשיך',
       transferringCategory: 'עובר',
       leavingCategory: 'עוזב',
-      createAddStudentBtn: 'צור בקשת הוספת סטודנט',
-      creating: 'יוצר...',
+      createAddStudentBtn: 'שמור סטודנט',
+      saveAndMatchBtn: 'שמור וחפש שיבוץ מתאים',
+      creating: 'שומר...',
       fillRequiredFields: 'יש למלא את כל שדות החובה.',
-      addStudentSuccess: 'בקשת הוספת סטודנט נוצרה בהצלחה.',
-      addStudentFailed: 'יצירת בקשת הוספת סטודנט נכשלה.',
+      addStudentSuccess: 'הסטודנט נוסף בהצלחה.',
+      addStudentFailed: 'הוספת הסטודנט נכשלה.',
       contactInfo: 'פרטי קשר',
-      addStudentReasonPlaceholder: 'מדוע צריך להוסיף את הסטודנט?',
+      addStudentReasonPlaceholder: 'הערות נוספות (אופציונלי)',
+      selectRegion: 'בחר אזור',
+      myRegionLabel: 'אזור',
+      noMatchFound: 'הסטודנט נשמר, אך לא נמצא שיבוץ מתאים כרגע.',
+      housingType: 'סוג דיור',
+      selectHousingType: 'בחר סוג דיור',
+      // Edit Student
+      editStudentBtn: 'עריכת פרטי הסטודנט',
+      editStudentTitle: 'עריכת פרטי סטודנט',
+      editStudentSubtitle: 'שינויים יישמרו במערכת באופן מיידי.',
+      saveEditStudentBtn: 'שמור שינויים',
+      editStudentSuccess: 'פרטי הסטודנט עודכנו בהצלחה.',
+      editStudentFailed: 'עדכון פרטי הסטודנט נכשל.',
+      // Assign-modal blocking message (student-level, not per-room)
+      assignBlockedTitle: 'לא ניתן לבצע שיבוץ',
+      assignBlockedHousingType: 'לא ניתן לבצע שיבוץ: חסר סוג דיור בפרטי הסטודנט.',
     },
     en: {
       title: 'Students', subtitle: 'Search or filter students by status',
@@ -215,6 +303,8 @@ function StudentsPage({ language }) {
       contact: 'Contact', housing: 'Housing',
       roommates: 'Roommates', personal: 'Personal',
       roommateRequests: 'Roommate Requests',
+      studentRequestsTitle: 'Requests For This Student',
+      loading: 'Loading...',
       phone: 'Phone', email: 'Email', city: 'City',
       building: 'Building', apartment: 'Apartment', room: 'Room', bed: 'Bed', dormType: 'Dorm Type',
       gender: 'Gender', religion: 'Religion', category: 'Category',
@@ -224,12 +314,20 @@ function StudentsPage({ language }) {
       priority: 'Priority', currentAssignment: 'Current Assignment',
       addRequest: 'Add Request', newRequestTitle: 'New Request',
       requestType: 'Request type',
-      typeRoom: 'Change room', typeApartment: 'Move from apartment', typeOther: 'Other request',
+      typeTransfer: 'Transfer request', typeOther: 'Other request',
       typeRemoveStudent: 'Remove from Dorms',
+      scopeLabel: 'Transfer scope',
+      scopeSameApt: 'Within the same apartment',
+      scopeSameRegion: 'Different apartment, same region',
+      scopeCrossRegion: 'Move to another region',
+      targetRegionLabel: 'Target region',
+      selectTargetRegion: 'Select target region',
+      missingScope: 'Please choose the transfer scope',
+      missingTargetRegion: 'Please select a target region',
+      centralOnlyCross: 'Only a central admin can create a cross-region transfer',
+      crossRegionLockedNote: 'Regional users are limited to their own region',
       removeStudentNote: 'The student will be removed from dorms and their bed freed after admin approval.',
       removeReasonPlaceholder: 'Reason for removal from dorms...',
-      sameApartmentLabel: 'Where should the new room be?',
-      sameApt: 'Same apartment', diffApt: 'Different apartment', eitherApt: 'Either is fine',
       otherDescLabel: 'Request description',
       otherDescPlaceholder: 'Describe the request...',
       reasonLabel: 'Reason', reasonPlaceholder: 'Explain the reason for this request...',
@@ -249,12 +347,13 @@ function StudentsPage({ language }) {
       confirmAssign: 'Confirm Assignment',
       selectRoomFirst: 'Select a room first',
       availableBedCount: 'free beds',
-      // add student request
-      addStudentRequest: 'Add Student Request',
-      createAddStudentRequest: 'Create Add Student Request',
+      // add student
+      addStudentRequest: 'Add Student',
+      createAddStudentRequest: 'Add New Student',
+      addStudentSubtitle: 'The student will be saved immediately.',
       studentIdentity: 'Student identity',
       housingPlacement: 'Housing / placement',
-      requestReason: 'Request reason',
+      requestReason: 'Notes',
       firstName: 'First name',
       lastName: 'Last name',
       phone: 'Phone',
@@ -264,7 +363,7 @@ function StudentsPage({ language }) {
       religion: 'Religion',
       dormType: 'Dorm Type',
       category: 'Category',
-      reason: 'Reason',
+      reason: 'Notes',
       selectGender: 'Select gender',
       male: 'Male',
       female: 'Female',
@@ -274,17 +373,34 @@ function StudentsPage({ language }) {
       christian: 'Christian',
       druze: 'Druze',
       selectDormType: 'Select dorm type',
+      selectRegionFirst: 'Select a region first',
       newCategory: 'New',
       stayingCategory: 'Staying',
       transferringCategory: 'Transferring',
       leavingCategory: 'Leaving',
-      createAddStudentBtn: 'Create Add Student Request',
-      creating: 'Creating...',
+      createAddStudentBtn: 'Save Student',
+      saveAndMatchBtn: 'Save and Find Matching Accommodation',
+      creating: 'Saving...',
       fillRequiredFields: 'Please fill all required fields.',
-      addStudentSuccess: 'Add Student request created successfully.',
-      addStudentFailed: 'Failed to create add student request.',
+      addStudentSuccess: 'Student added successfully.',
+      addStudentFailed: 'Failed to add student.',
       contactInfo: 'Contact',
-      addStudentReasonPlaceholder: 'Why should this student be added?',
+      addStudentReasonPlaceholder: 'Additional notes (optional)',
+      selectRegion: 'Select region',
+      myRegionLabel: 'Region',
+      noMatchFound: 'Student saved, but no matching accommodation was found right now.',
+      housingType: 'Housing Type',
+      selectHousingType: 'Select housing type',
+      // Edit Student
+      editStudentBtn: 'Edit Student Details',
+      editStudentTitle: 'Edit Student',
+      editStudentSubtitle: 'Changes are saved immediately.',
+      saveEditStudentBtn: 'Save Changes',
+      editStudentSuccess: 'Student details updated successfully.',
+      editStudentFailed: 'Failed to update student details.',
+      // Assign-modal blocking message (student-level, not per-room)
+      assignBlockedTitle: 'Assignment blocked',
+      assignBlockedHousingType: 'Cannot assign a bed: this student is missing a housing type.',
     },
   })[language] || {};
 
@@ -313,161 +429,31 @@ function StudentsPage({ language }) {
     const building = filterOptions?.buildings?.find((b) => String(b.id) === String(buildingId));
     return building ? `Building ${building.name}` : `Building ${buildingId}`;
   };
-// Group rooms by apartment
-// Group rooms by apartment + score by match quality
-const groupByApartment = (rooms, student) => {
-  const groups = {};
-  const matchOrder = { ok: 0, empty: 1, warning: 2, mismatch: 3 };
+  // Matching/scoring is now computed server-side (find_matching_room_options
+  // in the backend) and returned ready-to-render on each option
+  // (match_score, match_level, matched_preferences, warnings, conflicts) -
+  // BedMatchPicker consumes that directly, so no client-side re-scoring here.
 
-  for (const r of rooms) {
-    const key = `${r.building}-${r.apartment}`;
-    if (!groups[key]) {
-      groups[key] = {
-        key,
-        building: r.building,
-        apartment: r.apartment,
-        dorm_type: r.dorm_type,
-        region: r.region,
-        apartment_gender: r.apartment_gender,
-        apartment_residents: r.apartment_residents || [],
-        known_religions: r.known_religions || [],
-        unknown_religion_count: r.unknown_religion_count || 0,
-        available_rooms: [],
-        free_beds: 0,
-        match: r.match,
-        warnings: new Set(),
-        is_selectable: true,
-        _score: 0,
-        _hasRoommateMatch: false,
-      };
-    }
-    groups[key].available_rooms.push(r);
-    groups[key].free_beds += r.available_beds;
-    (r.warnings || []).forEach(w => groups[key].warnings.add(w));
-    if (matchOrder[r.match] > matchOrder[groups[key].match]) {
-      groups[key].match = r.match;
-    }
-    if (r.is_selectable === false) groups[key].is_selectable = false;
-  }
-
-  // SCORING
-  const studentReligion = student?.requested_religion;
-  const studentCity = (student?.city || '').toLowerCase().trim();
-  const roommateNames = [
-    student?.roommate_request_1, student?.roommate_request_2,
-    student?.roommate_request_3, student?.roommate_request_4,
-    student?.roommate_request_5,
-  ].filter(Boolean).map(n => n.toLowerCase().trim());
-  const roommateIds = [
-    student?.roommate_request_student_id_1, student?.roommate_request_student_id_2,
-    student?.roommate_request_student_id_3, student?.roommate_request_student_id_4,
-    student?.roommate_request_student_id_5,
-  ].filter(Boolean);
-
-  const studentGroup =
-    studentReligion === 'Jewish' ? 'jewish' :
-    ['Muslims', 'Christian', 'Druze'].includes(studentReligion) ? 'arab' :
-    'unknown';
-
-  Object.values(groups).forEach(g => {
-    if (!g.is_selectable || g.match === 'mismatch') {
-      g._score = -100;
-      return;
-    }
-    let score = 0;
-
-    // 1. Roommate request match (strongest signal)
-    const roommateMatch = g.apartment_residents.find(r =>
-      roommateIds.includes(r.student_id) ||
-      roommateNames.some(n => n && (r.full_name || '').toLowerCase().includes(n))
-    );
-    if (roommateMatch) {
-      score += 50;
-      g._hasRoommateMatch = true;
-    }
-
-    // 2. Religion compatibility
-    if (g.apartment_residents.length === 0) {
-      score += 15;
-    } else if (studentGroup !== 'unknown') {
-      const allMatch = g.apartment_residents.every(r => {
-        const rGroup =
-          r.religion === 'Jewish' ? 'jewish' :
-          ['Muslims', 'Christian', 'Druze'].includes(r.religion) ? 'arab' :
-          'unknown';
-        return rGroup === studentGroup || rGroup === 'unknown';
-      });
-      if (allMatch && g.unknown_religion_count === 0) score += 20;
-      else if (allMatch) score += 10;
-    }
-
-    // 3. City match
-    if (studentCity) {
-      const cityMatches = g.apartment_residents.filter(r =>
-        (r.city || '').toLowerCase().trim() === studentCity
-      ).length;
-      if (cityMatches > 0) score += 8;
-    }
-
-    // 4. Less crowded
-    if (g.apartment_residents.length === 0) score += 5;
-    else if (g.apartment_residents.length <= 2) score += 3;
-
-    // 5. Warning penalty
-    if (g.match === 'warning') score -= 8;
-
-    g._score = score;
-  });
-
-  return Object.values(groups).map(g => ({
-    ...g,
-    warnings: Array.from(g.warnings),
-  })).sort((a, b) => {
-    if (b._score !== a._score) return b._score - a._score;
-    if (matchOrder[a.match] !== matchOrder[b.match]) return matchOrder[a.match] - matchOrder[b.match];
-    if (a.building !== b.building) return a.building - b.building;
-    return String(a.apartment).localeCompare(String(b.apartment));
-  });
-};
-
-const apartmentGroups = groupByApartment(availableBeds, selectedStudent);
-
-const recommendedKeys = new Set(
-  apartmentGroups.filter(g => g._score >= 20).slice(0, 2).map(g => g.key)
-);
-
-const filteredApartments = apartmentGroups.filter(g => {
-  if (bedMatchFilter === 'all') return true;
-  if (bedMatchFilter === 'ok') return recommendedKeys.has(g.key) || g._score >= 15;
-  if (bedMatchFilter === 'empty') return g.apartment_residents.length === 0;
-  if (bedMatchFilter === 'warning') return g.match === 'warning';
-  if (bedMatchFilter === 'mismatch') return !g.is_selectable || g.match === 'mismatch';
-  return true;
-});
-
-
-
- const filteredBeds = availableBeds.filter(opt => {
-  if (bedMatchFilter !== 'all' && opt.match !== bedMatchFilter) return false;
-  if (!bedSearchQuery.trim()) return true;
-  const q = bedSearchQuery.toLowerCase();
-  const residentsText = (opt.apartment_residents || [])
-    .map(r => `${r.full_name || ''} ${r.city || ''} ${r.religion_display || ''}`)
-    .join(' ').toLowerCase();
-  return (
-    String(opt.building).toLowerCase().includes(q) ||
-    String(opt.apartment).toLowerCase().includes(q) ||
-    String(opt.room_name).toLowerCase().includes(q) ||
-    String(opt.dorm_type).toLowerCase().includes(q) ||
-    residentsText.includes(q)
-  );
-});
+  // Esc closes the Assign/Reassign Bed modal (§13 accessibility).
+  useEffect(() => {
+    if (!showAssignBed) return undefined;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') closeAssignBed();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [showAssignBed]); // eslint-disable-line
 
   // ---------- DATA LOADING ----------
   useEffect(() => { loadCounts(); }, []); // eslint-disable-line
   useEffect(() => {
     studentsAPI.getFilterOptions().then(setFilterOptions).catch(console.error);
   }, []);
+  useEffect(() => {
+    if (isCentralAdmin()) {
+      regionsAPI.getAll().then(setAddStudentRegions).catch(() => setAddStudentRegions([]));
+    }
+  }, []); // eslint-disable-line
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => loadList(), 300);
@@ -483,19 +469,63 @@ const filteredApartments = apartmentGroups.filter(g => {
   };
 
   const loadList = async () => {
+    if (listAbortRef.current) listAbortRef.current.abort();
+    const controller = new AbortController();
+    listAbortRef.current = controller;
     try {
       setLoading(true); setError('');
       const params = {};
       if (activeTab !== 'all') params.category = activeTab;
       const q = searchQuery.trim();
       if (q.length >= 2) params.search = q;
-      const data = await studentsAPI.getStudents({ ...params, ...activeFilters });
+      // Map drawer state -> the exact backend query params. The backend
+      // reads gender/requested_religion/region/dorm_type/building/apartment/
+      // room (comma-joined for multi) + status + has_roommate_request -
+      // NEVER the raw frontend keys (genders/regions/...), which it ignores.
+      const f = activeFilters;
+      if (f.genders?.length) params.gender = f.genders.join(',');
+      if (f.religions?.length) params.requested_religion = f.religions.join(',');
+      if (f.regions?.length) params.region = f.regions.join(',');
+      if (f.dormTypes?.length) params.dorm_type = f.dormTypes.join(',');
+      if (f.buildings?.length) params.building = f.buildings.join(',');
+      if (f.apartments?.length) params.apartment = f.apartments.join(',');
+      if (f.rooms?.length) params.room = f.rooms.join(',');
+      if (f.assignmentStatuses?.length) params.status = f.assignmentStatuses[0];
+      if (f.hasRoommateRequest?.length) params.has_roommate_request = f.hasRoommateRequest[0];
+      const data = await studentsAPI.getStudents(params, { signal: controller.signal });
       const items = Array.isArray(data) ? data : (data.results || []);
       setList(items);
+      // Paginated response shape: {count, next, previous, results}. A plain
+      // array (older/mocked callers) has no server-side total beyond what
+      // was returned.
+      setListTotal(Array.isArray(data) ? items.length : (data.count ?? items.length));
+      setListNextUrl(Array.isArray(data) ? null : (data.next || null));
     } catch (err) {
+      if (err.name === 'CanceledError' || err.code === 'ERR_CANCELED') return;
       setError(err.message || 'Failed to load students');
       setList([]);
-    } finally { setLoading(false); }
+      setListTotal(0);
+      setListNextUrl(null);
+    } finally {
+      if (listAbortRef.current === controller) setLoading(false);
+    }
+  };
+
+  // "Load more" appends the next page rather than re-fetching everything -
+  // the Students page must not pull the whole table just to show a bit more
+  // of the current search/filter result.
+  const loadMoreStudents = async () => {
+    if (!listNextUrl || loadingMoreStudents) return;
+    try {
+      setLoadingMoreStudents(true);
+      const { data } = await api.get(listNextUrl);
+      setList((prev) => [...prev, ...(data.results || [])]);
+      setListNextUrl(data.next || null);
+    } catch (err) {
+      console.error('Failed to load more students:', err);
+    } finally {
+      setLoadingMoreStudents(false);
+    }
   };
 
   const loadFullDetails = async (student) => {
@@ -503,8 +533,20 @@ const filteredApartments = apartmentGroups.filter(g => {
       setLoadingDetails(true); setSelectedStudent(student);
       const full = await studentsAPI.getById(student.id);
       setSelectedStudent(full);
+      loadStudentRequests(full.id);
     } catch (err) { console.error('Failed to load full student details:', err); }
     finally { setLoadingDetails(false); }
+  };
+
+  const loadStudentRequests = async (studentId) => {
+    try {
+      setLoadingStudentRequests(true);
+      const data = await studentsAPI.getRequests(studentId);
+      setStudentRequests(data);
+    } catch (err) {
+      console.error('Failed to load student requests:', err);
+      setStudentRequests([]);
+    } finally { setLoadingStudentRequests(false); }
   };
 
   const closeDetail = () => setSelectedStudent(null);
@@ -555,61 +597,184 @@ const filteredApartments = apartmentGroups.filter(g => {
 
   // ---------- ADD REQUEST MODAL ----------
   const openAddRequest = () => {
-    setReqType(selectedStudent?.is_assigned ? 'room' : 'other');
-    setReqSameApt(null); setReqOtherDesc('');
+    setReqType(selectedStudent?.is_assigned ? 'transfer' : 'other');
+    setReqScope(null); setReqTargetRegion(null); setReqOtherDesc('');
     setReqReason(''); setReqError(''); setReqSuccess('');
     setShowAddRequest(true);
+    // Real regions from the backend for the cross-region dropdown
+    // (central admin only - regional users cannot pick another region).
+    if (isCentralAdmin() && reqRegions.length === 0) {
+      regionsAPI.getAll().then(setReqRegions).catch(() => setReqRegions([]));
+    }
   };
   const closeAddRequest = () => setShowAddRequest(false);
 
   const submitAddRequest = async () => {
     if (!selectedStudent || !reqReason.trim()) { setReqError(t.missingReason); return; }
     if (reqType === 'other' && !reqOtherDesc.trim()) { setReqError(t.missingOtherDesc); return; }
+    if (reqType === 'transfer' && !reqScope) { setReqError(t.missingScope); return; }
+    // Never rely on the backend's "Invalid pk" error: a cross-region
+    // transfer must carry one real Region PK before submit. Region PKs are
+    // slug strings (e.g. "broshim"), so validity = non-empty, not numeric.
+    if (reqType === 'transfer' && reqScope === 'cross_region'
+        && !(reqTargetRegion != null && String(reqTargetRegion).trim() !== '')) {
+      setReqError(t.missingTargetRegion); return;
+    }
     try {
       setReqSubmitting(true); setReqError('');
       const payload = { student: selectedStudent.id, request_type: reqType, reason: reqReason.trim() };
-      if (reqType === 'room')  payload.same_apartment = reqSameApt;
+      if (reqType === 'transfer') {
+        // Scope -> existing backend fields, mirroring the Transfers page:
+        //   same_apartment -> room      + same_apartment=true
+        //   same_region    -> apartment + same_apartment=false
+        //   cross_region   -> apartment + cross_region + destination_regions
+        payload.request_type = reqScope === 'same_apartment' ? 'room' : 'apartment';
+        payload.same_apartment = reqScope === 'same_apartment' ? true : reqScope === 'same_region' ? false : null;
+        payload.transfer_scope = reqScope === 'cross_region' ? 'cross_region' : 'same_region';
+        payload.destination_regions = reqScope === 'cross_region'
+          ? [reqTargetRegion].filter((v) => v != null && String(v).trim() !== '')
+          : [];
+      }
       if (reqType === 'other') payload.other_description = reqOtherDesc.trim();
       await requestsAPI.create(payload);
       setReqSuccess(t.requestSubmitted);
+      loadStudentRequests(selectedStudent.id);
       setTimeout(() => { closeAddRequest(); setReqSuccess(''); }, 1500);
     } catch (err) {
       setReqError(err.message || 'Failed to create request');
     } finally { setReqSubmitting(false); }
   };
 
+  // Single source of truth for the submit button. Cross-region transfer
+  // needs ONLY: student + scope + valid region PK + non-empty reason.
+  // Room/apartment/bed are chosen later, at APPROVAL time - never required
+  // to create the request.
+  // NOTE: Region PKs in this project are SLUG STRINGS (e.g. "broshim",
+  // "technion") - never validate them numerically.
+  const reqRegionValid = reqTargetRegion != null && String(reqTargetRegion).trim() !== '';
+  const reqDisabledReason =
+    reqSubmitting ? 'submitting'
+    : reqSuccess ? 'already-submitted'
+    : !selectedStudent ? 'no-student'
+    : !reqReason.trim() ? 'empty-reason'
+    : (reqType === 'transfer' && !reqScope) ? 'no-scope'
+    : (reqType === 'transfer' && reqScope === 'cross_region' && !reqRegionValid) ? 'invalid-target-region'
+    : (reqType === 'other' && !reqOtherDesc.trim()) ? 'empty-other-description'
+    : null;
+  const canSubmitRequest = !reqDisabledReason;
+
   // ---------- ASSIGN BED MODAL ----------
-  const openAssignBed = async () => {
+  const openAssignBed = async (studentOverride) => {
+    const targetStudent = studentOverride || selectedStudent;
+    if (!targetStudent) return;
+    setAssignBedStudent(targetStudent);
     setShowAssignBed(true);
-    setSelectedRoom(null);
-    setAssignBedError(''); setAssignBedSuccess('');
-    setBedSearchQuery('');
+    setSelectedRoomInApt(null);
+    setAssignRegionOverride(null); // reset to the student's own home region on every open
+    setAssignBedError(''); setAssignBedSuccess(''); setAssignBedBlockingField(null);
     try {
       setLoadingBeds(true);
-      const data = await studentsAPI.getAvailableBeds(selectedStudent.id);
-      setAvailableBeds(data.options || []);
+      const data = await studentsAPI.getAvailableBeds(targetStudent.id, { offset: 0 });
+      setAvailableBuildings(data.buildings || []);
+      setLoadMoreBedsError('');
+      setBedResultMeta({
+        total_valid_beds: data.total_valid_beds || 0,
+        total_buildings: data.total_buildings || 0,
+        total_apartments: data.total_apartments || 0,
+        total_rooms: data.total_rooms || 0,
+        has_more: !!data.has_more,
+        conflict_examples: data.conflict_examples || [],
+        counts: data.counts || null,
+        data_integrity: data.data_integrity || null,
+      });
+      setAssignBedBlockingField(data.blocking_field || null);
+      if (data.blocking_field) setAssignBedError(data.reason || '');
     } catch (err) {
       setAssignBedError(err.message || 'Failed to load beds');
     } finally { setLoadingBeds(false); }
   };
 
+  const retryLoadBeds = () => loadBedsForRegion(assignRegionOverride);
+
+  // Re-runs the search from scratch (offset 0) for a given region - shared
+  // by the initial load, retry, and the region selector's onChange so all
+  // three stay in sync instead of drifting into separate fetch paths.
+  const loadBedsForRegion = async (regionId) => {
+    if (!assignBedStudent) return;
+    setSelectedRoomInApt(null);
+    setAssignBedError(''); setAssignBedBlockingField(null);
+    try {
+      setLoadingBeds(true);
+      const data = await studentsAPI.getAvailableBeds(assignBedStudent.id, {
+        offset: 0, regionId: regionId || undefined,
+      });
+      setAvailableBuildings(data.buildings || []);
+      setLoadMoreBedsError('');
+      setBedResultMeta({
+        total_valid_beds: data.total_valid_beds || 0,
+        total_buildings: data.total_buildings || 0,
+        total_apartments: data.total_apartments || 0,
+        total_rooms: data.total_rooms || 0,
+        has_more: !!data.has_more,
+        conflict_examples: data.conflict_examples || [],
+        counts: data.counts || null,
+        data_integrity: data.data_integrity || null,
+      });
+      setAssignBedBlockingField(data.blocking_field || null);
+      if (data.blocking_field) setAssignBedError(data.reason || '');
+    } catch (err) {
+      setAssignBedError(err.message || 'Failed to load beds');
+    } finally { setLoadingBeds(false); }
+  };
+
+  const handleAssignRegionChange = (regionId) => {
+    setAssignRegionOverride(regionId || null);
+    loadBedsForRegion(regionId || null);
+  };
+
+  const loadMoreBeds = async () => {
+    if (!assignBedStudent || loadingMoreBeds) return;
+    try {
+      setLoadingMoreBeds(true);
+      setLoadMoreBedsError('');
+      // offset = BUILDINGS already loaded, exactly as the backend expects
+      // for the next page - appended, never replacing what's already shown.
+      const data = await studentsAPI.getAvailableBeds(assignBedStudent.id, {
+        offset: availableBuildings.length, regionId: assignRegionOverride || undefined,
+      });
+      setAvailableBuildings((prev) => mergeBuildings(prev, data.buildings));
+      setBedResultMeta((prev) => ({ ...prev, has_more: !!data.has_more }));
+    } catch (err) {
+      setLoadMoreBedsError(err.message || 'Failed to load more buildings');
+    } finally { setLoadingMoreBeds(false); }
+  };
+
 const closeAssignBed = () => {
   setShowAssignBed(false);
-  setSelectedRoom(null);
-  setSelectedApartment(null);
   setSelectedRoomInApt(null);
-  setAvailableBeds([]);
+  setAvailableBuildings([]);
+  setLoadMoreBedsError('');
+  setBedResultMeta({ total_valid_beds: 0, total_buildings: 0, total_apartments: 0, total_rooms: 0, has_more: false, conflict_examples: [], counts: null, data_integrity: null });
+  setAssignBedStudent(null);
+  setAssignRegionOverride(null);
   setAssignBedError(''); setAssignBedSuccess('');
+  setAssignBedBlockingField(null);
+  setLoadingMoreBeds(false);
 };
   const submitAssignBed = async () => {
-  if (!selectedRoomInApt) return;
+  if (!selectedRoomInApt || !assignBedStudent) return;
   try {
     setAssigningBed(true); setAssignBedError('');
-    await studentsAPI.assignBed(selectedStudent.id, selectedRoomInApt.room_id);
+    if (assignBedStudent.is_assigned) {
+      await studentsAPI.reassignBed(assignBedStudent.id, selectedRoomInApt.room_id, selectedRoomInApt.bed_id);
+    } else {
+      await studentsAPI.assignBed(assignBedStudent.id, selectedRoomInApt.room_id, selectedRoomInApt.bed_id);
+    }
     setAssignBedSuccess(t.assignSuccess);
     setTimeout(async () => {
+      const studentId = assignBedStudent.id;
       closeAssignBed();
-      const full = await studentsAPI.getById(selectedStudent.id);
+      const full = await studentsAPI.getById(studentId);
       setSelectedStudent(full);
       loadCounts();
     }, 1500);
@@ -627,20 +792,31 @@ const closeAssignBed = () => {
     city: '',
     gender: '',
     requested_religion: 'not_specified',
+    region: '',
     accepted_dorm_type: '',
+    housing_type: '',
     category: 'new',
     reason: '',
   });
+  setAddStudentFieldErrors({});
 };
 
 const handleAddStudentChange = (field, value) => {
   setAddStudentError('');
   setAddStudentSuccess('');
+  setAddStudentFieldErrors((prev) => {
+    if (!prev[field]) return prev;
+    const next = { ...prev };
+    delete next[field];
+    return next;
+  });
 
-  setAddStudentForm((prev) => ({
-    ...prev,
-    [field]: value,
-  }));
+  setAddStudentForm((prev) => {
+    const next = { ...prev, [field]: value };
+    // Changing the region invalidates whatever dorm type was picked from the previous region's list.
+    if (field === 'region') next.accepted_dorm_type = '';
+    return next;
+  });
 };
 
 const closeAddStudentModal = () => {
@@ -652,78 +828,204 @@ const closeAddStudentModal = () => {
   resetAddStudentForm();
 };
 
-const submitAddStudentRequest = async () => {
+// Central admins pick a region first, which narrows the dorm-type list to
+// that region (accepted_dorm_type is what actually carries the student's
+// region - there is no separate region field on Student). Regional staff's
+// dorm-type list is already scoped to their own region server-side.
+const addStudentDormTypeOptions = () => {
+  const all = filterOptions?.dorm_types || [];
+  if (!isCentralAdmin()) return all;
+  if (!addStudentForm.region) return [];
+  return all.filter((dt) => String(dt.region_id) === String(addStudentForm.region));
+};
+
+const submitAddStudent = async (mode) => {
   setAddStudentError('');
+  setAddStudentFieldErrors({});
   setAddStudentSuccess('');
 
-  const required = [
-    'student_id',
-    'first_name',
-    'last_name',
-    'gender',
-    'accepted_dorm_type',
-    'reason',
-  ];
+  const required = ['student_id', 'first_name', 'last_name', 'gender'];
+  // housing_type/accepted_dorm_type (and region, for a central admin) are
+  // only required for a student actually eligible for assignment - mirrors
+  // Student.is_assignment_eligible on the backend (leaving students exempt).
+  if (addStudentForm.category !== 'leaving') {
+    required.push('accepted_dorm_type', 'housing_type');
+    if (isCentralAdmin()) required.push('region');
+  }
 
   const missing = required.filter((field) => !String(addStudentForm[field] || '').trim());
-
   if (missing.length > 0) {
     setAddStudentError(t.fillRequiredFields);
     return;
   }
 
+  const payload = {
+    student_id: addStudentForm.student_id.trim(),
+    first_name: addStudentForm.first_name.trim(),
+    last_name: addStudentForm.last_name.trim(),
+    phone: addStudentForm.phone.trim(),
+    email: addStudentForm.email.trim(),
+    city: addStudentForm.city.trim(),
+    gender: addStudentForm.gender,
+    requested_religion: addStudentForm.requested_religion || 'not_specified',
+    accepted_dorm_type: addStudentForm.accepted_dorm_type || null,
+    housing_type: addStudentForm.housing_type || '',
+    category: addStudentForm.category || 'new',
+  };
+
   try {
     setAddStudentLoading(true);
-
-    await requestsAPI.create({
-      request_type: 'add_student',
-      reason: addStudentForm.reason.trim(),
-      student_data: {
-        student_id: addStudentForm.student_id.trim(),
-        first_name: addStudentForm.first_name.trim(),
-        last_name: addStudentForm.last_name.trim(),
-        phone: addStudentForm.phone.trim(),
-        email: addStudentForm.email.trim(),
-        city: addStudentForm.city.trim(),
-        gender: addStudentForm.gender,
-        requested_religion: addStudentForm.requested_religion || 'not_specified',
-        accepted_dorm_type: addStudentForm.accepted_dorm_type,
-        category: addStudentForm.category || 'new',
-      },
-    });
-
+    const created = await studentsAPI.create(payload);
     setAddStudentSuccess(t.addStudentSuccess);
+    loadList();
+    loadCounts();
 
-    setTimeout(() => {
-      setShowAddStudentModal(false);
-      setAddStudentError('');
-      setAddStudentSuccess('');
-      resetAddStudentForm();
-      loadList();
-      loadCounts();
-    }, 700);
+    if (mode === 'save_and_match') {
+      setTimeout(() => {
+        setShowAddStudentModal(false);
+        setAddStudentSuccess('');
+        resetAddStudentForm();
+        setSelectedStudent(created);
+        openAssignBed(created);
+      }, 500);
+    } else {
+      setTimeout(() => {
+        setShowAddStudentModal(false);
+        setAddStudentSuccess('');
+        resetAddStudentForm();
+      }, 900);
+    }
   } catch (err) {
+    if (err.fieldErrors) setAddStudentFieldErrors(err.fieldErrors);
     setAddStudentError(err.message || t.addStudentFailed);
   } finally {
     setAddStudentLoading(false);
   }
 };
 
-  const handleSelectRoom = async (opt) => {
-  setSelectedRoom(opt);
-  setAptTenants([]);
-  if (opt) {
-    try {
-      setLoadingTenants(true);
-      const data = await studentsAPI.getApartmentTenants(opt.room_id);
-      setAptTenants(data.tenants || []);
-    } catch (err) {
-      console.error('Failed to load tenants:', err);
-    } finally {
-      setLoadingTenants(false);
-    }
+// ---------- EDIT STUDENT MODAL ----------
+// Opened either from the student detail page, or from the Assign Bed
+// modal's "missing data" blocking message (returnToAssign=true re-opens the
+// assign flow and re-runs match-options after a successful save instead of
+// just closing).
+const openEditStudent = (student, { returnToAssign = false } = {}) => {
+  if (!student) return;
+  setEditStudentTarget(student);
+  setEditStudentReturnToAssign(returnToAssign);
+  setEditStudentError('');
+  setEditStudentFieldErrors({});
+  setEditStudentSuccess('');
+  setEditStudentForm({
+    first_name: student.first_name || '',
+    last_name: student.last_name || '',
+    phone: student.phone || '',
+    email: student.email || '',
+    city: student.city || '',
+    gender: student.gender || '',
+    requested_religion: student.requested_religion || 'not_specified',
+    region: student.region_id != null ? String(student.region_id) : '',
+    accepted_dorm_type: student.accepted_dorm_type != null ? String(student.accepted_dorm_type) : '',
+    housing_type: student.housing_type || '',
+    category: student.category || 'new',
+  });
+  setShowEditStudentModal(true);
+};
+
+const closeEditStudentModal = () => {
+  if (editStudentLoading) return;
+  setShowEditStudentModal(false);
+  setEditStudentTarget(null);
+  setEditStudentError('');
+  setEditStudentFieldErrors({});
+  setEditStudentSuccess('');
+  setEditStudentReturnToAssign(false);
+};
+
+const handleEditStudentChange = (field, value) => {
+  setEditStudentError('');
+  setEditStudentSuccess('');
+  setEditStudentFieldErrors((prev) => {
+    if (!prev[field]) return prev;
+    const next = { ...prev };
+    delete next[field];
+    return next;
+  });
+  setEditStudentForm((prev) => {
+    const next = { ...prev, [field]: value };
+    if (field === 'region') next.accepted_dorm_type = '';
+    return next;
+  });
+};
+
+// Same region -> dorm-type scoping rule as Add Student.
+const editStudentDormTypeOptions = () => {
+  const all = filterOptions?.dorm_types || [];
+  if (!isCentralAdmin()) return all;
+  if (!editStudentForm.region) return [];
+  return all.filter((dt) => String(dt.region_id) === String(editStudentForm.region));
+};
+
+const submitEditStudent = async () => {
+  if (!editStudentTarget) return;
+  setEditStudentError('');
+  setEditStudentFieldErrors({});
+  setEditStudentSuccess('');
+
+  const required = ['first_name', 'last_name', 'gender'];
+  if (editStudentForm.category !== 'leaving') {
+    required.push('accepted_dorm_type', 'housing_type');
+    if (isCentralAdmin()) required.push('region');
+  }
+  const missing = required.filter((field) => !String(editStudentForm[field] || '').trim());
+  if (missing.length > 0) {
+    setEditStudentError(t.fillRequiredFields);
+    return;
+  }
+
+  const payload = {
+    first_name: editStudentForm.first_name.trim(),
+    last_name: editStudentForm.last_name.trim(),
+    phone: editStudentForm.phone.trim(),
+    email: editStudentForm.email.trim(),
+    city: editStudentForm.city.trim(),
+    gender: editStudentForm.gender,
+    requested_religion: editStudentForm.requested_religion || 'not_specified',
+    accepted_dorm_type: editStudentForm.accepted_dorm_type || null,
+    housing_type: editStudentForm.housing_type || '',
+    category: editStudentForm.category || 'new',
+  };
+
+  try {
+    setEditStudentLoading(true);
+    const updated = await studentsAPI.update(editStudentTarget.id, payload);
+    setEditStudentSuccess(t.editStudentSuccess);
+    loadList();
+    loadCounts();
+
+    const returnToAssign = editStudentReturnToAssign;
+    setTimeout(async () => {
+      setShowEditStudentModal(false);
+      setEditStudentSuccess('');
+      setEditStudentTarget(null);
+      setEditStudentReturnToAssign(false);
+
+      // Refresh whatever is currently showing this student, then re-run
+      // matching so the assign flow picks up the field that was just fixed.
+      if (selectedStudent && selectedStudent.id === updated.id) {
+        setSelectedStudent(updated);
+      }
+      if (returnToAssign) {
+        openAssignBed(updated);
+      }
+    }, 700);
+  } catch (err) {
+    if (err.fieldErrors) setEditStudentFieldErrors(err.fieldErrors);
+    setEditStudentError(err.message || t.editStudentFailed);
+  } finally {
+    setEditStudentLoading(false);
   }
 };
+
   const showDetail = selectedStudent !== null;
 
   // ============================================================
@@ -755,7 +1057,7 @@ const submitAddStudentRequest = async () => {
 
             {!loading && (
               <span className="results-count">
-                {list.length} {list.length === 1 ? t.result : t.results}
+                {listTotal} {listTotal === 1 ? t.result : t.results}
               </span>
             )}
           </div>
@@ -788,7 +1090,7 @@ const submitAddStudentRequest = async () => {
               {searchQuery && !loading && <button className="clear-btn" onClick={() => setSearchQuery('')}><X size={16} /></button>}
             </div>
             <button className="matching-students-btn" type="button">
-              <span className="matching-number">{list.length}</span>
+              <span className="matching-number">{listTotal}</span>
               <span className="matching-text">Students<small>Matching selected filters</small></span>
             </button>
             <button className={`filters-btn ${activeFilterCount > 0 ? 'has-filters' : ''}`} onClick={() => setFiltersOpen(true)}>
@@ -801,12 +1103,16 @@ const submitAddStudentRequest = async () => {
           {activeFilterCount > 0 && (
             <div className="active-filter-chips">
               {activeFilters.genders.map((v) => (
-                <span key={v} className="filter-chip">{v === 'M' ? 'Male' : v === 'F' ? 'Female' : v}
+                <span key={v} className="filter-chip">
+                  {language === 'he'
+                    ? (v === 'male' ? 'זכר' : v === 'female' ? 'נקבה' : v)
+                    : (v === 'male' ? 'Male' : v === 'female' ? 'Female' : v)}
                   <button onClick={() => setActiveFilters(f => ({ ...f, genders: f.genders.filter(x => x !== v) }))}><X size={12} /></button>
                 </span>
               ))}
               {activeFilters.religions.map((v) => (
-                <span key={v} className="filter-chip">{v}
+                <span key={v} className="filter-chip">
+                  {(filterOptions?.religions || []).find((r) => (typeof r === 'object' ? r.id : r) === v)?.name || v}
                   <button onClick={() => setActiveFilters(f => ({ ...f, religions: f.religions.filter(x => x !== v) }))}><X size={12} /></button>
                 </span>
               ))}
@@ -839,8 +1145,16 @@ const submitAddStudentRequest = async () => {
               <button className="clear-filters-btn" onClick={clearFilters}>{t.clearFilters}</button>
             </div>
           ) : loading ? (
-            <div style={{ display: 'flex', justifyContent: 'center', padding: '60px 0' }}>
-              <Loader2 size={32} className="spinner" style={{ color: '#3d9fe0' }} />
+            <div className="results-grid" aria-busy="true">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <div key={i} className="result-row-skeleton">
+                  <div className="skel-avatar" />
+                  <div className="skel-lines">
+                    <div className="skel-line skel-line-wide" />
+                    <div className="skel-line skel-line-narrow" />
+                  </div>
+                </div>
+              ))}
             </div>
           ) : list.length > 0 ? (
             <div className="results-grid">
@@ -874,6 +1188,12 @@ const submitAddStudentRequest = async () => {
               ))}
             </div>
           ) : null}
+
+          {!loading && listNextUrl && (
+            <button type="button" className="load-more-students-btn" onClick={loadMoreStudents} disabled={loadingMoreStudents}>
+              {loadingMoreStudents ? <Loader2 size={16} className="spinner" /> : (language === 'he' ? 'טען עוד סטודנטים' : 'Load more students')}
+            </button>
+          )}
         </>
       )}
 
@@ -888,9 +1208,23 @@ const submitAddStudentRequest = async () => {
                 <ArrowLeft size={16} /> {t.back}
               </button>
               <div style={{ display: 'flex', gap: 8 }}>
+                <button className="edit-student-pill" onClick={() => openEditStudent(selectedStudent)}>
+                  <User size={16} />
+                  {t.editStudentBtn}
+                </button>
                 {/* Unassigned: Assign Bed directly */}
                 {!isRemoved(selectedStudent) && (
-                  <button className="assign-bed-pill" onClick={openAssignBed}>
+                  // Must be wrapped - binding openAssignBed directly as the
+                  // onClick handler makes React pass the click SyntheticEvent
+                  // as its studentOverride argument. Since that event object
+                  // is truthy, `studentOverride || selectedStudent` picks the
+                  // event instead of the student, so targetStudent.id is
+                  // undefined, student_id is silently dropped by
+                  // JSON.stringify, and the backend ends up scoring a blank
+                  // synthetic student (empty housing_type) instead of the
+                  // real one - the exact cause of "every room conflicts
+                  // identically no matter which student is opened".
+                  <button className="assign-bed-pill" onClick={() => openAssignBed()}>
                     <BedDouble size={16} />
                     {selectedStudent.is_assigned ? 'Reassign Bed' : t.assignBed}
                   </button>
@@ -972,6 +1306,16 @@ const submitAddStudentRequest = async () => {
             <div className="card">
               <div className="card-header"><div className="card-icon housing"><Home size={18} /></div><h3>{t.housing}</h3></div>
               <div className="card-body">
+                <div className="info-row">
+                  <span className="info-key"><Home size={15} /> {t.housingType}</span>
+                  <span className="info-val">
+                    {selectedStudent.housing_type || (
+                      <span className="field-missing-badge">
+                        {language === 'he' ? 'חסר' : 'Missing'}
+                      </span>
+                    )}
+                  </span>
+                </div>
                 {selectedStudent.is_assigned ? (
                   <>
                     <div className="info-row"><span className="info-key"><Building2 size={15} /> {t.dormType}</span><span className="info-val">{selectedStudent.accepted_dorm_type_name || '—'}</span></div>
@@ -1035,6 +1379,27 @@ const submitAddStudentRequest = async () => {
             </div>
           </div>
 
+          <div className="card">
+            <div className="card-header"><div className="card-icon requests"><FileSearch size={18} /></div><h3>{t.studentRequestsTitle}</h3></div>
+            <div className="card-body">
+              {loadingStudentRequests ? (
+                <p className="muted">{t.loading}</p>
+              ) : studentRequests.length > 0 ? (
+                <ol className="requests-list">
+                  {studentRequests.map((r) => (
+                    <li key={r.id}>
+                      <span className="rq-num">{r.status === 'approved' ? '✓' : r.status === 'rejected' ? '✕' : '…'}</span>
+                      <span className="rq-name">
+                        {r.request_type_display || r.request_type} — {r.status_display || r.status}
+                        {r.created_at ? ` (${new Date(r.created_at).toLocaleDateString()})` : ''}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              ) : <p className="muted">—</p>}
+            </div>
+          </div>
+
           {selectedStudent.is_priority && selectedStudent.priority_reason && (
             <div className="priority-notice"><Star size={18} /><span>{selectedStudent.priority_reason}</span></div>
           )}
@@ -1065,9 +1430,8 @@ const submitAddStudentRequest = async () => {
                 {/* Primary types */}
                 <div className="type-options-modern" style={{ marginBottom: 10 }}>
                   {[
-                    { v: 'room',      l: t.typeRoom,      icon: <Home size={20} />,     color: 'purple' },
-                    { v: 'apartment', l: t.typeApartment, icon: <DoorOpen size={20} />, color: 'green'  },
-                    { v: 'other',     l: t.typeOther,     icon: <FileText size={20} />, color: 'orange' },
+                    { v: 'transfer', l: t.typeTransfer, icon: <MapPin size={20} />,   color: 'purple' },
+                    { v: 'other',    l: t.typeOther,    icon: <FileText size={20} />, color: 'orange' },
                   ].map((opt) => (
                     <button key={opt.v} type="button"
                       className={`type-option-modern ${opt.color} ${reqType === opt.v ? 'active' : ''}`}
@@ -1090,14 +1454,83 @@ const submitAddStudentRequest = async () => {
                 <div className="type-note red"><UserMinus size={14} /> {t.removeStudentNote}</div>
               )}
 
-              {reqType === 'room' && (
+              {reqType === 'transfer' && (
                 <div className="form-section">
-                  <label>{t.sameApartmentLabel}</label>
+                  <label>{t.scopeLabel}</label>
                   <div className="sub-options">
-                    {[{ v: true, l: t.sameApt }, { v: false, l: t.diffApt }, { v: null, l: t.eitherApt }].map((opt, i) => (
-                      <button key={i} type="button" className={`sub-option ${reqSameApt === opt.v ? 'active' : ''}`} onClick={() => setReqSameApt(opt.v)}>{opt.l}</button>
+                    {[
+                      { v: 'same_apartment', l: t.scopeSameApt },
+                      { v: 'same_region',    l: t.scopeSameRegion },
+                      { v: 'cross_region',   l: t.scopeCrossRegion, centralOnly: true },
+                    ].map((opt) => (
+                      <button key={opt.v} type="button"
+                        className={`sub-option ${reqScope === opt.v ? 'active' : ''}`}
+                        disabled={opt.centralOnly && !isCentralAdmin()}
+                        title={opt.centralOnly && !isCentralAdmin() ? t.centralOnlyCross : undefined}
+                        onClick={() => setReqScope(opt.v)}>{opt.l}</button>
                     ))}
                   </div>
+                  {!isCentralAdmin() && (
+                    <div className="type-note" style={{ marginTop: 8 }}>
+                      <MapPin size={14} /> {t.crossRegionLockedNote}
+                      {user?.region_name ? <>: <strong>{user.region_name}</strong></> : null}
+                    </div>
+                  )}
+                  {reqScope === 'cross_region' && isCentralAdmin() && (
+                    <div style={{ marginTop: 10 }}>
+                      <label>{t.targetRegionLabel} *</label>
+                      {reqRegions.length === 0 ? (
+                        <div className="type-note" style={{ marginTop: 6 }}>
+                          <Loader2 size={14} className="spinner" /> {t.selectTargetRegion}...
+                        </div>
+                      ) : (
+                        <div style={{
+                          display: 'flex', flexDirection: 'column', gap: 6,
+                          maxHeight: 170, overflowY: 'auto', marginTop: 6,
+                          border: '1px solid #e5e7eb', borderRadius: 10, padding: 6,
+                          pointerEvents: 'auto', position: 'relative', zIndex: 1,
+                        }}>
+                          {reqRegions.map((r, idx) => {
+                            // Region PK may arrive as number or numeric string
+                            // (or under pk/region_id) - keep the RAW value and
+                            // compare as strings; never coerce with Number()
+                            // (NaN made clicks look like they did nothing).
+                            const rid = r?.id ?? r?.pk ?? r?.region_id;
+                            if (rid == null) return null;
+                            const active = String(reqTargetRegion) === String(rid);
+                            const isCurrent = selectedStudent?.region_name === r.name;
+                            return (
+                              <button key={String(rid) || idx} type="button"
+                                className={`sub-option ${active ? 'active' : ''}`}
+                                style={{
+                                  width: '100%', justifyContent: 'space-between',
+                                  display: 'flex', alignItems: 'center',
+                                  cursor: 'pointer', pointerEvents: 'auto',
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setReqTargetRegion(rid);
+                                  setReqError('');
+                                }}>
+                                <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                  <MapPin size={13} /> {r.name}
+                                </span>
+                                <span style={{ fontSize: 11, opacity: 0.7 }}>
+                                  {isCurrent ? (language === 'he' ? 'האזור הנוכחי' : 'current region') : ''}
+                                  {active ? ' ✓' : ''}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {reqTargetRegion == null && (
+                        <div className="msg" style={{ marginTop: 6, fontSize: 12, color: '#92400e' }}>
+                          {t.missingTargetRegion}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1117,12 +1550,23 @@ const submitAddStudentRequest = async () => {
 
               {reqError && <div className="msg error-msg">{reqError}</div>}
               {reqSuccess && <div className="msg success-msg">{reqSuccess}</div>}
+              {!reqError && !reqSuccess && !canSubmitRequest && !reqSubmitting && (
+                <div className="msg" style={{ background: '#fef3c7', color: '#92400e', fontSize: 13 }}>
+                  {{
+                    'empty-reason': t.missingReason,
+                    'no-scope': t.missingScope,
+                    'invalid-target-region': t.missingTargetRegion,
+                    'empty-other-description': t.missingOtherDesc,
+                  }[reqDisabledReason] || ''}
+                </div>
+              )}
 
               <div className="modal-actions">
                 <button className="btn-secondary" onClick={closeAddRequest} disabled={reqSubmitting}>{t.cancel}</button>
                 <button
                   className={`btn-primary${reqType === 'remove_student' ? ' danger' : ''}`}
-                  onClick={submitAddRequest} disabled={reqSubmitting || !!reqSuccess}>
+                  onClick={submitAddRequest}
+                  disabled={!canSubmitRequest}>
                   {reqSubmitting ? <Loader2 size={16} className="spinner" /> : <><Plus size={16} /> {t.submit}</>}
                 </button>
               </div>
@@ -1132,7 +1576,7 @@ const submitAddStudentRequest = async () => {
       )}
 
 {/* ============================================================
-    ADD STUDENT REQUEST MODAL
+    ADD STUDENT MODAL
 ============================================================ */}
 {showAddStudentModal && (
   <div className="modal-overlay" onClick={closeAddStudentModal}>
@@ -1145,11 +1589,7 @@ const submitAddStudentRequest = async () => {
           <div className="modal-icon blue">+</div>
           <div>
             <h2>{t.createAddStudentRequest}</h2>
-            <p className="modal-subtitle">
-              {language === 'he'
-                ? 'הסטודנט יישאר במצב ממתין עד שמנהל יאשר וישבץ חדר.'
-                : 'The student will stay pending until an admin approves and assigns a room.'}
-            </p>
+            <p className="modal-subtitle">{t.addStudentSubtitle}</p>
           </div>
         </div>
 
@@ -1179,29 +1619,38 @@ const submitAddStudentRequest = async () => {
           <h3>{t.studentIdentity}</h3>
 
           <div className="form-grid">
-            <label>
+            <label className={addStudentFieldErrors.student_id ? 'field-error' : ''}>
               {t.studentId} *
               <input
                 value={addStudentForm.student_id}
                 onChange={(e) => handleAddStudentChange('student_id', e.target.value)}
                 placeholder={language === 'he' ? 'לדוגמה: 213537467' : 'Example: 213537467'}
               />
+              {addStudentFieldErrors.student_id && (
+                <span className="field-error-msg">{[].concat(addStudentFieldErrors.student_id).join(' ')}</span>
+              )}
             </label>
 
-            <label>
+            <label className={addStudentFieldErrors.first_name ? 'field-error' : ''}>
               {t.firstName} *
               <input
                 value={addStudentForm.first_name}
                 onChange={(e) => handleAddStudentChange('first_name', e.target.value)}
               />
+              {addStudentFieldErrors.first_name && (
+                <span className="field-error-msg">{[].concat(addStudentFieldErrors.first_name).join(' ')}</span>
+              )}
             </label>
 
-            <label>
+            <label className={addStudentFieldErrors.last_name ? 'field-error' : ''}>
               {t.lastName} *
               <input
                 value={addStudentForm.last_name}
                 onChange={(e) => handleAddStudentChange('last_name', e.target.value)}
               />
+              {addStudentFieldErrors.last_name && (
+                <span className="field-error-msg">{[].concat(addStudentFieldErrors.last_name).join(' ')}</span>
+              )}
             </label>
           </div>
         </section>
@@ -1218,13 +1667,16 @@ const submitAddStudentRequest = async () => {
               />
             </label>
 
-            <label>
+            <label className={addStudentFieldErrors.email ? 'field-error' : ''}>
               {t.email}
               <input
                 type="email"
                 value={addStudentForm.email}
                 onChange={(e) => handleAddStudentChange('email', e.target.value)}
               />
+              {addStudentFieldErrors.email && (
+                <span className="field-error-msg">{[].concat(addStudentFieldErrors.email).join(' ')}</span>
+              )}
             </label>
 
             <label>
@@ -1240,8 +1692,35 @@ const submitAddStudentRequest = async () => {
         <section className="modal-section">
           <h3>{t.housingPlacement}</h3>
 
+          {/* Central admin picks a region explicitly, loaded from the real
+              regions API (never hardcoded); regional staff see their own
+              region as a fixed, read-only value. */}
+          {isCentralAdmin() ? (
+            <div className="form-grid">
+              <label className={addStudentFieldErrors.region ? 'field-error' : ''}>
+                {t.region} *
+                <select
+                  value={addStudentForm.region}
+                  onChange={(e) => handleAddStudentChange('region', e.target.value)}
+                >
+                  <option value="">{t.selectRegion}</option>
+                  {addStudentRegions.map((r) => (
+                    <option key={r.id} value={r.id}>{r.name}</option>
+                  ))}
+                </select>
+                {addStudentFieldErrors.region && (
+                  <span className="field-error-msg">{[].concat(addStudentFieldErrors.region).join(' ')}</span>
+                )}
+              </label>
+            </div>
+          ) : (
+            <div className="readonly-region-badge">
+              {t.myRegionLabel}: <strong>{user?.region_name || '—'}</strong>
+            </div>
+          )}
+
           <div className="form-grid">
-            <label>
+            <label className={addStudentFieldErrors.gender ? 'field-error' : ''}>
               {t.gender} *
               <select
                 value={addStudentForm.gender}
@@ -1251,6 +1730,9 @@ const submitAddStudentRequest = async () => {
                 <option value="male">{t.male}</option>
                 <option value="female">{t.female}</option>
               </select>
+              {addStudentFieldErrors.gender && (
+                <span className="field-error-msg">{[].concat(addStudentFieldErrors.gender).join(' ')}</span>
+              )}
             </label>
 
             <label>
@@ -1267,19 +1749,23 @@ const submitAddStudentRequest = async () => {
               </select>
             </label>
 
-            <label>
+            <label className={addStudentFieldErrors.accepted_dorm_type ? 'field-error' : ''}>
               {t.dormType} *
               <select
                 value={addStudentForm.accepted_dorm_type}
                 onChange={(e) => handleAddStudentChange('accepted_dorm_type', e.target.value)}
+                disabled={isCentralAdmin() && !addStudentForm.region}
               >
-                <option value="">{t.selectDormType}</option>
-                {filterOptions?.dorm_types?.map((dt) => (
-                  <option key={dt.id} value={dt.id}>
-                    {dt.name}{dt.region_name ? ` — ${dt.region_name}` : ''}
-                  </option>
+                <option value="">
+                  {isCentralAdmin() && !addStudentForm.region ? t.selectRegionFirst : t.selectDormType}
+                </option>
+                {addStudentDormTypeOptions().map((dt) => (
+                  <option key={dt.id} value={dt.id}>{dt.name}</option>
                 ))}
               </select>
+              {addStudentFieldErrors.accepted_dorm_type && (
+                <span className="field-error-msg">{[].concat(addStudentFieldErrors.accepted_dorm_type).join(' ')}</span>
+              )}
             </label>
 
             <label>
@@ -1294,6 +1780,29 @@ const submitAddStudentRequest = async () => {
                 <option value="leaving">{t.leavingCategory}</option>
               </select>
             </label>
+
+            {/* Only required for students actually eligible for assignment -
+                a leaving student is exempt (mirrors the backend's
+                Student.is_assignment_eligible check). Choices are loaded
+                from Student.HousingType on the backend, never guessed from
+                gender - the employee must pick the real value. */}
+            {addStudentForm.category !== 'leaving' && (
+              <label className={addStudentFieldErrors.housing_type ? 'field-error' : ''}>
+                {t.housingType} *
+                <select
+                  value={addStudentForm.housing_type}
+                  onChange={(e) => handleAddStudentChange('housing_type', e.target.value)}
+                >
+                  <option value="">{t.selectHousingType}</option>
+                  {(filterOptions?.housing_types || []).map((h) => (
+                    <option key={h.id} value={h.id}>{h.name}</option>
+                  ))}
+                </select>
+                {addStudentFieldErrors.housing_type && (
+                  <span className="field-error-msg">{[].concat(addStudentFieldErrors.housing_type).join(' ')}</span>
+                )}
+              </label>
+            )}
           </div>
         </section>
 
@@ -1301,11 +1810,11 @@ const submitAddStudentRequest = async () => {
           <h3>{t.requestReason}</h3>
 
           <label>
-            {t.reason} *
+            {t.reason}
             <textarea
               value={addStudentForm.reason}
               onChange={(e) => handleAddStudentChange('reason', e.target.value)}
-              rows={4}
+              rows={3}
               placeholder={t.addStudentReasonPlaceholder}
             />
           </label>
@@ -1324,235 +1833,328 @@ const submitAddStudentRequest = async () => {
 
         <button
           type="button"
-          className="primary-btn"
-          onClick={submitAddStudentRequest}
-          disabled={
-            addStudentLoading ||
-            !addStudentForm.student_id ||
-            !addStudentForm.first_name ||
-            !addStudentForm.last_name ||
-            !addStudentForm.gender ||
-            !addStudentForm.accepted_dorm_type ||
-            !addStudentForm.reason
-          }
+          className="secondary-btn"
+          onClick={() => submitAddStudent('save')}
+          disabled={addStudentLoading}
         >
           {addStudentLoading ? t.creating : t.createAddStudentBtn}
+        </button>
+
+        <button
+          type="button"
+          className="primary-btn"
+          onClick={() => submitAddStudent('save_and_match')}
+          disabled={addStudentLoading}
+        >
+          {addStudentLoading ? t.creating : t.saveAndMatchBtn}
         </button>
       </div>
     </div>
   </div>
 )}
-{showAssignBed && selectedStudent && (
+{/* ============================================================
+    EDIT STUDENT MODAL
+============================================================ */}
+{showEditStudentModal && editStudentTarget && (
+  <div className="modal-overlay" onClick={closeEditStudentModal}>
+    <div
+      className={`modal-content xwide add-student-modal ${language === 'he' ? 'rtl' : ''}`}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="modal-header">
+        <div className="modal-title-row">
+          <div className="modal-icon blue"><User size={18} /></div>
+          <div>
+            <h2>{t.editStudentTitle}</h2>
+            <p className="modal-subtitle">{t.editStudentSubtitle}</p>
+          </div>
+        </div>
+        <button type="button" className="modal-close" onClick={closeEditStudentModal}>×</button>
+      </div>
+
+      <div className="modal-body">
+        {editStudentError && <div className="form-alert error">{editStudentError}</div>}
+        {editStudentSuccess && <div className="form-alert success">{editStudentSuccess}</div>}
+
+        <section className="modal-section">
+          <h3>{t.studentIdentity}</h3>
+          <div className="form-grid">
+            <label>
+              {t.studentId}
+              <input value={editStudentTarget.student_id || ''} disabled />
+            </label>
+            <label className={editStudentFieldErrors.first_name ? 'field-error' : ''}>
+              {t.firstName} *
+              <input value={editStudentForm.first_name} onChange={(e) => handleEditStudentChange('first_name', e.target.value)} />
+              {editStudentFieldErrors.first_name && (
+                <span className="field-error-msg">{[].concat(editStudentFieldErrors.first_name).join(' ')}</span>
+              )}
+            </label>
+            <label className={editStudentFieldErrors.last_name ? 'field-error' : ''}>
+              {t.lastName} *
+              <input value={editStudentForm.last_name} onChange={(e) => handleEditStudentChange('last_name', e.target.value)} />
+              {editStudentFieldErrors.last_name && (
+                <span className="field-error-msg">{[].concat(editStudentFieldErrors.last_name).join(' ')}</span>
+              )}
+            </label>
+          </div>
+        </section>
+
+        <section className="modal-section">
+          <h3>{t.contactInfo}</h3>
+          <div className="form-grid">
+            <label>
+              {t.phone}
+              <input value={editStudentForm.phone} onChange={(e) => handleEditStudentChange('phone', e.target.value)} />
+            </label>
+            <label className={editStudentFieldErrors.email ? 'field-error' : ''}>
+              {t.email}
+              <input type="email" value={editStudentForm.email} onChange={(e) => handleEditStudentChange('email', e.target.value)} />
+              {editStudentFieldErrors.email && (
+                <span className="field-error-msg">{[].concat(editStudentFieldErrors.email).join(' ')}</span>
+              )}
+            </label>
+            <label>
+              {t.city}
+              <input value={editStudentForm.city} onChange={(e) => handleEditStudentChange('city', e.target.value)} />
+            </label>
+          </div>
+        </section>
+
+        <section className="modal-section">
+          <h3>{t.housingPlacement}</h3>
+
+          {/* Region is authoritative via accepted_dorm_type - central admins
+              may re-point a student to any region; regional staff are
+              locked to their own region both here and, authoritatively, on
+              the backend (perform_update rejects any other region). */}
+          {isCentralAdmin() ? (
+            <div className="form-grid">
+              <label className={editStudentFieldErrors.region ? 'field-error' : ''}>
+                {t.region} *
+                <select value={editStudentForm.region} onChange={(e) => handleEditStudentChange('region', e.target.value)}>
+                  <option value="">{t.selectRegion}</option>
+                  {addStudentRegions.map((r) => (
+                    <option key={r.id} value={r.id}>{r.name}</option>
+                  ))}
+                </select>
+                {editStudentFieldErrors.region && (
+                  <span className="field-error-msg">{[].concat(editStudentFieldErrors.region).join(' ')}</span>
+                )}
+              </label>
+            </div>
+          ) : (
+            <div className="readonly-region-badge">
+              {t.myRegionLabel}: <strong>{user?.region_name || '—'}</strong>
+            </div>
+          )}
+
+          <div className="form-grid">
+            <label className={editStudentFieldErrors.gender ? 'field-error' : ''}>
+              {t.gender} *
+              <select value={editStudentForm.gender} onChange={(e) => handleEditStudentChange('gender', e.target.value)}>
+                <option value="">{t.selectGender}</option>
+                <option value="male">{t.male}</option>
+                <option value="female">{t.female}</option>
+              </select>
+              {editStudentFieldErrors.gender && (
+                <span className="field-error-msg">{[].concat(editStudentFieldErrors.gender).join(' ')}</span>
+              )}
+            </label>
+
+            <label>
+              {t.religion}
+              <select value={editStudentForm.requested_religion} onChange={(e) => handleEditStudentChange('requested_religion', e.target.value)}>
+                <option value="not_specified">{t.notSpecified}</option>
+                <option value="Jewish">{t.jewish}</option>
+                <option value="Muslims">{t.muslims}</option>
+                <option value="Christian">{t.christian}</option>
+                <option value="Druze">{t.druze}</option>
+              </select>
+            </label>
+
+            <label className={editStudentFieldErrors.accepted_dorm_type ? 'field-error' : ''}>
+              {t.dormType} *
+              <select
+                value={editStudentForm.accepted_dorm_type}
+                onChange={(e) => handleEditStudentChange('accepted_dorm_type', e.target.value)}
+                disabled={isCentralAdmin() && !editStudentForm.region}
+              >
+                <option value="">
+                  {isCentralAdmin() && !editStudentForm.region ? t.selectRegionFirst : t.selectDormType}
+                </option>
+                {editStudentDormTypeOptions().map((dt) => (
+                  <option key={dt.id} value={dt.id}>{dt.name}</option>
+                ))}
+              </select>
+              {editStudentFieldErrors.accepted_dorm_type && (
+                <span className="field-error-msg">{[].concat(editStudentFieldErrors.accepted_dorm_type).join(' ')}</span>
+              )}
+            </label>
+
+            <label>
+              {t.category}
+              <select value={editStudentForm.category} onChange={(e) => handleEditStudentChange('category', e.target.value)}>
+                <option value="new">{t.newCategory}</option>
+                <option value="continuing">{t.stayingCategory}</option>
+                <option value="transfer">{t.transferringCategory}</option>
+                <option value="leaving">{t.leavingCategory}</option>
+              </select>
+            </label>
+
+            {editStudentForm.category !== 'leaving' && (
+              <label className={editStudentFieldErrors.housing_type ? 'field-error' : ''}>
+                {t.housingType} *
+                <select value={editStudentForm.housing_type} onChange={(e) => handleEditStudentChange('housing_type', e.target.value)}>
+                  <option value="">{t.selectHousingType}</option>
+                  {(filterOptions?.housing_types || []).map((h) => (
+                    <option key={h.id} value={h.id}>{h.name}</option>
+                  ))}
+                </select>
+                {editStudentFieldErrors.housing_type && (
+                  <span className="field-error-msg">{[].concat(editStudentFieldErrors.housing_type).join(' ')}</span>
+                )}
+              </label>
+            )}
+          </div>
+        </section>
+      </div>
+
+      <div className="modal-footer">
+        <button type="button" className="secondary-btn" onClick={closeEditStudentModal} disabled={editStudentLoading}>
+          {t.cancel}
+        </button>
+        <button type="button" className="primary-btn" onClick={submitEditStudent} disabled={editStudentLoading}>
+          {editStudentLoading ? t.creating : t.saveEditStudentBtn}
+        </button>
+      </div>
+    </div>
+  </div>
+)}
+{showAssignBed && assignBedStudent && (
   <div className="modal-overlay" onClick={closeAssignBed}>
-    <div className="modal-content xwide" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-content xwide assign-bed-modal" onClick={(e) => e.stopPropagation()}>
+      {/* 1. Header */}
       <div className="modal-header-modern">
         <div className="modal-title-wrap">
           <div className="modal-icon" style={{ background: 'linear-gradient(135deg, #10b981, #059669)' }}>
             <BedDouble size={18} />
           </div>
           <div>
-            <h3>{selectedStudent.is_assigned ? 'Reassign Bed' : t.assignBedTitle}</h3>
-            <div style={{ fontSize: 13, color: '#64748b', fontWeight: 600 }}>
-              {getName(selectedStudent)} · {selectedStudent.student_id}
+            <h3>{assignBedStudent.is_assigned ? 'שיבוץ מיטה מחדש' : 'שיבוץ מיטה'}</h3>
+            <div className="assign-student-meta">
+              {getName(assignBedStudent)} · {assignBedStudent.student_id}
             </div>
-            {selectedStudent.is_assigned && (
-              <div className="reassign-warning">
-                ⚠ This student is already assigned. Selecting another room will end the current assignment.
-              </div>
-            )}
           </div>
         </div>
-        <button className="modal-close" onClick={closeAssignBed}><X size={20} /></button>
+        <button className="modal-close" onClick={closeAssignBed} aria-label="סגור"><X size={20} /></button>
       </div>
 
+      {/* 2. Student / current-assignment information */}
+      {assignBedStudent.is_assigned && (
+        <div className="current-assignment-banner">
+          <div className="cab-title">
+            <BedDouble size={13} />
+            שיבוץ נוכחי: בניין {assignBedStudent.assigned_building_number} → דירה {assignBedStudent.assigned_apartment_number} → חדר {assignBedStudent.assigned_room_name} → מיטה {assignBedStudent.current_bed_label}
+          </div>
+          <div className="cab-note">
+            <AlertTriangle size={13} /> השיבוץ הנוכחי יישמר עד שהשיבוץ החדש יושלם בהצלחה.
+          </div>
+        </div>
+      )}
+
+      {/* Region scope - central admins may search a region other than the
+          student's own home region (e.g. deliberate cross-region transfer);
+          regional employees never see this and stay locked to their own
+          authorized region on the backend regardless. */}
+      {isCentralAdmin() && (
+        <div className="assign-region-scope">
+          <span className="assign-region-scope-label">אזור חיפוש:</span>
+          <select
+            value={assignRegionOverride || assignBedStudent.region_id || ''}
+            onChange={(e) => handleAssignRegionChange(e.target.value)}
+            disabled={loadingBeds}
+          >
+            {(filterOptions?.regions || []).map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.name}
+                {String(r.id) === String(assignBedStudent.region_id) ? ' (אזור הבית של הסטודנט/ית)' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {/* 3-5. Summary, filters, recommended options, selected-option summary */}
       <div className="assign-modal-body">
-        {loadingBeds ? (
-          <div className="beds-loading">
-            <Loader2 size={24} className="spinner" />
-            <span>{t.loadingBeds}</span>
+        {assignBedBlockingField ? (
+          // A student-level field (housing type / region / category /
+          // eligibility) is missing or invalid - every candidate room would
+          // fail for the exact same reason, so show one clear blocking
+          // message instead of hundreds of repeated per-room conflicts.
+          <div className="assign-blocked-box">
+            <AlertTriangle size={28} />
+            <p className="assign-blocked-title">{t.assignBlockedTitle}</p>
+            <p className="assign-blocked-msg">{assignBedError || t.assignBlockedHousingType}</p>
+            <button
+              type="button"
+              className="assign-blocked-edit-btn"
+              onClick={() => {
+                const student = assignBedStudent;
+                closeAssignBed();
+                openEditStudent(student, { returnToAssign: true });
+              }}
+            >
+              <User size={14} /> {t.editStudentBtn}
+            </button>
           </div>
         ) : (
-          <div className="assign-two-col">
-            {/* LEFT — apartment list */}
-            <div className="assign-left">
-              <div className="beds-summary">
-                <BedDouble size={16} />
-                <strong>{apartmentGroups.length}</strong> apartments · {availableBeds.length} rooms available
-              </div>
-
-              <div className="quick-chips">
-                {[
-                  { v: 'all', l: 'All' },
-                  { v: 'ok', l: 'Best match' },
-                  { v: 'empty', l: 'Empty' },
-                  { v: 'warning', l: 'Warnings' },
-                  { v: 'mismatch', l: 'Conflicts' },
-                ].map(c => (
-                  <button
-                    key={c.v}
-                    className={`quick-chip ${bedMatchFilter === c.v ? 'active' : ''}`}
-                    onClick={() => setBedMatchFilter(c.v)}
-                  >
-                    {c.l}
-                  </button>
-                ))}
-              </div>
-
-              {filteredApartments.length === 0 ? (
-                <div className="no-beds">
-                  <BedDouble size={40} />
-                  <p>No matching apartments</p>
-                </div>
-              ) : (
-                <div className="rooms-list">
-                  {filteredApartments.map((apt) => {
-                    const isDisabled = !apt.is_selectable || apt.match === 'mismatch';
-                    const isSelected = selectedApartment?.key === apt.key;
-                    const aptStatus =
-                      apt.apartment_gender === 'empty' ? 'Apartment is empty' :
-                      apt.apartment_gender === 'male' ? 'Male apartment' :
-                      apt.apartment_gender === 'female' ? 'Female apartment' :
-                      'Mixed apartment';
-
-                    return (
-                      <button
-                        key={apt.key}
-                        type="button"
-                        disabled={isDisabled}
-                        className={`room-card match-${apt.match} ${isSelected ? 'selected' : ''} ${isDisabled ? 'disabled' : ''}`}
-                        onClick={() => {
-                          if (isDisabled) return;
-                          setSelectedApartment(apt);
-                          setSelectedRoomInApt(null);
-                        }}
-                      >
-                        {recommendedKeys.has(apt.key) && (
-                          <div className="rec-tag">
-                            ⭐ {apt._hasRoommateMatch ? 'Roommate request match' : 'Recommended'}
-                          </div>
-                        )}
-                        <div className="room-card-head">
-                          <div className="room-loc">
-                            <span className="rc-building">Building {apt.building}</span>
-                            <span className="rc-sep">·</span>
-                            <span>Apartment {apt.apartment}</span>
-                          </div>
-                          <span className="rc-beds-badge">{apt.free_beds} free</span>
-                        </div>
-                        {apt.dorm_type && <div className="rc-dorm">{apt.dorm_type}</div>}
-                        <div className="rc-status">
-                          {apt.available_rooms.length} available room{apt.available_rooms.length !== 1 ? 's' : ''}
-                          {apt.apartment_residents.length > 0 && ` · ${apt.apartment_residents.length} resident${apt.apartment_residents.length !== 1 ? 's' : ''}`}
-                        </div>
-                        <div className="rc-status" style={{ marginTop: 4 }}>{aptStatus}</div>
-                        {apt.known_religions.length > 0 && (
-                          <div className="rc-religion">{apt.known_religions.join(', ')}</div>
-                        )}
-                        {apt.unknown_religion_count > 0 && (
-                          <div className="rc-religion-warn">{apt.unknown_religion_count} unknown religion</div>
-                        )}
-                        {apt.match === 'mismatch' && (
-                          <div className="rc-tag red">Cannot assign here</div>
-                        )}
-                        {apt.match === 'warning' && (
-                          <div className="rc-tag yellow">⚠ Please verify manually</div>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* RIGHT — details panel */}
-            <div className="assign-right">
-              {!selectedApartment ? (
-                <div className="rp-empty">
-                  <BedDouble size={48} />
-                  <p>Select an apartment from the list</p>
-                </div>
-              ) : (
-                <>
-                  <div className="rp-head">
-                    <div className="rp-title">Building {selectedApartment.building} · Apartment {selectedApartment.apartment}</div>
-                    <div className="rp-meta">
-                      <span>{selectedApartment.free_beds} free beds</span>
-                      {selectedApartment.dorm_type && <span>{selectedApartment.dorm_type}</span>}
-                    </div>
-                  </div>
-
-                  {selectedApartment.warnings.length > 0 && (
-                    <div className={`rp-warning ${selectedApartment.match === 'mismatch' ? 'red' : 'yellow'}`}>
-                      {selectedApartment.warnings.join(' · ')}
-                    </div>
-                  )}
-
-                  <div className="rp-section-title">
-                    Current Residents ({selectedApartment.apartment_residents.length})
-                  </div>
-                  {selectedApartment.apartment_residents.length > 0 ? (
-                    <div className="rp-residents" style={{ marginBottom: 16 }}>
-                      {selectedApartment.apartment_residents.map((r) => (
-                        <div key={r.id} className="rp-resident">
-                          <div className="rp-resident-top">
-                            <strong>{r.full_name}</strong>
-                            <span className="rp-resident-id">{r.student_id}</span>
-                          </div>
-                          <div className="rp-resident-tags">
-                            <span>{r.city || 'No city'}</span>
-                            <span>{r.gender_display || r.gender}</span>
-                            <span className={r.religion === 'not_specified' ? 'unknown' : ''}>
-                              {r.religion === 'not_specified' ? 'Unknown religion' : r.religion_display}
-                            </span>
-                            <span>Room {r.room_name} · {r.bed_label}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="rp-empty-state" style={{ marginBottom: 16 }}>
-                      Apartment is empty — no current residents
-                    </div>
-                  )}
-
-                  <div className="rp-section-title">Choose a Room</div>
-                  <div className="rp-rooms">
-                    {selectedApartment.available_rooms.map((room) => {
-                      const isPicked = selectedRoomInApt?.room_id === room.room_id;
-                      return (
-                        <button
-                          key={room.room_id}
-                          type="button"
-                          className={`rp-room-pick ${isPicked ? 'picked' : ''}`}
-                          onClick={() => setSelectedRoomInApt(room)}
-                        >
-                          <div className="rp-room-name">Room {room.room_name}</div>
-                          <div className="rp-room-meta">{room.available_beds} free bed{room.available_beds !== 1 ? 's' : ''}</div>
-                          {isPicked && <div className="rp-room-check">✓ Selected</div>}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
+          <BedMatchPicker
+            buildings={availableBuildings}
+            totalBuildings={bedResultMeta.total_buildings}
+            totalApartments={bedResultMeta.total_apartments}
+            totalRooms={bedResultMeta.total_rooms}
+            totalValidBeds={bedResultMeta.total_valid_beds}
+            counts={bedResultMeta.counts}
+            dataIntegrity={bedResultMeta.data_integrity}
+            conflictExamples={bedResultMeta.conflict_examples}
+            loading={loadingBeds}
+            loadingMore={loadingMoreBeds}
+            hasMore={bedResultMeta.has_more}
+            onLoadMore={loadMoreBeds}
+            loadMoreError={loadMoreBedsError}
+            selectedBedId={selectedRoomInApt?.bed_id}
+            onSelectBed={(bed) => setSelectedRoomInApt(bed)}
+            language="he"
+            error={assignBedError && availableBuildings.length === 0 ? assignBedError : ''}
+            onRetry={retryLoadBeds}
+          />
         )}
 
-        {assignBedError && <div className="msg error-msg">{assignBedError}</div>}
+        {!assignBedBlockingField && assignBedError && availableBuildings.length > 0 && <div className="msg error-msg">{assignBedError}</div>}
         {assignBedSuccess && <div className="msg success-msg">{assignBedSuccess}</div>}
       </div>
 
+      {/* 6. Sticky action footer */}
       <div className="assign-action-bar">
-        <button className="btn-secondary" onClick={closeAssignBed} disabled={assigningBed}>{t.cancel}</button>
+        <button className="btn-secondary" onClick={closeAssignBed} disabled={assigningBed}>ביטול</button>
         <button
           className="btn-assign"
           onClick={submitAssignBed}
-          disabled={assigningBed || !selectedRoomInApt || !!assignBedSuccess}
+          disabled={assigningBed || !selectedRoomInApt || !selectedRoomInApt.is_selectable || !!assignBedSuccess}
         >
-          {assigningBed
-            ? <Loader2 size={16} className="spinner" />
-            : <><BedDouble size={16} /> {selectedRoomInApt ? `Assign to Room ${selectedRoomInApt.room_name}` : 'Select a room first'}</>}
+          {assigningBed ? (
+            <Loader2 size={16} className="spinner" />
+          ) : (
+            <>
+              <BedDouble size={16} />
+              {!selectedRoomInApt
+                ? 'בחר מיטה תחילה'
+                : assignBedStudent.is_assigned
+                  ? assignActionLabel(selectedRoomInApt).replace('שבץ ', 'שבץ מחדש ')
+                  : assignActionLabel(selectedRoomInApt)}
+            </>
+          )}
         </button>
       </div>
     </div>
@@ -1565,7 +2167,8 @@ const submitAddStudentRequest = async () => {
         filters={activeFilters}
         onFiltersChange={(next) => setActiveFilters(next)}
         filterOptions={filterOptions}
-        totalCount={list.length}
+        totalCount={listTotal}
+        language={language}
       />
 
       <style>{`
@@ -1624,6 +2227,16 @@ const submitAddStudentRequest = async () => {
         .clear-filters-btn { padding: 11px 28px; background: transparent; color: #2563eb; border: 1px solid #bfdbfe; border-radius: 12px; font-family: inherit; font-weight: 700; font-size: 14px; cursor: pointer; }
         .clear-filters-btn:hover { background: #eff6ff; }
         .results-grid { display: flex; flex-direction: column; gap: 10px; }
+        .result-row-skeleton { background: white; border-radius: 14px; padding: 14px 18px; display: flex; align-items: center; gap: 14px; border: 1px solid #f1f5f9; }
+        .skel-avatar { width: 44px; height: 44px; border-radius: 12px; flex-shrink: 0; background: linear-gradient(90deg,#f1f5f9 25%,#e2e8f0 37%,#f1f5f9 63%); background-size: 400% 100%; animation: skel-shimmer 1.4s ease infinite; }
+        .skel-lines { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+        .skel-line { height: 12px; border-radius: 6px; background: linear-gradient(90deg,#f1f5f9 25%,#e2e8f0 37%,#f1f5f9 63%); background-size: 400% 100%; animation: skel-shimmer 1.4s ease infinite; }
+        .skel-line-wide { width: 45%; }
+        .skel-line-narrow { width: 25%; }
+        @keyframes skel-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+        .load-more-students-btn { align-self: center; margin-top: 16px; border: 1px solid #e2e8f0; background: white; border-radius: 999px; padding: 10px 28px; font-size: 14px; font-weight: 700; cursor: pointer; color: #334155; font-family: inherit; display: flex; align-items: center; gap: 8px; }
+        .load-more-students-btn:hover { background: #f8fafc; }
+        .load-more-students-btn:disabled { opacity: 0.6; cursor: not-allowed; }
         .result-row { background: white; border-radius: 14px; padding: 14px 18px; display: flex; align-items: center; gap: 14px; cursor: pointer; border: 1px solid #f1f5f9; transition: all 0.15s; }
         .result-row:hover { border-color: #3d9fe0; box-shadow: 0 4px 14px rgba(61,159,224,0.10); transform: translateY(-1px); }
         .result-row.removed { border-color: #fecaca; background: #fff8f8; opacity: 0.85; }
@@ -1653,8 +2266,8 @@ const submitAddStudentRequest = async () => {
         .hero-card.hero-removed { background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%); box-shadow: 0 10px 30px rgba(220,38,38,0.20); }
         .hero-card::before { content: ''; position: absolute; top: -50%; right: -10%; width: 400px; height: 400px; background: radial-gradient(circle, rgba(255,255,255,0.08) 0%, transparent 70%); pointer-events: none; }
         .hero-top-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; position: relative; flex-wrap: wrap; gap: 10px; }
-        .back-pill, .add-request-pill, .assign-bed-pill { display: inline-flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.18); color: white; border: 1px solid rgba(255,255,255,0.32); padding: 9px 16px; border-radius: 12px; font-size: 14px; font-weight: 700; font-family: inherit; cursor: pointer; backdrop-filter: blur(10px); transition: all 0.15s; }
-        .back-pill:hover, .add-request-pill:hover, .assign-bed-pill:hover { background: rgba(255,255,255,0.28); }
+        .back-pill, .add-request-pill, .assign-bed-pill, .edit-student-pill { display: inline-flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.18); color: white; border: 1px solid rgba(255,255,255,0.32); padding: 9px 16px; border-radius: 12px; font-size: 14px; font-weight: 700; font-family: inherit; cursor: pointer; backdrop-filter: blur(10px); transition: all 0.15s; }
+        .back-pill:hover, .add-request-pill:hover, .assign-bed-pill:hover, .edit-student-pill:hover { background: rgba(255,255,255,0.28); }
         .assign-bed-pill { background: rgba(16,185,129,0.25); border-color: rgba(16,185,129,0.5); }
         .assign-bed-pill:hover { background: rgba(16,185,129,0.4) !important; }
         .hero-body { display: flex; gap: 28px; justify-content: space-between; align-items: flex-start; position: relative; flex-wrap: wrap; }
@@ -1854,6 +2467,56 @@ const submitAddStudentRequest = async () => {
                 font-weight: 700;
                 max-width: 520px;
               }
+        .assign-student-meta { font-size: 14px; color: #64748b; font-weight: 700; margin-top: 2px; }
+        .current-assignment-banner {
+          margin: 0 22px 12px;
+          padding: 12px 16px;
+          background: #fff7ed;
+          border: 1px solid #fed7aa;
+          border-radius: 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+        .cab-title {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          font-size: 14px;
+          font-weight: 800;
+          color: #9a3412;
+        }
+        .cab-note {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 12px;
+          font-weight: 700;
+          color: #c2410c;
+        }
+        .assign-region-scope {
+          margin: 0 22px 12px;
+          padding: 10px 16px;
+          background: #eff6ff;
+          border: 1px solid #bfdbfe;
+          border-radius: 12px;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .assign-region-scope-label { font-size: 13px; font-weight: 800; color: #1d4ed8; white-space: nowrap; }
+        .assign-region-scope select {
+          flex: 1;
+          border: 1px solid #93c5fd;
+          border-radius: 8px;
+          padding: 7px 10px;
+          font-size: 13px;
+          font-weight: 700;
+          color: #1e3a8a;
+          background: white;
+          font-family: inherit;
+        }
+        .assign-region-scope select:disabled { opacity: 0.6; cursor: not-allowed; }
         .bed-option.selected.match-warning { border-color: #ea580c; background: #fff7ed; }
                 .bed-option.disabled {
           opacity: 0.55;
@@ -1977,6 +2640,12 @@ const submitAddStudentRequest = async () => {
         .modal-content.xwide { max-width: 1100px; }
  .modal-content.xwide { max-width: 1100px; max-height: 92vh; display: flex; flex-direction: column; }
 .assign-modal-body { padding: 16px 22px 0; flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.assign-blocked-box { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 48px 20px; color: #b91c1c; text-align: center; }
+.assign-blocked-title { font-weight: 800; font-size: 16px; margin: 0; }
+.assign-blocked-msg { font-size: 14px; color: #7f1d1d; margin: 0; max-width: 420px; }
+.assign-blocked-edit-btn { display: flex; align-items: center; gap: 6px; margin-top: 8px; border: none; background: #1d4ed8; color: white; border-radius: 10px; padding: 10px 20px; font-size: 13px; font-weight: 700; cursor: pointer; font-family: inherit; }
+.assign-blocked-edit-btn:hover { background: #1e40af; }
+.field-missing-badge { background: #fef2f2; color: #b91c1c; border: 1px solid #fca5a5; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 700; }
 .assign-two-col { display: grid; grid-template-columns: 1.1fr 1fr; gap: 18px; flex: 1; min-height: 0; }
 .assign-left { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .rooms-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; padding-right: 4px; flex: 1; min-height: 0; }
@@ -2134,11 +2803,44 @@ const submitAddStudentRequest = async () => {
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
+.add-student-modal select:disabled {
+  background: #f1f5f9;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.add-student-modal label.field-error input,
+.add-student-modal label.field-error select {
+  border-color: #dc2626;
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.1);
+}
+
+.add-student-modal .field-error-msg {
+  font-size: 12px;
+  font-weight: 600;
+  color: #dc2626;
+}
+
+.add-student-modal .readonly-region-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 16px;
+}
+
 .add-student-modal .modal-footer {
   padding: 18px 24px;
   border-top: 1px solid #e5e7eb;
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 12px;
   background: white;
 }

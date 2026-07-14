@@ -14,6 +14,7 @@ router.register(r'apartments', views.ApartmentViewSet, basename='apartment')
 router.register(r'rooms', views.RoomViewSet, basename='room')
 router.register(r'students', views.StudentViewSet, basename='student')
 router.register(r'transfers', views.TransferViewSet, basename='transfer')
+router.register(r'requests', views.StudentRequestViewSet, basename='student-request')
 
 urlpatterns = [
     # Authentication

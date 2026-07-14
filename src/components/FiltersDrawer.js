@@ -8,8 +8,14 @@ export default function FiltersDrawer({
   onFiltersChange,
   filterOptions,
   totalCount,
+  language = 'he',
 }) {
   if (!filterOptions) return null;
+
+  // In RTL (Hebrew) the main navigation sidebar already occupies the RIGHT
+  // edge - the filters drawer must slide in from the LEFT so the two never
+  // overlap. In LTR (English) it keeps its original right-side behavior.
+  const isRtl = language === 'he';
 
   const isCentralAdmin = filterOptions.is_central_admin;
 
@@ -240,17 +246,17 @@ export default function FiltersDrawer({
         style={{
           position: 'fixed',
           top: 0,
-          right: 0,
+          [isRtl ? 'left' : 'right']: 0,
           height: '100%',
           width: '380px',
           maxWidth: '90vw',
           background: 'white',
           zIndex: 50,
-          transform: isOpen ? 'translateX(0)' : 'translateX(100%)',
+          transform: isOpen ? 'translateX(0)' : `translateX(${isRtl ? '-100%' : '100%'})`,
           transition: 'transform 0.28s cubic-bezier(0.4,0,0.2,1)',
           display: 'flex',
           flexDirection: 'column',
-          boxShadow: '-8px 0 32px rgba(15,23,42,0.12)',
+          boxShadow: isRtl ? '8px 0 32px rgba(15,23,42,0.12)' : '-8px 0 32px rgba(15,23,42,0.12)',
         }}
       >
         <div
@@ -363,8 +369,10 @@ export default function FiltersDrawer({
               <MultiDropdown
                 placeholder="Select religion"
                 options={(filterOptions.religions || []).map((r) => ({
-                  value: r,
-                  label: r,
+                  // filter-options returns {id, name} objects; the API must
+                  // receive the id (backend choice code), never the label.
+                  value: typeof r === 'object' ? r.id : r,
+                  label: typeof r === 'object' ? r.name : r,
                 }))}
                 selected={filters.religions || []}
                 onToggle={(v) => toggle('religions', v)}
