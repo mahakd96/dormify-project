@@ -819,13 +819,36 @@ class StudentViewSet(viewsets.ModelViewSet):
                 Q(business_partner_id__icontains=search)
             )
 
-        gender = self.request.query_params.get('gender')
-        if gender and gender != 'all':
-            queryset = queryset.filter(gender=gender)
+        # Multi-value filter params: accepts repeated params AND comma-joined
+        # values (?gender=male,female or ?gender=male&gender=female). 'all'
+        # and empties are dropped. Values are validated against model
+        # choices / cast where applicable - invalid input filters nothing
+        # extra rather than erroring.
+        def _csv_params(name):
+            values = []
+            for chunk in self.request.query_params.getlist(name):
+                values.extend(
+                    v.strip() for v in str(chunk).split(',')
+                    if v.strip() and v.strip() != 'all'
+                )
+            return values
 
-        requested_religion = self.request.query_params.get('requested_religion')
-        if requested_religion and requested_religion != 'all':
-            queryset = queryset.filter(requested_religion=requested_religion)
+        def _int_params(name):
+            out = []
+            for v in _csv_params(name):
+                try:
+                    out.append(int(v))
+                except (TypeError, ValueError):
+                    pass
+            return out
+
+        genders = [v for v in _csv_params('gender') if v in Student.Gender.values]
+        if genders:
+            queryset = queryset.filter(gender__in=genders)
+
+        religions = [v for v in _csv_params('requested_religion') if v in Student.Religion.values]
+        if religions:
+            queryset = queryset.filter(requested_religion__in=religions)
 
         religious = self.request.query_params.get('religious')
         if religious and religious != 'all':
@@ -835,6 +858,28 @@ class StudentViewSet(viewsets.ModelViewSet):
         if placement_sector and placement_sector != 'all':
             queryset = queryset.filter(placement_sector=placement_sector)
 
+        # Location filters (FiltersDrawer). Region PKs are slugs; the rest
+        # are integer PKs. Regional users are already hard-scoped above.
+        regions = _csv_params('region')
+        if regions:
+            queryset = queryset.filter(accepted_dorm_type__region_id__in=regions)
+
+        dorm_types = _int_params('dorm_type')
+        if dorm_types:
+            queryset = queryset.filter(accepted_dorm_type_id__in=dorm_types)
+
+        buildings = _int_params('building')
+        if buildings:
+            queryset = queryset.filter(assigned_room__apartment__building_id__in=buildings)
+
+        apartments = _int_params('apartment')
+        if apartments:
+            queryset = queryset.filter(assigned_room__apartment_id__in=apartments)
+
+        rooms = _int_params('room')
+        if rooms:
+            queryset = queryset.filter(assigned_room_id__in=rooms)
+
         status_filter = self.request.query_params.get('status')
         if status_filter == 'assigned':
             queryset = queryset.filter(assigned_room__isnull=False)
@@ -842,6 +887,15 @@ class StudentViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(assigned_room__isnull=True)
         elif status_filter == 'priority':
             queryset = queryset.filter(is_priority=True)
+
+        has_roommate = self.request.query_params.get('has_roommate_request')
+        if has_roommate in ('yes', 'no'):
+            roommate_q = (
+                Q(roommate_request_1__gt='') | Q(roommate_request_2__gt='') |
+                Q(roommate_request_3__gt='') | Q(roommate_request_4__gt='') |
+                Q(roommate_request_5__gt='')
+            )
+            queryset = queryset.filter(roommate_q) if has_roommate == 'yes' else queryset.exclude(roommate_q)
 
         category = self.request.query_params.get('category')
         if category and category != 'all':
