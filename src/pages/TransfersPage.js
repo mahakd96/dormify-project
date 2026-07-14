@@ -7,7 +7,7 @@ import {
   Home, DoorOpen, FileText, MapPin, Building2, BedDouble,
   Clock, CheckCircle, XCircle, ChevronDown, ChevronUp,
   User, Calendar, Activity, UserPlus, UserMinus,
-  Hash, Star, RefreshCw, ArrowRight, ArrowLeft,
+  Hash, Star, RefreshCw, ArrowRight, ArrowLeft, ArrowRightLeft,
   Eye, Inbox, Circle,
 } from 'lucide-react';
 
@@ -36,6 +36,14 @@ const TYPE_CFG = {
   remove_student: { color:'rose',   labelHe:'הסרה ממעונות', labelEn:'Remove Student',   Icon: UserMinus },
   swap:           { color:'indigo', labelHe:'חילוף בין סטודנטים', labelEn:'Student Swap', Icon: RefreshCw },
 };
+// Cross-region transfers are stored as room/apartment + transfer_scope -
+// but must never be LABELED "מעבר מדירה"; the scope is the meaningful type.
+const TYPE_CFG_CROSS = { color:'violet', labelHe:'מעבר לאזור אחר', labelEn:'Cross-region Transfer', Icon: MapPin };
+const typeCfgFor = (request) =>
+  (request?.transfer_scope === 'cross_region'
+    && (request.request_type === 'room' || request.request_type === 'apartment'))
+    ? TYPE_CFG_CROSS
+    : (TYPE_CFG[request?.request_type] || TYPE_CFG.other);
 const STATUS_CFG = {
   pending:  { color:'amber', labelHe:'ממתינה', labelEn:'Pending',  Icon: Clock       },
   approved: { color:'green', labelHe:'אושרה',  labelEn:'Approved', Icon: CheckCircle },
@@ -396,28 +404,32 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions =
   const central = isCentralAdmin();
   const [step, setStep] = useState(0);
   const [student, setStudent] = useState(null);
-  const [sameApt, setSameApt] = useState(null);
   const [reason, setReason] = useState('');
   const [otherDesc, setOtherDesc] = useState('');
   const [selOpt, setSelOpt] = useState(null);
-  // Transfer scope: regional users are hard-locked to a same-region
-  // transfer (the backend enforces this independently of the UI).
-  const [scope, setScope] = useState('same_region');
+  // Unified transfer scope: same_apartment / same_region / cross_region.
+  // Cross-region creation is central-admin only - the backend enforces
+  // this independently of the UI (serializer PermissionDenied).
+  const [scope, setScope] = useState(null);
   const [destRegions, setDestRegions] = useState([]);
   const [regionQuery, setRegionQuery] = useState('');
 
-  const isRoom = type==='room';
-  const isTransfer = type==='room' || type==='apartment';
-  const colorKey = type==='room'?'violet':type==='apartment'?'teal':'amber';
+  const isTransfer = type==='transfer';
+  const colorKey = isTransfer?'violet':'amber';
 
-  // Step KEYS (not indices) so room/apartment/other flows stay readable.
-  const stepKeys = isRoom
-    ? ['student','scope','pref','options','confirm']
-    : isTransfer
-      ? ['student','scope','details','options','confirm']
-      : ['student','details','confirm'];
+  // The three scopes map onto existing backend request fields only:
+  //   same_apartment -> room      + same_apartment=true
+  //   same_region    -> apartment + same_apartment=false + scope same_region
+  //   cross_region   -> apartment + scope cross_region + destination_regions
+  const effReqType  = scope==='same_apartment' ? 'room' : 'apartment';
+  const effSameApt  = scope==='same_apartment' ? true : scope==='same_region' ? false : null;
+  const effScope    = scope==='cross_region' ? 'cross_region' : 'same_region';
+
+  const stepKeys = isTransfer
+    ? ['student','scope','details','options','confirm']
+    : ['student','details','confirm'];
   const stepLabels = {
-    student:'בחר סטודנט', scope:'סוג מעבר', pref:'העדפה', details:'פרטים',
+    student:'בחר סטודנט', scope:'סוג מעבר', details:'פרטים',
     options:'אפשרויות', confirm:'אישור',
   };
   const steps = stepKeys.map(k=>stepLabels[k]);
@@ -430,27 +442,26 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions =
     if (!isTransfer) return;
     setSelOpt(null);
     if (onClearFeas) onClearFeas();
-    // Staying in the same apartment is impossible when moving regions.
-    if (scope==='cross_region' && sameApt===true) setSameApt(null);
-  }, [scope, destRegions, sameApt, student]); // eslint-disable-line
+  }, [scope, destRegions, student]); // eslint-disable-line
 
   const canNext = () => {
     if (stepKey==='student') return !!student;
-    if (stepKey==='scope') return scope==='same_region' || destRegions.length>0;
-    if (stepKey==='pref') return reason.trim().length>0;
+    if (stepKey==='scope') return !!scope && (scope!=='cross_region' || destRegions.length>0);
     if (stepKey==='details') return reason.trim().length>0;
     if (stepKey==='options') return !!selOpt;
     return true;
   };
 
-  const toggleDestRegion = (id) => {
-    setDestRegions(prev => prev.includes(id) ? prev.filter(r=>r!==id) : [...prev, id]);
-  };
   const visibleRegions = regions.filter(r =>
     !regionQuery.trim() || (r.name||'').toLowerCase().includes(regionQuery.trim().toLowerCase()));
   const destRegionNames = regions.filter(r=>destRegions.includes(r.id)).map(r=>r.name);
   const currentRegionLabel = student?.region_name || 'האזור הנוכחי של הסטודנט';
   const searchedRegionNames = (feasData?.search_regions||[]).map(r=>r.name);
+  const scopeLabel = {
+    same_apartment:'בתוך אותה דירה',
+    same_region:'לדירה אחרת באותו אזור',
+    cross_region:'לאזור אחר',
+  }[scope] || '';
 
   return (
     <div className="wz-root">
@@ -485,74 +496,57 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions =
 
         {stepKey==='scope' && (<>
           <h3 className="wz-title">סוג המעבר</h3>
-          {central ? (
-            <>
-              <div className="pref-group">
-                {[{v:'same_region',l:'מעבר בתוך האזור הנוכחי'},{v:'cross_region',l:'מעבר לאזור אחר'}].map(o=>(
-                  <button key={o.v} type="button"
-                    className={`pref-btn${scope===o.v?' pref-active':''}`}
-                    onClick={()=>setScope(o.v)}>{o.l}</button>
-                ))}
-              </div>
-              {scope==='same_region' && (
-                <div className="scope-region-note">
-                  <MapPin size={13}/> אזור יעד: <strong>{currentRegionLabel}</strong>
-                  <span className="scope-region-hint">נבחר אוטומטית - האזור הנוכחי של הסטודנט</span>
-                </div>
-              )}
-              {scope==='cross_region' && (
-                <div className="region-ms">
-                  <label className="region-ms-label">אזורי יעד<span className="req">*</span> (ניתן לבחור יותר מאחד)</label>
-                  <div className="region-ms-search">
-                    <Search size={12}/>
-                    <input value={regionQuery} onChange={e=>setRegionQuery(e.target.value)} placeholder="חיפוש אזור..."/>
-                  </div>
-                  <div className="region-ms-list">
-                    {visibleRegions.map(r=>(
-                      <label key={r.id} className={`region-ms-row${destRegions.includes(r.id)?' region-ms-on':''}`}>
-                        <input type="checkbox" checked={destRegions.includes(r.id)} onChange={()=>toggleDestRegion(r.id)}/>
-                        <span>{r.name}</span>
-                        {student?.region_name===r.name && <span className="region-ms-cur">(האזור הנוכחי)</span>}
-                      </label>
-                    ))}
-                    {visibleRegions.length===0 && <div className="region-ms-empty">לא נמצאו אזורים</div>}
-                  </div>
-                  {destRegions.length>0 && (
-                    <div className="region-ms-picked">נבחרו: <strong>{destRegionNames.join(', ')}</strong></div>
-                  )}
-                </div>
-              )}
-            </>
-          ) : (
-            // Regional staff: transfer type is FIXED to same-region and the
-            // region is read-only. The backend rejects anything else anyway.
-            <>
-              <div className="pref-group">
-                <button type="button" className="pref-btn pref-active" disabled>מעבר בתוך האזור הנוכחי</button>
-              </div>
-              <div className="scope-region-note">
-                <MapPin size={13}/> אזור: <strong>{user?.region_name || user?.regionName || currentRegionLabel}</strong>
-                <span className="scope-region-hint">משתמש אזורי רשאי לבצע מעברים בתוך האזור המורשה בלבד</span>
-              </div>
-            </>
-          )}
-        </>)}
-
-        {stepKey==='pref' && (<>
-          <h3 className="wz-title">העדפת מיקום</h3>
           <div className="pref-group">
-            {[{v:true,l:'באותה דירה'},{v:false,l:'בדירה אחרת'},{v:null,l:'לא משנה'}].map(o=>(
-              <button key={String(o.v)} type="button"
-                className={`pref-btn${sameApt===o.v?' pref-active':''}`}
-                disabled={scope==='cross_region' && o.v===true}
-                onClick={()=>setSameApt(o.v)}>{o.l}</button>
+            {[
+              {v:'same_apartment', l:'בתוך אותה דירה'},
+              {v:'same_region',    l:'לדירה אחרת באותו אזור'},
+              {v:'cross_region',   l:'לאזור אחר', centralOnly:true},
+            ].map(o=>(
+              <button key={o.v} type="button"
+                className={`pref-btn${scope===o.v?' pref-active':''}`}
+                disabled={o.centralOnly && !central}
+                title={o.centralOnly && !central ? 'רק מנהל מרכזי יכול ליצור מעבר לאזור אחר' : undefined}
+                onClick={()=>setScope(o.v)}>{o.l}</button>
             ))}
           </div>
-          {scope==='cross_region' && <div className="scope-region-hint" style={{marginTop:6}}>במעבר לאזור אחר לא ניתן להישאר באותה דירה</div>}
-          <div className="wz-field" style={{marginTop:14}}>
-            <label>סיבת הבקשה<span className="req">*</span></label>
-            <textarea rows={3} value={reason} onChange={e=>setReason(e.target.value)} placeholder="הסבר מדוע הסטודנט מבקש להחליף חדר..."/>
-          </div>
+          {(scope==='same_apartment' || scope==='same_region') && (
+            <div className="scope-region-note">
+              <MapPin size={13}/> אזור יעד: <strong>{central ? currentRegionLabel : (user?.region_name || user?.regionName || currentRegionLabel)}</strong>
+              <span className="scope-region-hint">
+                {scope==='same_apartment'
+                  ? 'מעבר לחדר/מיטה אחרת בתוך הדירה הנוכחית'
+                  : 'נבחר אוטומטית - האזור הנוכחי של הסטודנט'}
+              </span>
+            </div>
+          )}
+          {!central && (
+            <div className="scope-region-note">
+              <MapPin size={13}/>
+              <span className="scope-region-hint">משתמש אזורי רשאי לבצע מעברים בתוך האזור המורשה בלבד; מעבר לאזור אחר מוגש על ידי מנהל מרכזי</span>
+            </div>
+          )}
+          {scope==='cross_region' && central && (
+            <div className="region-ms">
+              <label className="region-ms-label">אזור יעד<span className="req">*</span></label>
+              <div className="region-ms-search">
+                <Search size={12}/>
+                <input value={regionQuery} onChange={e=>setRegionQuery(e.target.value)} placeholder="חיפוש אזור..."/>
+              </div>
+              <div className="region-ms-list">
+                {visibleRegions.map(r=>(
+                  <label key={r.id} className={`region-ms-row${destRegions.includes(r.id)?' region-ms-on':''}`}>
+                    <input type="radio" name="dest-region" checked={destRegions.includes(r.id)} onChange={()=>setDestRegions([r.id])}/>
+                    <span>{r.name}</span>
+                    {student?.region_name===r.name && <span className="region-ms-cur">(האזור הנוכחי)</span>}
+                  </label>
+                ))}
+                {visibleRegions.length===0 && <div className="region-ms-empty">לא נמצאו אזורים</div>}
+              </div>
+              {destRegions.length>0 && (
+                <div className="region-ms-picked">נבחר: <strong>{destRegionNames.join(', ')}</strong></div>
+              )}
+            </div>
+          )}
         </>)}
 
         {stepKey==='details' && (<>
@@ -574,12 +568,13 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions =
           <div className="scope-region-note">
             <MapPin size={13}/>
             {scope==='cross_region'
-              ? <>אזורי יעד: <strong>{(searchedRegionNames.length?searchedRegionNames:destRegionNames).join(', ')}</strong></>
+              ? <>אזור יעד: <strong>{(searchedRegionNames.length?searchedRegionNames:destRegionNames).join(', ')}</strong></>
               : <>אזור יעד: <strong>{searchedRegionNames[0] || currentRegionLabel}</strong></>}
+            {scope==='same_apartment' && <span className="scope-region-hint">מוצגות מיטות פנויות בדירה הנוכחית בלבד</span>}
           </div>
           {!feasData && !checkingFeas && (
             <button className="check-feas-btn"
-              onClick={()=>onCheckFeas(null,student?.id,type,sameApt,scope,scope==='cross_region'?destRegions:undefined)}>
+              onClick={()=>onCheckFeas(null,student?.id,effReqType,effSameApt,effScope,scope==='cross_region'?destRegions:undefined)}>
               <Activity size={14}/> בדיקת אפשרויות שיבוץ
             </button>
           )}
@@ -602,6 +597,7 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions =
               selectedBedId={selOpt?.bed_id}
               onSelectBed={setSelOpt}
               language="he"
+              scopeContext={scope}
             />
           )}
         </>)}
@@ -611,8 +607,8 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions =
           <div className="wz-summary">
             <div className="sum-row"><span className="sum-k">סטודנט</span><span className="sum-v">{student?.full_name}</span></div>
             <div className="sum-row"><span className="sum-k">שיבוץ נוכחי</span><span className="sum-v">{student?.region_name ? `${student.region_name} · ` : ''}בניין {student?.current_building} · דירה {student?.current_apartment} · חדר {student?.current_room}</span></div>
-            {isTransfer && <div className="sum-row"><span className="sum-k">סוג מעבר</span><span className="sum-v">{scope==='cross_region'?'מעבר לאזור אחר':'מעבר בתוך האזור הנוכחי'}</span></div>}
-            {isTransfer && scope==='cross_region' && <div className="sum-row"><span className="sum-k">אזורי יעד</span><span className="sum-v">{destRegionNames.join(', ')}</span></div>}
+            {isTransfer && <div className="sum-row"><span className="sum-k">סוג מעבר</span><span className="sum-v">{scopeLabel}</span></div>}
+            {isTransfer && scope==='cross_region' && <div className="sum-row"><span className="sum-k">אזור יעד</span><span className="sum-v">{destRegionNames.join(', ')}</span></div>}
             {isTransfer&&selOpt && <div className="sum-row"><span className="sum-k">יעד נבחר</span><span className="sum-v">{selOpt.region_name ? `${selOpt.region_name} · ` : ''}בניין {selOpt.building} · דירה {selOpt.apartment} · חדר {selOpt.room} · {selOpt.single_bed_room ? 'מקום יחיד' : `מיטה ${selOpt.bed_display || selOpt.bed_label}`}</span></div>}
             {reason && <div className="sum-row"><span className="sum-k">סיבה</span><span className="sum-v">{reason}</span></div>}
             {otherDesc && <div className="sum-row"><span className="sum-k">תיאור</span><span className="sum-v">{otherDesc}</span></div>}
@@ -626,14 +622,24 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions =
         {step<lastStep
           ? <button className={`wz-next wz-${colorKey}`} disabled={!canNext()} onClick={()=>setStep(s=>s+1)}>המשך <ArrowLeft size={13}/></button>
           : <button className={`wz-next wz-${colorKey}`} disabled={submitting}
-              onClick={()=>onSubmit({
-                student:student?.id,request_type:type,reason,other_description:otherDesc,same_apartment:sameApt,
-                target_room:selOpt?.room_id||selOpt?.roomId,
-                ...(isTransfer ? {
-                  transfer_scope: central ? scope : 'same_region',
-                  destination_regions: (central && scope==='cross_region') ? destRegions : [],
-                } : {}),
-              })}>
+              onClick={()=>{
+                const payload = {
+                  student:student?.id,
+                  request_type: isTransfer ? effReqType : type,
+                  reason, other_description:otherDesc,
+                  same_apartment: isTransfer ? effSameApt : null,
+                  target_room:selOpt?.room_id||selOpt?.roomId,
+                  ...(isTransfer ? {
+                    transfer_scope: central ? effScope : 'same_region',
+                    // Region PKs are slug strings (e.g. "broshim") - pass
+                    // them through untouched, only dropping null/empty.
+                    destination_regions: (central && scope==='cross_region')
+                      ? destRegions.filter((v)=>v!=null && String(v).trim()!=='')
+                      : [],
+                  } : {}),
+                };
+                onSubmit(payload);
+              }}>
               {submitting?<Spinner size={13}/>:<Check size={13}/>} שלח
             </button>}
       </div>
@@ -659,8 +665,7 @@ const NewRequestModal = ({ onClose, onSuccess, regions = [] }) => {
   const typeCards = [
     { v:'add_student',    Icon:UserPlus,  color:'blue',   title:'הוספת סטודנט', sub:'רישום סטודנט חדש למעונות' },
     { v:'remove_student', Icon:UserMinus, color:'rose',   title:'הסרה ממעונות', sub:'הסרת סטודנט קיים' },
-    { v:'room',           Icon:Home,      color:'violet', title:'שינוי חדר',    sub:'העברה לחדר אחר' },
-    { v:'apartment',      Icon:DoorOpen,  color:'teal',   title:'מעבר מדירה',  sub:'מעבר לדירה אחרת' },
+    { v:'transfer',       Icon:ArrowRightLeft, color:'violet', title:'בקשת מעבר', sub:'חדר אחר, דירה אחרת או אזור אחר' },
     { v:'swap',           Icon:RefreshCw, color:'indigo', title:'חילוף בין סטודנטים', sub:'שני סטודנטים מחליפים מקום' },
     { v:'other',          Icon:FileText,  color:'amber',  title:'בקשה אחרת',   sub:'הארכת שהייה ועוד' },
   ];
@@ -743,7 +748,7 @@ const NewRequestModal = ({ onClose, onSuccess, regions = [] }) => {
         {type==='add_student'    && <AddStudentWizard onSubmit={handleSubmit} onCancel={onClose} submitting={submitting} error={error}/>}
         {type==='remove_student' && <RemoveWizard     onSubmit={handleSubmit} onCancel={onClose} submitting={submitting} error={error}/>}
         {type==='swap'           && <SwapWizard       onSubmit={handleSubmit} onCancel={onClose} submitting={submitting} error={error}/>}
-        {(type==='room'||type==='apartment'||type==='other') && (
+        {(type==='transfer'||type==='other') && (
           <TransferWizard type={type} onSubmit={handleSubmit} onCancel={onClose}
             submitting={submitting} error={error} regions={regions}
             feasData={feasData} onCheckFeas={handleCheckFeas} checkingFeas={checkingFeas}
@@ -820,9 +825,16 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
             onSelectBed={(bed)=>onSetRoom(bed)}
             language="he"
           />
+          {roomId && (
+            <div className="assign-confirm-note">
+              <CheckCircle size={13}/>
+              הסטודנט/ית ישובץ/תשובץ ל: בניין {roomId.building} · דירה {roomId.apartment} · חדר {roomId.room}
+              {roomId.single_bed_room ? ' · מקום יחיד' : ` · מיטה ${roomId.bed_display || roomId.bed_label}`}
+            </div>
+          )}
           <div className="act-row" style={{marginTop:8}}>
-            <button className="btn-approve" onClick={()=>onApprove(request.id,roomId?.room_id,roomId?.bed_id)} disabled={acting||!roomId}>
-              {acting?<Spinner size={12}/>:<Check size={12}/>} {roomId ? assignActionLabel(roomId) : 'אשר ושבץ'}
+            <button className="btn-approve" onClick={()=>onApprove(request.id,roomId?.room_id,roomId?.bed_id)} disabled={acting||!roomId||!roomId.bed_id}>
+              {acting?<Spinner size={12}/>:<Check size={12}/>} {roomId ? assignActionLabel(roomId) : 'בחר מיטה כדי לאשר'}
             </button>
             <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> דחה</button>
           </div>
@@ -839,8 +851,13 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
           {(feasData.search_regions||[]).length>0 && (
             <div className="scope-region-note">
               <MapPin size={13}/>
-              {feasData.transfer_scope==='cross_region' ? 'אזורי יעד:' : 'אזור יעד:'}{' '}
-              <strong>{feasData.search_regions.map(r=>r.name).join(', ')}</strong>
+              {request.transfer_scope==='cross_region'
+                ? <>
+                    {request.source_region_name ? <>מ-<strong>{request.source_region_name}</strong> אל </> : 'אזור יעד: '}
+                    <strong>{feasData.search_regions.map(r=>r.name).join(', ')}</strong>
+                    <span className="scope-region-hint">מוצגות מיטות פנויות באזור היעד בלבד</span>
+                  </>
+                : <>אזור יעד: <strong>{feasData.search_regions.map(r=>r.name).join(', ')}</strong></>}
             </div>
           )}
           <BedMatchPicker
@@ -860,12 +877,25 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
             selectedBedId={selFeasOpt?.bed_id}
             onSelectBed={onSelFeasOpt}
             language="he"
+            scopeContext={
+              request.transfer_scope==='cross_region' ? 'cross_region'
+              : request.same_apartment===true ? 'same_apartment'
+              : 'same_region'
+            }
           />
+          {selFeasOpt && (
+            <div className="assign-confirm-note">
+              <CheckCircle size={13}/>
+              הסטודנט/ית ישובץ/תשובץ ל: בניין {selFeasOpt.building} · דירה {selFeasOpt.apartment} · חדר {selFeasOpt.room}
+              {selFeasOpt.single_bed_room ? ' · מקום יחיד' : ` · מיטה ${selFeasOpt.bed_display || selFeasOpt.bed_label}`}
+              {selFeasOpt.region_name ? ` (${selFeasOpt.region_name})` : ''}
+            </div>
+          )}
           <div className="act-row">
             {feasData.feasible===true && (
-              <button className="btn-approve" disabled={acting||!selFeasOpt}
+              <button className="btn-approve" disabled={acting||!selFeasOpt||!selFeasOpt.bed_id}
                 onClick={()=>onApprove(request.id,selFeasOpt?.room_id,selFeasOpt?.bed_id)}>
-                {acting?<Spinner size={12}/>:<Check size={12}/>} {selFeasOpt ? assignActionLabel(selFeasOpt) : 'אשר'}
+                {acting?<Spinner size={12}/>:<Check size={12}/>} {selFeasOpt ? assignActionLabel(selFeasOpt) : 'בחר מיטה כדי לאשר'}
               </button>
             )}
             <button className="btn-recheck" onClick={()=>onCheckFeas(request.id)} disabled={checkingFeas}><RefreshCw size={12}/> שוב</button>
@@ -885,7 +915,7 @@ const DetailPane = ({ request, onApprove, onReject, acting, language,
   selFeasOpt, onSelFeasOpt }) => {
 
   const [histOpen, setHistOpen] = useState(false);
-  const typeCfg   = TYPE_CFG[request.request_type]   || TYPE_CFG.other;
+  const typeCfg   = typeCfgFor(request);
   const statusCfg = STATUS_CFG[request.status]        || STATUS_CFG.pending;
   const TypeIcon  = typeCfg.Icon;
   const StatIcon  = statusCfg.Icon;
@@ -948,17 +978,19 @@ const DetailPane = ({ request, onApprove, onReject, acting, language,
         {/* Details */}
         <section>
           <div className="sec-title">פרטי הבקשה</div>
-          {request.request_type==='room' && request.same_apartment!==undefined && (
-            <div className="kv"><span>העדפה</span><strong>{request.same_apartment===true?'באותה דירה':request.same_apartment===false?'בדירה אחרת':'לא משנה'}</strong></div>
-          )}
-          {request.transfer_scope && (
-            <div className="kv"><span>סוג מעבר</span><strong>{request.transfer_scope_display || (request.transfer_scope==='cross_region'?'מעבר לאזור אחר':'מעבר בתוך האזור הנוכחי')}</strong></div>
+          {(request.request_type==='room'||request.request_type==='apartment') && (
+            <div className="kv"><span>סוג מעבר</span><strong>{
+              request.transfer_scope==='cross_region' ? 'לאזור אחר'
+              : request.same_apartment===true ? 'בתוך אותה דירה'
+              : request.same_apartment===false ? 'לדירה אחרת באותו אזור'
+              : (request.transfer_scope_display || 'מעבר בתוך האזור הנוכחי')
+            }</strong></div>
           )}
           {request.transfer_scope && request.source_region_name && (
             <div className="kv"><span>אזור מוצא</span><strong>{request.source_region_name}</strong></div>
           )}
           {request.transfer_scope==='cross_region' && (request.destination_region_names||[]).length>0 && (
-            <div className="kv"><span>אזורי יעד</span><strong>{request.destination_region_names.join(', ')}</strong></div>
+            <div className="kv"><span>אזור יעד</span><strong>{request.destination_region_names.join(', ')}</strong></div>
           )}
           {request.status==='approved' && request.target_room_name && (
             <div className="kv"><span>שיבוץ סופי</span><strong>
@@ -1017,7 +1049,7 @@ const DetailPane = ({ request, onApprove, onReject, acting, language,
 
 // ── List Item ─────────────────────────────────────────────────
 const ListItem = ({ request, selected, onClick, language }) => {
-  const tc = TYPE_CFG[request.request_type]||TYPE_CFG.other;
+  const tc = typeCfgFor(request);
   const sc = STATUS_CFG[request.status]||STATUS_CFG.pending;
   const TI = tc.Icon, SI = sc.Icon;
   return (
@@ -1796,7 +1828,7 @@ export default function TransfersPage({ language = 'he' }) {
           gap: 6px;
         }
         .ri-id {
-          font-size: 11px;
+          font-size: 12.5px;
           font-weight: 600;
           color: var(--t4);
           font-family: 'SF Mono', Consolas, monospace;
@@ -1830,7 +1862,7 @@ export default function TransfersPage({ language = 'he' }) {
         .ri-inf { flex: 1; min-width: 0; }
         .ri-name {
           display: block;
-          font-size: 15px;
+          font-size: 16px;
           font-weight: 600;
           color: var(--t1);
           white-space: nowrap;
@@ -1839,7 +1871,7 @@ export default function TransfersPage({ language = 'he' }) {
           line-height: 1.25;
         }
         .ri-meta {
-          font-size: 12px;
+          font-size: 13.5px;
           color: var(--t4);
           font-family: 'SF Mono', Consolas, monospace;
           margin-top: 1px;
@@ -1854,8 +1886,8 @@ export default function TransfersPage({ language = 'he' }) {
         }
         .ri-type {
           display: inline-flex; align-items: center; gap: 4px;
-          font-size: 12px; font-weight: 500;
-          padding: 2px 8px; border-radius: 20px;
+          font-size: 13px; font-weight: 600;
+          padding: 3px 10px; border-radius: 20px;
         }
         .ri-type-violet { background: var(--violet-bg); color: var(--violet); }
         .ri-type-teal   { background: var(--teal-bg);   color: var(--teal);   }
@@ -1863,8 +1895,8 @@ export default function TransfersPage({ language = 'he' }) {
         .ri-type-blue   { background: var(--blue-bg);   color: var(--blue);   }
         .ri-type-rose   { background: var(--rose-bg);   color: var(--rose);   }
         .ri-type-indigo   { background: var(--indigo-bg);   color: var(--indigo);   }
-        .ri-region { font-size: 10px; color: var(--t4); background: var(--slate-bg); padding: 1px 6px; border-radius: 999px; }
-        .ri-date { font-size: 12px; color: var(--t4); }
+        .ri-region { font-size: 12px; color: var(--t3); background: var(--slate-bg); padding: 2px 8px; border-radius: 999px; }
+        .ri-date { font-size: 13px; color: var(--t4); }
 
         /* ── Detail outer ─────────────────────────── */
         .detail-outer {
@@ -2025,7 +2057,7 @@ export default function TransfersPage({ language = 'he' }) {
 
         /* ── Section headers ── */
         .sec-title {
-          font-size: 11px;
+          font-size: 12.5px;
           font-weight: 700;
           color: var(--t4);
           text-transform: uppercase;
@@ -2107,16 +2139,16 @@ export default function TransfersPage({ language = 'he' }) {
         /* ── KV rows ── */
         .kv {
           display: flex; align-items: baseline; gap: 12px;
-          padding: 8px 0; border-bottom: 1px solid var(--bdr);
+          padding: 10px 0; border-bottom: 1px solid var(--bdr);
         }
         .kv:last-child { border-bottom: none; }
         .kv span {
-          font-size: 13px; color: var(--t3); font-weight: 500;
-          min-width: 88px; flex-shrink: 0;
+          font-size: 14px; color: var(--t3); font-weight: 500;
+          min-width: 92px; flex-shrink: 0;
         }
         .kv strong {
-          font-size: 14px; color: var(--t1); font-weight: 500;
-          line-height: 1.5;
+          font-size: 15.5px; color: var(--t1); font-weight: 600;
+          line-height: 1.55;
         }
         .kv-reason { white-space: pre-wrap; }
 
@@ -2654,10 +2686,18 @@ export default function TransfersPage({ language = 'he' }) {
           display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
           margin: 12px 0 4px; padding: 10px 12px;
           background: var(--blue-bg); border: 1px solid var(--blue-bdr);
-          border-radius: var(--r4); font-size: 13px; color: var(--t1);
+          border-radius: var(--r4); font-size: 14.5px; color: var(--t1);
         }
         .scope-region-note svg { color: var(--blue); flex-shrink: 0; }
-        .scope-region-hint { font-size: 11.5px; color: var(--t3); flex-basis: 100%; }
+        .scope-region-hint { font-size: 13px; color: var(--t3); flex-basis: 100%; }
+        .assign-confirm-note {
+          display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+          margin: 10px 0 2px; padding: 12px 14px;
+          background: #f0fdf4; border: 1.5px solid #86efac;
+          border-radius: var(--r4); font-size: 14.5px; font-weight: 700; color: #166534;
+          line-height: 1.5;
+        }
+        .assign-confirm-note svg { color: #16a34a; flex-shrink: 0; }
         .region-ms { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
         .region-ms-label { font-size: 13px; font-weight: 600; color: var(--t2); }
         .region-ms-search {

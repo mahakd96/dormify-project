@@ -126,8 +126,15 @@ function StudentsPage({ language }) {
     const [editStudentReturnToAssign, setEditStudentReturnToAssign] = useState(false);
 
   const [showAddRequest, setShowAddRequest] = useState(false);
-  const [reqType, setReqType] = useState('room');
-  const [reqSameApt, setReqSameApt] = useState(null);
+  const [reqType, setReqType] = useState('transfer');
+  // Unified transfer scope: same_apartment / same_region / cross_region -
+  // maps onto the existing request fields (request_type / same_apartment /
+  // transfer_scope / destination_regions), no new backend fields.
+  const [reqScope, setReqScope] = useState(null);
+  // Holds the selected target region ID as a NUMBER (never a name/string) -
+  // the backend expects real Region PKs in destination_regions.
+  const [reqTargetRegion, setReqTargetRegion] = useState(null);
+  const [reqRegions, setReqRegions] = useState([]);
   const [reqOtherDesc, setReqOtherDesc] = useState('');
   const [reqReason, setReqReason] = useState('');
   const [reqSubmitting, setReqSubmitting] = useState(false);
@@ -190,12 +197,20 @@ function StudentsPage({ language }) {
       priority: 'עדיפות', currentAssignment: 'פרטי השיבוץ הנוכחי',
       addRequest: 'הוסף בקשה', newRequestTitle: 'בקשה חדשה',
       requestType: 'סוג בקשה',
-      typeRoom: 'שינוי חדר', typeApartment: 'מעבר מהדירה', typeOther: 'בקשה אחרת',
+      typeTransfer: 'בקשת מעבר', typeOther: 'בקשה אחרת',
       typeRemoveStudent: 'הסרה מהמעונות',
+      scopeLabel: 'סוג המעבר',
+      scopeSameApt: 'בתוך אותה דירה',
+      scopeSameRegion: 'לדירה אחרת באותו אזור',
+      scopeCrossRegion: 'לאזור אחר',
+      targetRegionLabel: 'אזור יעד',
+      selectTargetRegion: 'בחר אזור יעד',
+      missingScope: 'יש לבחור את סוג המעבר',
+      missingTargetRegion: 'יש לבחור אזור יעד',
+      centralOnlyCross: 'רק מנהל מרכזי יכול ליצור מעבר לאזור אחר',
+      crossRegionLockedNote: 'משתמש אזורי מוגבל לאזור המורשה שלו',
       removeStudentNote: 'הסטודנט יוסר מהמעונות ומיטתו תתפנה לאחר אישור המנהל.',
       removeReasonPlaceholder: 'סיבת ההסרה מהמעונות...',
-      sameApartmentLabel: 'איפה החדר החדש?',
-      sameApt: 'באותה דירה', diffApt: 'בדירה אחרת', eitherApt: 'לא משנה',
       otherDescLabel: 'תיאור הבקשה',
       otherDescPlaceholder: 'תאר את הבקשה...',
       reasonLabel: 'סיבה', reasonPlaceholder: 'הסבר את סיבת הבקשה...',
@@ -299,12 +314,20 @@ function StudentsPage({ language }) {
       priority: 'Priority', currentAssignment: 'Current Assignment',
       addRequest: 'Add Request', newRequestTitle: 'New Request',
       requestType: 'Request type',
-      typeRoom: 'Change room', typeApartment: 'Move from apartment', typeOther: 'Other request',
+      typeTransfer: 'Transfer request', typeOther: 'Other request',
       typeRemoveStudent: 'Remove from Dorms',
+      scopeLabel: 'Transfer scope',
+      scopeSameApt: 'Within the same apartment',
+      scopeSameRegion: 'Different apartment, same region',
+      scopeCrossRegion: 'Move to another region',
+      targetRegionLabel: 'Target region',
+      selectTargetRegion: 'Select target region',
+      missingScope: 'Please choose the transfer scope',
+      missingTargetRegion: 'Please select a target region',
+      centralOnlyCross: 'Only a central admin can create a cross-region transfer',
+      crossRegionLockedNote: 'Regional users are limited to their own region',
       removeStudentNote: 'The student will be removed from dorms and their bed freed after admin approval.',
       removeReasonPlaceholder: 'Reason for removal from dorms...',
-      sameApartmentLabel: 'Where should the new room be?',
-      sameApt: 'Same apartment', diffApt: 'Different apartment', eitherApt: 'Either is fine',
       otherDescLabel: 'Request description',
       otherDescPlaceholder: 'Describe the request...',
       reasonLabel: 'Reason', reasonPlaceholder: 'Explain the reason for this request...',
@@ -455,7 +478,21 @@ function StudentsPage({ language }) {
       if (activeTab !== 'all') params.category = activeTab;
       const q = searchQuery.trim();
       if (q.length >= 2) params.search = q;
-      const data = await studentsAPI.getStudents({ ...params, ...activeFilters }, { signal: controller.signal });
+      // Map drawer state -> the exact backend query params. The backend
+      // reads gender/requested_religion/region/dorm_type/building/apartment/
+      // room (comma-joined for multi) + status + has_roommate_request -
+      // NEVER the raw frontend keys (genders/regions/...), which it ignores.
+      const f = activeFilters;
+      if (f.genders?.length) params.gender = f.genders.join(',');
+      if (f.religions?.length) params.requested_religion = f.religions.join(',');
+      if (f.regions?.length) params.region = f.regions.join(',');
+      if (f.dormTypes?.length) params.dorm_type = f.dormTypes.join(',');
+      if (f.buildings?.length) params.building = f.buildings.join(',');
+      if (f.apartments?.length) params.apartment = f.apartments.join(',');
+      if (f.rooms?.length) params.room = f.rooms.join(',');
+      if (f.assignmentStatuses?.length) params.status = f.assignmentStatuses[0];
+      if (f.hasRoommateRequest?.length) params.has_roommate_request = f.hasRoommateRequest[0];
+      const data = await studentsAPI.getStudents(params, { signal: controller.signal });
       const items = Array.isArray(data) ? data : (data.results || []);
       setList(items);
       // Paginated response shape: {count, next, previous, results}. A plain
@@ -560,20 +597,44 @@ function StudentsPage({ language }) {
 
   // ---------- ADD REQUEST MODAL ----------
   const openAddRequest = () => {
-    setReqType(selectedStudent?.is_assigned ? 'room' : 'other');
-    setReqSameApt(null); setReqOtherDesc('');
+    setReqType(selectedStudent?.is_assigned ? 'transfer' : 'other');
+    setReqScope(null); setReqTargetRegion(null); setReqOtherDesc('');
     setReqReason(''); setReqError(''); setReqSuccess('');
     setShowAddRequest(true);
+    // Real regions from the backend for the cross-region dropdown
+    // (central admin only - regional users cannot pick another region).
+    if (isCentralAdmin() && reqRegions.length === 0) {
+      regionsAPI.getAll().then(setReqRegions).catch(() => setReqRegions([]));
+    }
   };
   const closeAddRequest = () => setShowAddRequest(false);
 
   const submitAddRequest = async () => {
     if (!selectedStudent || !reqReason.trim()) { setReqError(t.missingReason); return; }
     if (reqType === 'other' && !reqOtherDesc.trim()) { setReqError(t.missingOtherDesc); return; }
+    if (reqType === 'transfer' && !reqScope) { setReqError(t.missingScope); return; }
+    // Never rely on the backend's "Invalid pk" error: a cross-region
+    // transfer must carry one real Region PK before submit. Region PKs are
+    // slug strings (e.g. "broshim"), so validity = non-empty, not numeric.
+    if (reqType === 'transfer' && reqScope === 'cross_region'
+        && !(reqTargetRegion != null && String(reqTargetRegion).trim() !== '')) {
+      setReqError(t.missingTargetRegion); return;
+    }
     try {
       setReqSubmitting(true); setReqError('');
       const payload = { student: selectedStudent.id, request_type: reqType, reason: reqReason.trim() };
-      if (reqType === 'room')  payload.same_apartment = reqSameApt;
+      if (reqType === 'transfer') {
+        // Scope -> existing backend fields, mirroring the Transfers page:
+        //   same_apartment -> room      + same_apartment=true
+        //   same_region    -> apartment + same_apartment=false
+        //   cross_region   -> apartment + cross_region + destination_regions
+        payload.request_type = reqScope === 'same_apartment' ? 'room' : 'apartment';
+        payload.same_apartment = reqScope === 'same_apartment' ? true : reqScope === 'same_region' ? false : null;
+        payload.transfer_scope = reqScope === 'cross_region' ? 'cross_region' : 'same_region';
+        payload.destination_regions = reqScope === 'cross_region'
+          ? [reqTargetRegion].filter((v) => v != null && String(v).trim() !== '')
+          : [];
+      }
       if (reqType === 'other') payload.other_description = reqOtherDesc.trim();
       await requestsAPI.create(payload);
       setReqSuccess(t.requestSubmitted);
@@ -583,6 +644,24 @@ function StudentsPage({ language }) {
       setReqError(err.message || 'Failed to create request');
     } finally { setReqSubmitting(false); }
   };
+
+  // Single source of truth for the submit button. Cross-region transfer
+  // needs ONLY: student + scope + valid region PK + non-empty reason.
+  // Room/apartment/bed are chosen later, at APPROVAL time - never required
+  // to create the request.
+  // NOTE: Region PKs in this project are SLUG STRINGS (e.g. "broshim",
+  // "technion") - never validate them numerically.
+  const reqRegionValid = reqTargetRegion != null && String(reqTargetRegion).trim() !== '';
+  const reqDisabledReason =
+    reqSubmitting ? 'submitting'
+    : reqSuccess ? 'already-submitted'
+    : !selectedStudent ? 'no-student'
+    : !reqReason.trim() ? 'empty-reason'
+    : (reqType === 'transfer' && !reqScope) ? 'no-scope'
+    : (reqType === 'transfer' && reqScope === 'cross_region' && !reqRegionValid) ? 'invalid-target-region'
+    : (reqType === 'other' && !reqOtherDesc.trim()) ? 'empty-other-description'
+    : null;
+  const canSubmitRequest = !reqDisabledReason;
 
   // ---------- ASSIGN BED MODAL ----------
   const openAssignBed = async (studentOverride) => {
@@ -1024,12 +1103,16 @@ const submitEditStudent = async () => {
           {activeFilterCount > 0 && (
             <div className="active-filter-chips">
               {activeFilters.genders.map((v) => (
-                <span key={v} className="filter-chip">{v === 'M' ? 'Male' : v === 'F' ? 'Female' : v}
+                <span key={v} className="filter-chip">
+                  {language === 'he'
+                    ? (v === 'male' ? 'זכר' : v === 'female' ? 'נקבה' : v)
+                    : (v === 'male' ? 'Male' : v === 'female' ? 'Female' : v)}
                   <button onClick={() => setActiveFilters(f => ({ ...f, genders: f.genders.filter(x => x !== v) }))}><X size={12} /></button>
                 </span>
               ))}
               {activeFilters.religions.map((v) => (
-                <span key={v} className="filter-chip">{v}
+                <span key={v} className="filter-chip">
+                  {(filterOptions?.religions || []).find((r) => (typeof r === 'object' ? r.id : r) === v)?.name || v}
                   <button onClick={() => setActiveFilters(f => ({ ...f, religions: f.religions.filter(x => x !== v) }))}><X size={12} /></button>
                 </span>
               ))}
@@ -1347,9 +1430,8 @@ const submitEditStudent = async () => {
                 {/* Primary types */}
                 <div className="type-options-modern" style={{ marginBottom: 10 }}>
                   {[
-                    { v: 'room',      l: t.typeRoom,      icon: <Home size={20} />,     color: 'purple' },
-                    { v: 'apartment', l: t.typeApartment, icon: <DoorOpen size={20} />, color: 'green'  },
-                    { v: 'other',     l: t.typeOther,     icon: <FileText size={20} />, color: 'orange' },
+                    { v: 'transfer', l: t.typeTransfer, icon: <MapPin size={20} />,   color: 'purple' },
+                    { v: 'other',    l: t.typeOther,    icon: <FileText size={20} />, color: 'orange' },
                   ].map((opt) => (
                     <button key={opt.v} type="button"
                       className={`type-option-modern ${opt.color} ${reqType === opt.v ? 'active' : ''}`}
@@ -1372,14 +1454,83 @@ const submitEditStudent = async () => {
                 <div className="type-note red"><UserMinus size={14} /> {t.removeStudentNote}</div>
               )}
 
-              {reqType === 'room' && (
+              {reqType === 'transfer' && (
                 <div className="form-section">
-                  <label>{t.sameApartmentLabel}</label>
+                  <label>{t.scopeLabel}</label>
                   <div className="sub-options">
-                    {[{ v: true, l: t.sameApt }, { v: false, l: t.diffApt }, { v: null, l: t.eitherApt }].map((opt, i) => (
-                      <button key={i} type="button" className={`sub-option ${reqSameApt === opt.v ? 'active' : ''}`} onClick={() => setReqSameApt(opt.v)}>{opt.l}</button>
+                    {[
+                      { v: 'same_apartment', l: t.scopeSameApt },
+                      { v: 'same_region',    l: t.scopeSameRegion },
+                      { v: 'cross_region',   l: t.scopeCrossRegion, centralOnly: true },
+                    ].map((opt) => (
+                      <button key={opt.v} type="button"
+                        className={`sub-option ${reqScope === opt.v ? 'active' : ''}`}
+                        disabled={opt.centralOnly && !isCentralAdmin()}
+                        title={opt.centralOnly && !isCentralAdmin() ? t.centralOnlyCross : undefined}
+                        onClick={() => setReqScope(opt.v)}>{opt.l}</button>
                     ))}
                   </div>
+                  {!isCentralAdmin() && (
+                    <div className="type-note" style={{ marginTop: 8 }}>
+                      <MapPin size={14} /> {t.crossRegionLockedNote}
+                      {user?.region_name ? <>: <strong>{user.region_name}</strong></> : null}
+                    </div>
+                  )}
+                  {reqScope === 'cross_region' && isCentralAdmin() && (
+                    <div style={{ marginTop: 10 }}>
+                      <label>{t.targetRegionLabel} *</label>
+                      {reqRegions.length === 0 ? (
+                        <div className="type-note" style={{ marginTop: 6 }}>
+                          <Loader2 size={14} className="spinner" /> {t.selectTargetRegion}...
+                        </div>
+                      ) : (
+                        <div style={{
+                          display: 'flex', flexDirection: 'column', gap: 6,
+                          maxHeight: 170, overflowY: 'auto', marginTop: 6,
+                          border: '1px solid #e5e7eb', borderRadius: 10, padding: 6,
+                          pointerEvents: 'auto', position: 'relative', zIndex: 1,
+                        }}>
+                          {reqRegions.map((r, idx) => {
+                            // Region PK may arrive as number or numeric string
+                            // (or under pk/region_id) - keep the RAW value and
+                            // compare as strings; never coerce with Number()
+                            // (NaN made clicks look like they did nothing).
+                            const rid = r?.id ?? r?.pk ?? r?.region_id;
+                            if (rid == null) return null;
+                            const active = String(reqTargetRegion) === String(rid);
+                            const isCurrent = selectedStudent?.region_name === r.name;
+                            return (
+                              <button key={String(rid) || idx} type="button"
+                                className={`sub-option ${active ? 'active' : ''}`}
+                                style={{
+                                  width: '100%', justifyContent: 'space-between',
+                                  display: 'flex', alignItems: 'center',
+                                  cursor: 'pointer', pointerEvents: 'auto',
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setReqTargetRegion(rid);
+                                  setReqError('');
+                                }}>
+                                <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                  <MapPin size={13} /> {r.name}
+                                </span>
+                                <span style={{ fontSize: 11, opacity: 0.7 }}>
+                                  {isCurrent ? (language === 'he' ? 'האזור הנוכחי' : 'current region') : ''}
+                                  {active ? ' ✓' : ''}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {reqTargetRegion == null && (
+                        <div className="msg" style={{ marginTop: 6, fontSize: 12, color: '#92400e' }}>
+                          {t.missingTargetRegion}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1399,12 +1550,23 @@ const submitEditStudent = async () => {
 
               {reqError && <div className="msg error-msg">{reqError}</div>}
               {reqSuccess && <div className="msg success-msg">{reqSuccess}</div>}
+              {!reqError && !reqSuccess && !canSubmitRequest && !reqSubmitting && (
+                <div className="msg" style={{ background: '#fef3c7', color: '#92400e', fontSize: 13 }}>
+                  {{
+                    'empty-reason': t.missingReason,
+                    'no-scope': t.missingScope,
+                    'invalid-target-region': t.missingTargetRegion,
+                    'empty-other-description': t.missingOtherDesc,
+                  }[reqDisabledReason] || ''}
+                </div>
+              )}
 
               <div className="modal-actions">
                 <button className="btn-secondary" onClick={closeAddRequest} disabled={reqSubmitting}>{t.cancel}</button>
                 <button
                   className={`btn-primary${reqType === 'remove_student' ? ' danger' : ''}`}
-                  onClick={submitAddRequest} disabled={reqSubmitting || !!reqSuccess}>
+                  onClick={submitAddRequest}
+                  disabled={!canSubmitRequest}>
                   {reqSubmitting ? <Loader2 size={16} className="spinner" /> : <><Plus size={16} /> {t.submit}</>}
                 </button>
               </div>
@@ -2006,6 +2168,7 @@ const submitEditStudent = async () => {
         onFiltersChange={(next) => setActiveFilters(next)}
         filterOptions={filterOptions}
         totalCount={listTotal}
+        language={language}
       />
 
       <style>{`

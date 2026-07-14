@@ -39,6 +39,20 @@ const RECOMMENDATION_CFG = {
 
 const GENDER_LABEL = { male: 'זכרים', female: 'נקבות', mixed: 'מעורב' };
 
+// UI-side display overrides for backend warning codes. The CODE comes from
+// the server (real matching result); only the wording is adjusted here.
+const WARNING_DISPLAY = {
+  religion_conflict: 'אזהרה: דירה עם דיירים מדתות שונות — ניתן לשיבוץ, אך קיימת שונות דתית בדירה',
+};
+const warningLabel = (r) => WARNING_DISPLAY[r.code] || r.label;
+
+// FUTURE WORK (documented, intentionally NOT implemented yet): a layered
+// advanced scoring pass on top of the current hard-constraints + reasons
+// model - direct roommate requests, student transfer history, similarity by
+// study points / allocation group / city, and archetype matching. Until
+// then, recommendations stay limited to the real fields the backend already
+// returns (recommendation_level + matched_reasons/warnings/historical_reasons).
+
 // "Bed 2" (DB label) → "2" for Hebrew display; unknown formats pass through.
 export function bedDisplayLabel(label) {
   if (!label) return '';
@@ -244,9 +258,15 @@ function RoomRow({ building, apartment, room, expanded, onToggle, selectedBedId,
 function ApartmentRow({ building, apartment, expanded, onToggle, expandedRooms, onToggleRoom, selectedBedId, onSelect, isHe, t }) {
   const genderLabel = GENDER_LABEL[apartment.apartment_gender] || apartment.apartment_gender;
   const residents = apartment.residents || [];
+  // Compact "why is this recommended" line, shown even when collapsed -
+  // built ONLY from the real backend reason labels (matched_reasons /
+  // warnings), never invented client-side.
+  const reasonSummary = (apartment.matched_reasons || []).slice(0, 2).map((r) => r.label);
+  const firstWarning = (apartment.warnings || [])[0] ? warningLabel(apartment.warnings[0]) : null;
   return (
     <div className="bmp-apartment">
-      <button type="button" className="bmp-apartment-head" onClick={onToggle} aria-expanded={expanded}>
+      <button type="button" className="bmp-apartment-head" onClick={onToggle} aria-expanded={expanded}
+        title={[...(apartment.matched_reasons || []), ...(apartment.warnings || [])].map((r) => r.label).join(' · ') || undefined}>
         {apartment.recommendation_level === 'best' && <Star size={11} fill="currentColor" className="bmp-star" />}
         <span className="bmp-apt-title">{isHe ? `דירה ${apartment.apartment_number}` : `Apt ${apartment.apartment_number}`}</span>
         {genderLabel && <span className="bmp-dim">{genderLabel}</span>}
@@ -257,12 +277,26 @@ function ApartmentRow({ building, apartment, expanded, onToggle, expandedRooms, 
         {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
       </button>
 
+      {!expanded && (reasonSummary.length > 0 || firstWarning) && (
+        <div className="bmp-apt-reasonline">
+          {reasonSummary.length > 0 && (
+            <span className="bmp-reasonline-good"><CheckCircle2 size={12} /> {reasonSummary.join(' · ')}</span>
+          )}
+          {firstWarning && (
+            <span className="bmp-reasonline-warn"><AlertTriangle size={12} /> {firstWarning}</span>
+          )}
+        </div>
+      )}
+
       {expanded && (
         <div className="bmp-rooms">
           {(apartment.matched_reasons?.length > 0 || apartment.warnings?.length > 0 || apartment.historical_reasons?.length > 0) && (
             <div className="bmp-apt-reasons">
               <ReasonList items={apartment.matched_reasons} icon={CheckCircle2} tone="good" />
-              <ReasonList items={apartment.warnings} icon={AlertTriangle} tone="warn" />
+              <ReasonList items={(apartment.warnings || []).map((w) => ({ ...w, label: warningLabel(w) }))} icon={AlertTriangle} tone="warn" />
+              {apartment.warnings?.length > 0 && (
+                <span className="bmp-warn-allowed">שיבוץ מותר עם אזהרה</span>
+              )}
               <ReasonList items={apartment.historical_reasons} icon={History} tone="history" />
             </div>
           )}
@@ -272,15 +306,19 @@ function ApartmentRow({ building, apartment, expanded, onToggle, expandedRooms, 
               <span className="bmp-residents-title">{t.residents}:</span>
               <div className="bmp-resident-list">
                 {residents.map((r) => {
-                  // Only show religion/sector when the system actually has a
-                  // real value (never "not specified"/"unknown").
+                  // Only show religion/sector/city when the system actually
+                  // has a real value (never "not specified"/"unknown") -
+                  // missing fields are hidden, never invented.
                   const religionTag = (r.religion_display && r.religion !== 'not_specified') ? r.religion_display : null;
                   const sectorTag = (r.sector_display && r.placement_sector !== 'unknown') ? r.sector_display : null;
+                  const cityTag = (r.city || '').trim() || null;
                   return (
                     <span key={r.id} className="bmp-resident-chip">
                       <span className="bmp-resident-name"><User size={10} /> {r.full_name}</span>
                       <span className="bmp-resident-tags">
-                        {[r.room_name ? (isHe ? `חדר ${r.room_name}` : `Room ${r.room_name}`) : null, religionTag, sectorTag]
+                        {[religionTag, cityTag,
+                          r.room_name ? (isHe ? `חדר ${r.room_name}` : `Room ${r.room_name}`) : null,
+                          sectorTag]
                           .filter(Boolean).join(' · ')}
                       </span>
                     </span>
@@ -315,6 +353,10 @@ export default function BedMatchPicker({
   conflictExamples = [],
   selectedBedId = null, onSelectBed,
   language = 'he', error = '', onRetry,
+  // 'same_apartment' | 'same_region' | 'cross_region' - lets the empty
+  // state explain WHAT was searched and suggest the next step, instead of
+  // a generic "no beds found".
+  scopeContext = null,
 }) {
   const isHe = language === 'he';
   // Chip filtering is derived rendering only - it never mutates or discards
@@ -383,7 +425,9 @@ export default function BedMatchPicker({
     if (regionFilter !== 'all') list = list.filter((b) => b.region_name === regionFilter);
     if (filter === 'recommended') list = list.filter((b) => (b.recommended_bed_count || 0) > 0);
     else if (filter === 'with_roommate') list = list.filter((b) => (b.roommate_bed_count || 0) > 0);
-    else if (filter === 'warning_free') list = list.filter((b) => (b.warning_free_bed_count || 0) > 0);
+    // "With warnings" = selectable beds the backend allows but flagged
+    // (available minus warning-free) - both counts are real server numbers.
+    else if (filter === 'with_warnings') list = list.filter((b) => ((b.available_bed_count || 0) - (b.warning_free_bed_count || 0)) > 0);
 
     if (search.trim()) {
       const q = search.trim().toLowerCase();
@@ -407,7 +451,7 @@ export default function BedMatchPicker({
   const t = {
     recommended: isHe ? `מומלצות (${recommendedCount})` : `Recommended (${recommendedCount})`,
     withRoommate: isHe ? `עם השותף המבוקש (${c.with_roommate || 0})` : `With requested roommate (${c.with_roommate || 0})`,
-    warningFree: isHe ? `ללא אזהרות (${c.warning_free || 0})` : `No warnings (${c.warning_free || 0})`,
+    withWarnings: isHe ? `עם אזהרות (${c.with_warnings || 0})` : `With warnings (${c.with_warnings || 0})`,
     all: isHe ? `הכול (${c.all || 0})` : `All (${c.all || 0})`,
     search: isHe ? 'חיפוש בניין / דירה / חדר...' : 'Search building/apartment/room...',
     summary: isHe
@@ -423,7 +467,7 @@ export default function BedMatchPicker({
     noOptionsForFilter: isHe ? 'אין תוצאות עבור הסינון הנוכחי מבין הבניינים שנטענו.' : 'No loaded buildings match the current filter.',
     showAllInstead: isHe ? 'הצג את הכול' : 'Show all',
     whyNot: isHe ? 'אפשרויות שאינן זמינות' : 'Unavailable options',
-    residents: isHe ? 'דיירים נוכחיים' : 'Current residents',
+    residents: isHe ? 'דיירים קיימים בדירה' : 'Current residents in apartment',
     residentsWord: isHe ? 'דיירים' : 'residents',
     beds: isHe ? 'פנויות' : 'free',
     apartmentsWord: isHe ? 'דירות' : 'apartments',
@@ -476,11 +520,29 @@ export default function BedMatchPicker({
     );
   }
 
+  // Scope-aware empty-state wording: the search itself is server-side; this
+  // only explains what WAS searched and what the user can do next.
+  const scopeEmptyCfg = {
+    same_apartment: {
+      msg: isHe ? 'אין מיטות פנויות בדירה הנוכחית - כל החדרים בדירה זו מלאים.' : 'No free beds in the current apartment - every room is full.',
+      hint: isHe ? 'ניתן ליצור בקשת מעבר לדירה אחרת באותו אזור, או מעבר לאזור אחר, במקום שינוי חדר.' : 'Consider a different-apartment transfer in the same region, or a cross-region transfer, instead of a room change.',
+    },
+    same_region: {
+      msg: isHe ? 'לא נמצאו מיטות פנויות באזור הנוכחי במסגרת בקשה זו.' : 'No free beds found in the current region for this request.',
+      hint: isHe ? 'ניתן לנסות בקשת מעבר לאזור אחר.' : 'Consider a cross-region transfer.',
+    },
+    cross_region: {
+      msg: isHe ? 'לא נמצאו מיטות פנויות באזור היעד שנבחר.' : 'No free beds found in the selected target region.',
+      hint: isHe ? 'ניתן לבחור אזור יעד אחר בבקשה חדשה.' : 'Consider a different target region in a new request.',
+    },
+  }[scopeContext] || null;
+
   if (!loading && buildings.length === 0) {
     return (
       <div className="bmp-empty">
         <AlertTriangle size={28} />
-        <p>{t.noOptions}</p>
+        <p>{scopeEmptyCfg ? scopeEmptyCfg.msg : t.noOptions}</p>
+        {scopeEmptyCfg && <p className="bmp-empty-hint">{scopeEmptyCfg.hint}</p>}
         {dataIntegrity?.missing_bed_records > 0 && (
           <p className="bmp-integrity bmp-integrity-block">
             {t.integrityNote(dataIntegrity.rooms_missing_bed_records, dataIntegrity.missing_bed_records)}
@@ -525,7 +587,7 @@ export default function BedMatchPicker({
         <div className="bmp-filters">
           {[
             ['recommended', t.recommended], ['with_roommate', t.withRoommate],
-            ['warning_free', t.warningFree], ['all', t.all],
+            ['with_warnings', t.withWarnings], ['all', t.all],
           ].map(([key, label]) => (
             <button
               key={key} type="button"
@@ -599,7 +661,10 @@ export default function BedMatchPicker({
           <div className="bmp-selection-reasons">
             <span className="bmp-selection-subtitle">{t.warningsTitle}</span>
             {sel.warnings.length > 0 ? (
-              <ReasonList items={sel.warnings} icon={AlertTriangle} tone="warn" />
+              <>
+                <ReasonList items={sel.warnings.map((w) => ({ ...w, label: warningLabel(w) }))} icon={AlertTriangle} tone="warn" />
+                <span className="bmp-warn-allowed">שיבוץ מותר עם אזהרה</span>
+              </>
             ) : (
               <span className="bmp-selection-none">{t.noWarnings}</span>
             )}
@@ -694,30 +759,30 @@ export default function BedMatchPicker({
 }
 
 const BMP_STYLES = `
-  .bmp-root { display:flex; flex-direction:column; gap:12px; font-size:14px; min-height:0; flex:1; }
-  .bmp-summary { font-size:14px; font-weight:700; color:#334155; }
+  .bmp-root { display:flex; flex-direction:column; gap:14px; font-size:15px; min-height:0; flex:1; }
+  .bmp-summary { font-size:15px; font-weight:700; color:#334155; }
   .bmp-toolbar { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
   .bmp-filters { display:flex; gap:6px; flex-wrap:wrap; }
-  .bmp-chip { border:1px solid #e2e8f0; background:white; border-radius:999px; padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; color:#475569; }
+  .bmp-chip { border:1px solid #e2e8f0; background:white; border-radius:999px; padding:7px 16px; font-size:14px; font-weight:600; cursor:pointer; color:#475569; }
   .bmp-chip:hover { border-color:#94a3b8; }
   .bmp-chip-active { background:#0f172a; color:white; border-color:#0f172a; }
   .bmp-region-chips { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
   .bmp-region-ico { color:#64748b; flex-shrink:0; }
-  .bmp-chip-sm { padding:4px 11px; font-size:12px; }
+  .bmp-chip-sm { padding:5px 13px; font-size:13px; }
   .bmp-search { display:flex; align-items:center; gap:6px; background:#f1f5f9; border-radius:10px; padding:8px 12px; min-width:220px; }
-  .bmp-search input { border:none; background:none; outline:none; font-size:13px; width:100%; font-family:inherit; }
+  .bmp-search input { border:none; background:none; outline:none; font-size:14px; width:100%; font-family:inherit; }
 
   .bmp-integrity { font-size:11px; color:#b45309; font-weight:700; display:inline-flex; align-items:center; gap:4px; }
   .bmp-integrity-banner { background:#fffbeb; border:1px solid #fcd34d; border-radius:10px; padding:8px 12px; font-size:12px; }
   .bmp-integrity-block { display:block; padding:8px 10px; background:#fffbeb; border-radius:8px; }
 
   .bmp-selection-card { display:flex; flex-direction:column; gap:8px; background:#eff6ff; border:1px solid #bfdbfe; border-radius:12px; padding:14px 16px; }
-  .bmp-selection-head { display:flex; align-items:center; gap:8px; color:#1d4ed8; font-weight:800; font-size:14px; }
-  .bmp-selection-path { display:flex; flex-direction:column; gap:3px; color:#0f172a; font-weight:700; font-size:13px; }
+  .bmp-selection-head { display:flex; align-items:center; gap:8px; color:#1d4ed8; font-weight:800; font-size:15px; }
+  .bmp-selection-path { display:flex; flex-direction:column; gap:5px; color:#0f172a; font-weight:700; font-size:14.5px; }
   .bmp-sel-line { display:flex; align-items:center; gap:6px; }
   .bmp-sel-line svg { color:#3b82f6; flex-shrink:0; }
   .bmp-selection-reasons { display:flex; flex-direction:column; gap:4px; }
-  .bmp-selection-subtitle { font-size:12px; font-weight:800; color:#475569; }
+  .bmp-selection-subtitle { font-size:13px; font-weight:800; color:#475569; }
   .bmp-selection-none { font-size:12px; color:#94a3b8; }
   .bmp-clear-selection { display:flex; align-items:center; gap:4px; margin-inline-start:auto; border:1px solid #bfdbfe; background:white; color:#1d4ed8; border-radius:8px; padding:4px 10px; font-size:12px; font-weight:700; cursor:pointer; }
   .bmp-clear-selection:hover { background:#dbeafe; }
@@ -736,46 +801,51 @@ const BMP_STYLES = `
   }
   .bmp-buildings:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; }
   .bmp-building { border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; flex-shrink:0; }
-  .bmp-building-head { width:100%; display:flex; align-items:center; gap:8px; padding:12px 14px; background:#f8fafc; font-size:14px; font-weight:700; color:#1e293b; border:none; cursor:pointer; text-align:inherit; min-height:50px; font-family:inherit; }
+  .bmp-building-head { width:100%; display:flex; align-items:center; gap:9px; padding:14px 16px; background:#f8fafc; font-size:15px; font-weight:700; color:#1e293b; border:none; cursor:pointer; text-align:inherit; min-height:56px; font-family:inherit; }
   .bmp-building-head:hover { background:#f1f5f9; }
   .bmp-building-title { font-weight:800; white-space:nowrap; }
-  .bmp-dim { color:#94a3b8; font-weight:600; font-size:13px; }
+  .bmp-dim { color:#64748b; font-weight:600; font-size:14px; }
   .bmp-full-text { color:#b91c1c; font-weight:700; }
   .bmp-star { color:#f59e0b; flex-shrink:0; }
   .bmp-apartments { display:flex; flex-direction:column; }
   .bmp-apartment { border-top:1px solid #f1f5f9; }
-  .bmp-apartment-head { width:100%; display:flex; align-items:center; gap:10px; padding:11px 14px 11px 10px; border:none; background:white; cursor:pointer; font-size:13px; text-align:inherit; min-height:46px; font-family:inherit; }
+  .bmp-apartment-head { width:100%; display:flex; align-items:center; gap:10px; padding:13px 16px 13px 12px; border:none; background:white; cursor:pointer; font-size:14.5px; text-align:inherit; min-height:52px; font-family:inherit; }
   .bmp-apartment-head:hover { background:#f8fafc; }
   .bmp-building-head:focus-visible, .bmp-apartment-head:focus-visible, .bmp-room-head:focus-visible,
   .bmp-bed-row:focus-visible, .bmp-room-single:focus-visible, .bmp-chip:focus-visible, .bmp-load-more:focus-visible {
     outline: 2px solid #2563eb; outline-offset: 2px;
   }
-  .bmp-apt-title { font-weight:800; color:#0f172a; font-size:14px; }
-  .bmp-pill { border-radius:999px; padding:3px 10px; font-size:11px; font-weight:800; white-space:nowrap; }
+  .bmp-apt-title { font-weight:800; color:#0f172a; font-size:15.5px; }
+  .bmp-pill { border-radius:999px; padding:4px 12px; font-size:12.5px; font-weight:800; white-space:nowrap; }
   .bmp-pill-roommate { background:#ede9fe; color:#6d28d9; border:1px solid #c4b5fd; }
-  .bmp-free { margin-inline-start:auto; font-size:12px; color:#16a34a; font-weight:800; white-space:nowrap; }
+  .bmp-free { margin-inline-start:auto; font-size:13.5px; color:#16a34a; font-weight:800; white-space:nowrap; }
 
-  .bmp-rooms { display:flex; flex-direction:column; gap:8px; padding:8px 14px 14px 14px; background:#fafbfc; }
-  .bmp-apt-reasons { display:flex; flex-direction:column; gap:2px; padding:4px 2px 2px; }
-  .bmp-residents { display:flex; align-items:flex-start; gap:8px; flex-wrap:wrap; font-size:12px; color:#64748b; }
+  .bmp-rooms { display:flex; flex-direction:column; gap:10px; padding:10px 16px 16px 16px; background:#fafbfc; }
+  .bmp-apt-reasons { display:flex; flex-direction:column; gap:4px; padding:4px 2px 2px; }
+  .bmp-apt-reasonline { display:flex; flex-wrap:wrap; gap:6px 14px; padding:0 16px 10px 12px; background:white; }
+  .bmp-apt-reasonline span { display:inline-flex; align-items:center; gap:5px; font-size:13px; font-weight:600; }
+  .bmp-reasonline-good { color:#15803d; }
+  .bmp-reasonline-warn { color:#b45309; }
+  .bmp-warn-allowed { align-self:flex-start; font-size:12px; font-weight:800; color:#92400e; background:#fef3c7; border:1px solid #fcd34d; border-radius:999px; padding:3px 10px; }
+  .bmp-residents { display:flex; align-items:flex-start; gap:8px; flex-wrap:wrap; font-size:13px; color:#64748b; }
   .bmp-residents-title { font-weight:700; padding-top:5px; }
   .bmp-resident-list { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-  .bmp-resident-chip { display:flex; flex-direction:column; align-items:flex-start; gap:1px; background:#eef2ff; color:#4338ca; border-radius:10px; padding:4px 10px; font-weight:600; line-height:1.3; }
+  .bmp-resident-chip { display:flex; flex-direction:column; align-items:flex-start; gap:2px; background:#eef2ff; color:#4338ca; border-radius:10px; padding:5px 12px; font-weight:600; line-height:1.35; font-size:13px; }
   .bmp-resident-name { font-weight:700; display:flex; align-items:center; gap:3px; }
-  .bmp-resident-tags { font-size:10px; font-weight:600; color:#6366f1; opacity:0.85; }
+  .bmp-resident-tags { font-size:11.5px; font-weight:600; color:#6366f1; opacity:0.85; }
 
   .bmp-room { border:1px solid #e2e8f0; border-radius:10px; background:white; overflow:hidden; }
   .bmp-room-has-selection { border-color:#93c5fd; }
-  .bmp-room-head { width:100%; display:flex; align-items:center; gap:8px; padding:9px 12px; background:#f8fafc; border:none; cursor:pointer; font-size:13px; text-align:inherit; font-family:inherit; min-height:40px; }
+  .bmp-room-head { width:100%; display:flex; align-items:center; gap:9px; padding:11px 14px; background:#f8fafc; border:none; cursor:pointer; font-size:14.5px; text-align:inherit; font-family:inherit; min-height:46px; }
   .bmp-room-head:hover { background:#f1f5f9; }
   .bmp-room-name { font-weight:800; color:#0f172a; white-space:nowrap; }
-  .bmp-room-single { width:100%; display:flex; align-items:center; gap:8px; padding:9px 12px; background:white; border:1px solid #e2e8f0; border-radius:10px; cursor:pointer; font-size:13px; text-align:inherit; font-family:inherit; min-height:44px; }
+  .bmp-room-single { width:100%; display:flex; align-items:center; gap:9px; padding:11px 14px; background:white; border:1px solid #e2e8f0; border-radius:10px; cursor:pointer; font-size:14.5px; text-align:inherit; font-family:inherit; min-height:50px; }
   .bmp-room-single:hover:not(:disabled) { border-color:#94a3b8; }
   .bmp-room-single:disabled { opacity:0.55; cursor:not-allowed; }
   .bmp-room-selected { border-color:#2563eb; background:#eff6ff; }
 
-  .bmp-bed-list { display:flex; flex-direction:column; gap:6px; padding:8px; }
-  .bmp-bed-row { display:flex; align-items:center; gap:10px; padding:9px 12px; border:1.5px solid #e2e8f0; border-radius:10px; background:white; cursor:pointer; font-size:13px; text-align:inherit; width:100%; min-height:42px; font-family:inherit; }
+  .bmp-bed-list { display:flex; flex-direction:column; gap:8px; padding:10px; }
+  .bmp-bed-row { display:flex; align-items:center; gap:10px; padding:11px 14px; border:1.5px solid #e2e8f0; border-radius:10px; background:white; cursor:pointer; font-size:14.5px; text-align:inherit; width:100%; min-height:48px; font-family:inherit; }
   .bmp-bed-row:hover:not(:disabled) { border-color:#94a3b8; }
   .bmp-bed-row:disabled { cursor:not-allowed; }
   .bmp-bed-row-occupied { opacity:0.6; background:#f8fafc; }
@@ -783,13 +853,13 @@ const BMP_STYLES = `
   .bmp-bed-radio { width:15px; height:15px; border-radius:50%; border:2px solid #cbd5e1; flex-shrink:0; }
   .bmp-bed-radio-on { border-color:#2563eb; background:radial-gradient(circle, #2563eb 40%, transparent 44%); }
   .bmp-bed-name { font-weight:700; color:#0f172a; white-space:nowrap; }
-  .bmp-bed-status { font-size:11px; font-weight:700; color:#94a3b8; }
+  .bmp-bed-status { font-size:13px; font-weight:700; color:#94a3b8; }
   .bmp-bed-status-free { color:#16a34a; }
   .bmp-bed-status-occupied { color:#b91c1c; }
   .bmp-bed-check { color:#2563eb; margin-inline-start:auto; }
 
   .bmp-reason-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:2px; }
-  .bmp-reason-list li { display:flex; align-items:center; gap:5px; font-size:11px; }
+  .bmp-reason-list li { display:flex; align-items:center; gap:6px; font-size:13px; }
   .bmp-reason-good li, .bmp-reason-good { color:#15803d; }
   .bmp-reason-warn li, .bmp-reason-warn { color:#b45309; }
   .bmp-reason-history li, .bmp-reason-history { color:#6366f1; }
@@ -800,7 +870,7 @@ const BMP_STYLES = `
   .bmp-load-more:disabled { opacity:0.6; cursor:not-allowed; }
   .bmp-load-more-primary { background:#0f172a; color:white; border-color:#0f172a; padding:10px 28px; }
   .bmp-load-more-primary:hover:not(:disabled) { background:#1e293b; }
-  .bmp-loaded-count { font-size:12px; color:#64748b; font-weight:600; }
+  .bmp-loaded-count { font-size:13px; color:#64748b; font-weight:600; }
   .bmp-all-loaded { font-size:12px; color:#16a34a; font-weight:700; }
   .bmp-loadmore-error { display:flex; align-items:center; gap:4px; font-size:12px; color:#b91c1c; font-weight:700; }
 
@@ -809,7 +879,8 @@ const BMP_STYLES = `
   .bmp-skeleton-row { height:58px; border-radius:12px; background:linear-gradient(90deg,#f1f5f9 25%,#e2e8f0 37%,#f1f5f9 63%); background-size:400% 100%; animation:bmp-shimmer 1.4s ease infinite; }
   @keyframes bmp-shimmer { 0%{background-position:100% 50%;} 100%{background-position:0 50%;} }
 
-  .bmp-empty { display:flex; flex-direction:column; align-items:center; gap:10px; padding:36px 16px; color:#94a3b8; text-align:center; font-size:14px; }
+  .bmp-empty { display:flex; flex-direction:column; align-items:center; gap:10px; padding:36px 16px; color:#64748b; text-align:center; font-size:15px; font-weight:600; }
+  .bmp-empty-hint { font-size:13.5px; color:#2563eb; font-weight:700; background:#eff6ff; border:1px solid #bfdbfe; border-radius:10px; padding:8px 14px; }
   .bmp-empty-inline { padding:24px 16px; }
   .bmp-conflicts { margin-top:12px; width:100%; text-align:inherit; background:#fef2f2; border-radius:12px; padding:12px 14px; }
   .bmp-conflicts-title { font-size:13px; font-weight:800; color:#b91c1c; display:block; margin-bottom:8px; }
