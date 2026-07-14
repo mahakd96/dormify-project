@@ -745,9 +745,9 @@ const filteredMoveRooms = useMemo(() => {
                         gap: '12px',
                         padding: '12px',
                         border: '1px solid',
-                        borderColor: isExpanded ? '#93c5fd' : '#e2e8f0',
+                        borderColor: expanded ? '#93c5fd' : '#e2e8f0',
                         borderRadius: '12px',
-                        background: isExpanded ? '#eff6ff' : 'white',
+                        background: expanded ? '#eff6ff' : 'white',
                         cursor: 'pointer',
                         textAlign: isHe ? 'right' : 'left',
                       }}

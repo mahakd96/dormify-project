@@ -21,11 +21,34 @@ MAX_SOLVER_TIME_SECONDS = 500
 NUM_SEARCH_WORKERS = 2
 
 
+
 EXCLUSIVE_HOUSING_TYPES = {
     Student.HousingType.COUPLE,
     Student.HousingType.FAMILY,
     Student.HousingType.SINGLE_IN_APARTMENT,
 }
+
+
+# ---------------------------------------------------------------------------
+# Upper Dorm Office / building-179 exclusive-group policy
+#
+# Building 179 (confirmed correct, real production value) belongs to the
+# Upper Dorm Office. That office's Region, however, is a generic region
+# record with no distinguishing name/id of its own — the one confirmed,
+# non-guessed "Upper Dorm Office" identifier in this system is a DormType
+# named "עליון עמים" with code 11 (see EXCEL_DORM_NAME_TO_OFFICIAL_CODE in
+# api/views.py). Recognition must therefore key off DormType.code == 11
+# (_is_upper_dorm_office_dorm_type), not the region's own name/id. The
+# region-name/id keyword heuristic below is kept as an additional,
+# harmless fallback for any environment/test where the region itself does
+# carry such a marker, but it is not the primary signal in production.
+# ---------------------------------------------------------------------------
+BUILDING_179_NUMBER = 179
+UPPER_DORM_OFFICE_DORM_TYPE_CODE = 11
+PRIORITY_BUILDING_CLUSTER_WEIGHT = 3
+
+UPPER_DORM_OFFICE_REGION_IDS = frozenset({"upper_dorm_office", "upper_office"})
+UPPER_DORM_OFFICE_NAME_KEYWORDS = ("עליון", "upper dorm office", "upper office")
 
 
 def _safe_str(value):
@@ -172,23 +195,16 @@ def _is_hasmaha(student):
     return "הסמכה" in _collect_special_status_text(student)
 
 
-def _needs_accessibility(student):
-    return bool(
-        getattr(student, "needs_accessibility", False)
-        or (
-            getattr(student, "is_priority", False)
-            and "נגיש" in _safe_lower(getattr(student, "priority_reason", ""))
-        )
-    )
-
-
-def _apartment_accessibility_ok(student, apartment):
-    if not _needs_accessibility(student):
-        return True
-    if not hasattr(Apartment, "is_accessible"):
-        return True
-    return bool(getattr(apartment, "is_accessible", False))
-
+def _has_anier_special_status(student):
+    """
+    ASSUMPTION (see final report): no literal 'אנייר' value was found in
+    models.py, the Excel column-alias mapping in views.py, migrations,
+    fixtures or existing tests. This helper follows the exact substring-
+    match convention already used by _is_hasmaha / _is_atudai against
+    special_status_1..4, using the exact marker text given in the
+    business requirement.
+    """
+    return "אנייר" in _collect_special_status_text(student)
 
 def _normalize_roommate_identifier(value):
     if value is None:
@@ -444,6 +460,32 @@ def _religion_key(student):
     return value
 
 
+def _is_religious_jewish(student):
+    """True when the student is both Jewish and observant at the RELIGIOUS level."""
+    return (
+        _religion_key(student) == _safe_lower(Student.Religion.Jewish)
+        and _religious_pref_key(student) == "religious"
+    )
+
+
+def _student_religious_state(student):
+    """
+    Returns the religion-restriction state this student imposes on their apartment,
+    or None if the student has no restriction (not RELIGIOUS).
+
+      ("rj",)         — Religious Jewish: apartment must contain only Jewish+RELIGIOUS
+      ("religion", r) — Religious non-Jewish (religion key r): apartment must contain
+                        only students with religion r (any observance level)
+      None            — not RELIGIOUS; student imposes no restriction
+    """
+    if _religious_pref_key(student) != "religious":
+        return None
+    r = _religion_key(student)
+    if r == _safe_lower(Student.Religion.Jewish):
+        return ("rj",)
+    return ("religion", r) if r else None
+
+
 def _sector_key(student):
     value = _safe_lower(_get_student_sector(student))
     if value in {"", "unknown", "לא ידוע", "not_specified", "לא צוין"}:
@@ -455,10 +497,25 @@ def _student_is_exclusive(student):
     return getattr(student, "housing_type", "") in EXCLUSIVE_HOUSING_TYPES
 
 
+def _effective_apartment_category(apartment):
+    """
+    Apartment.category, unless the apartment's BUILDING has a
+    gender_restriction set — in which case the building-wide restriction
+    is authoritative and overrides a possibly wrong/conflicting individual
+    apartment category (shared-facility buildings with shared bathrooms).
+    """
+    restriction = _get_building_gender_restriction(apartment.building)
+    if restriction == _safe_lower(Student.Gender.MALE):
+        return Apartment.Category.MALE
+    if restriction == _safe_lower(Student.Gender.FEMALE):
+        return Apartment.Category.FEMALE
+    return getattr(apartment, "category", None)
+
+
 def _housing_matches_apartment(student, apartment):
     housing_type = getattr(student, "housing_type", "")
     apartment_type = getattr(apartment, "apartment_type", None)
-    category = getattr(apartment, "category", None)
+    category = _effective_apartment_category(apartment)
 
     if housing_type == Student.HousingType.SINGLE_MALE:
         return (
@@ -490,11 +547,318 @@ def _housing_matches_apartment(student, apartment):
     return False
 
 
+def _get_building_gender_restriction(building):
+    """
+    Building.gender_restriction ('male'/'female'/'') is a BUILDING-level
+    hard restriction for shared-facility buildings (shared bathrooms),
+    distinct from Apartment.category. Returns None for ordinary buildings
+    (blank/unset), in which case existing apartment-category behavior is
+    unaffected.
+    """
+    value = _safe_lower(getattr(building, "gender_restriction", "") or "")
+    if value in {_safe_lower(Student.Gender.MALE), _safe_lower(Student.Gender.FEMALE)}:
+        return value
+    return None
+
+
+def _may_enter_building_due_to_gender_restriction(student, apartment):
+    """
+    When a building has a gender_restriction set, EVERY room in it is
+    restricted to that gender, regardless of any individual apartment's
+    (possibly conflicting/mislabeled) category — this overrides
+    _housing_matches_apartment's apartment-level check for that building.
+    Ordinary buildings (no restriction) are entirely unaffected.
+    """
+    restriction = _get_building_gender_restriction(apartment.building)
+    if restriction is None:
+        return True
+
+    student_gender = _safe_lower(getattr(student, "gender", "") or "")
+    if not student_gender:
+        return True
+
+    return student_gender == restriction
+
+
+def _building_gender_conflict_ids(apartments, existing_assignments_by_apartment):
+    """
+    Building ids where gender_restriction is set AND at least one existing
+    ACTIVE occupant's gender conflicts with it. Adding a new student of
+    either gender to such a building cannot fix the inconsistency (a
+    matching-gender addition still leaves it mixed because of the
+    conflicting occupant) — these buildings must be entirely frozen for
+    NEW assignments until staff resolve it manually (see
+    _gender_restricted_building_existing_occupant_warnings).
+    """
+    conflict_ids = set()
+    for apartment in apartments:
+        building_id = apartment.building_id
+        if building_id in conflict_ids:
+            continue
+        restriction = _get_building_gender_restriction(apartment.building)
+        if restriction is None:
+            continue
+        for assignment in existing_assignments_by_apartment.get(apartment.id, []):
+            occupant_gender = _safe_lower(getattr(assignment.student, "gender", "") or "")
+            if occupant_gender and occupant_gender != restriction:
+                conflict_ids.add(building_id)
+                break
+    return conflict_ids
+
+
+def _normalized_building_number(building):
+    """
+    Building.number may arrive as an int (DB default) or a str (data coming
+    from imports/tests) — normalize before comparing so '179' == 179.
+    """
+    value = getattr(building, "number", None)
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_building_179(building):
+    return _normalized_building_number(building) == BUILDING_179_NUMBER
+
+
+def _get_apartment_region(apartment):
+    building = getattr(apartment, "building", None)
+    dorm_type = getattr(building, "dorm_type", None)
+    return getattr(dorm_type, "region", None)
+
+
+def _get_apartment_dorm_type(apartment):
+    building = getattr(apartment, "building", None)
+    return getattr(building, "dorm_type", None)
+
+
+def _is_upper_dorm_office_region(region):
+    """Region-name/id fallback heuristic — see the module-level note above."""
+    if region is None:
+        return False
+    region_id = _safe_lower(getattr(region, "id", region))
+    if region_id in UPPER_DORM_OFFICE_REGION_IDS:
+        return True
+    name = _safe_lower(getattr(region, "name", ""))
+    return any(keyword in name for keyword in UPPER_DORM_OFFICE_NAME_KEYWORDS)
+
+
+def _is_upper_dorm_office_dorm_type(dorm_type):
+    """
+    DormType.code == 11 ("עליון עמים") is the confirmed, real "Upper Dorm
+    Office" identifier in this system — the primary signal (see the
+    module-level note above).
+    """
+    if dorm_type is None:
+        return False
+    return getattr(dorm_type, "code", None) == UPPER_DORM_OFFICE_DORM_TYPE_CODE
+
+
+def _apartment_in_upper_dorm_office(apartment):
+    """
+    True when this apartment's building belongs to the Upper Dorm Office,
+    recognized either by its DormType.code (primary, real signal) or by
+    its Region's own name/id (fallback heuristic).
+    """
+    return _is_upper_dorm_office_dorm_type(
+        _get_apartment_dorm_type(apartment)
+    ) or _is_upper_dorm_office_region(_get_apartment_region(apartment))
+
+
+def _is_anier_exclusive_student(student):
+    """
+    True when this student's OWN attributes — independent of any apartment
+    being evaluated — qualify them for the building-179 Upper-Dorm-Office
+    exclusive group: flagged priority, belongs to הסמכה, and carries the
+    אנייר special status. is_priority alone must never grant building-179
+    access.
+
+    This must stay apartment-independent: whether a *specific* candidate
+    apartment happens to sit in the Upper Dorm Office is a separate,
+    apartment-level question (see _apartment_in_upper_dorm_office). Bundling
+    the two together here would make "is this student exclusive" flip
+    depending on which apartment is currently being checked — silently
+    letting an eligible Anir student into an ordinary building the moment
+    that ordinary building's own dorm type/region doesn't match the Upper
+    Dorm Office (previously the case; fixed by this split).
+    """
+    return (
+        _get_student_priority(student)
+        and _is_hasmaha(student)
+        and _has_anier_special_status(student)
+    )
+
+
+def _is_building_179_exclusive_student(student, apartment):
+    """
+    True when the student's own exclusive-group attributes hold (see
+    _is_anier_exclusive_student) AND this specific apartment belongs to
+    the Upper Dorm Office (DormType.code==11, or the region-name
+    fallback) — i.e. this student, evaluated against this apartment, is
+    inside their own reserved building.
+    """
+    return _is_anier_exclusive_student(student) and _apartment_in_upper_dorm_office(apartment)
+
+
+def _may_enter_building_179(student, apartment):
+    """
+    Building-179 is a building-level exclusive policy for the Upper Dorm
+    Office (not an Apartment.InactiveReason.RESERVED substitute):
+      • only exact exclusive-group students may occupy ANY bed in this
+        building — every apartment, not merely apartments marked RESERVED;
+      • exclusive-group students may only be assigned within this building
+        — never falling back to any other, otherwise-compatible building.
+
+    A building numbered 179 that does not belong to the Upper Dorm Office
+    is an ordinary building and is not affected by this rule.
+
+    is_exclusive_student is evaluated purely from the student's own
+    attributes (_is_anier_exclusive_student), NOT from this apartment —
+    otherwise an eligible Anir student would incorrectly appear "not
+    exclusive" whenever checked against a non-upper-office apartment, and
+    be let in there instead of being confined to building 179.
+    """
+    is_179_upper_office = _is_building_179(apartment.building) and _apartment_in_upper_dorm_office(apartment)
+    is_exclusive_student = _is_anier_exclusive_student(student)
+
+    if is_exclusive_student:
+        return is_179_upper_office
+    return not is_179_upper_office
+
+
+def _should_enforce_accepted_dorm_type(student):
+    """
+    Priority students — both the building-179 exclusive group and other
+    priority students — bypass the imported accepted_dorm_type restriction.
+    Only ordinary non-priority students must continue to respect it.
+    """
+    return not _get_student_priority(student)
+
+
 def _accepted_dorm_matches(student, apartment):
+    if not _should_enforce_accepted_dorm_type(student):
+        return True
     accepted_dorm_type_id = getattr(student, "accepted_dorm_type_id", None)
     if accepted_dorm_type_id is None:
         return True
     return apartment.building.dorm_type_id == accepted_dorm_type_id
+
+
+def _building_179_existing_occupant_warnings(apartments, existing_assignments_by_apartment):
+    """
+    Diagnostic only: existing active assignments are never modified. If
+    building 179 (Upper Dorm Office) already has an occupant who is not
+    part of the exclusive group, surface a clear warning instead of
+    silently producing a misleading allocation.
+    """
+    warnings = []
+    for apartment in apartments:
+        if not (_is_building_179(apartment.building) and _apartment_in_upper_dorm_office(apartment)):
+            continue
+
+        for assignment in existing_assignments_by_apartment.get(apartment.id, []):
+            occupant = assignment.student
+            if not _is_building_179_exclusive_student(occupant, apartment):
+                warnings.append(
+                    "Building 179 (Upper Dorm Office) apartment "
+                    f"{_safe_str(apartment.number)} already has an existing "
+                    f"occupant (student_id={_get_student_identifier(occupant)}) "
+                    "who does not belong to the exclusive group; the existing "
+                    "assignment was preserved unchanged."
+                )
+    return warnings
+
+
+def _anier_building_179_diagnostics(students, apartments, student_candidates, free_capacity_by_apartment):
+    """
+    Diagnostic counters for the building-179 / Upper Dorm Office Anir
+    (אנייר) policy, computed on every solver run so a broken upload
+    mapping or a missing/misconfigured reserved building shows up
+    immediately instead of silently producing zero Anir assignments:
+
+      imported_anier_students             — students in this run carrying
+                                             the אנייר special status.
+      eligible_anier_students              — of those, how many also carry
+                                             is_priority and הסמכה (the
+                                             full exclusive-group criteria,
+                                             independent of any apartment).
+      reserved_building_found              — whether an apartment matching
+                                             building 179 in the Upper Dorm
+                                             Office actually exists in this
+                                             run's room inventory.
+      reserved_building_available_beds     — free beds in that building.
+      eligible_anier_students_sent_to_solver — eligible students who
+                                             actually have that building
+                                             as a CP-SAT candidate (i.e.
+                                             both the upload mapping AND
+                                             the building/region match
+                                             connected end-to-end).
+    """
+    imported_anier_students = [
+        student for student in students if _has_anier_special_status(student)
+    ]
+    eligible_anier_students = [
+        student for student in imported_anier_students
+        if _get_student_priority(student) and _is_hasmaha(student)
+    ]
+
+    reserved_building_179_apartment_ids = {
+        apartment.id
+        for apartment in apartments
+        if _is_building_179(apartment.building) and _apartment_in_upper_dorm_office(apartment)
+    }
+    reserved_building_available_beds = sum(
+        free_capacity_by_apartment.get(apartment_id, 0)
+        for apartment_id in reserved_building_179_apartment_ids
+    )
+
+    eligible_anier_sent_to_solver = [
+        student for student in eligible_anier_students
+        if reserved_building_179_apartment_ids & set(student_candidates.get(student.id, []))
+    ]
+
+    return {
+        "imported_anier_students": len(imported_anier_students),
+        "eligible_anier_students": len(eligible_anier_students),
+        "reserved_building_found": bool(reserved_building_179_apartment_ids),
+        "reserved_building_available_beds": reserved_building_available_beds,
+        "eligible_anier_students_sent_to_solver": len(eligible_anier_sent_to_solver),
+    }
+
+
+def _gender_restricted_building_existing_occupant_warnings(apartments, existing_assignments_by_apartment):
+    """
+    Diagnostic only: existing active assignments are never modified. If a
+    building's gender_restriction was set/changed after some students were
+    already housed there (e.g. legacy occupants of the now-restricted-out
+    gender), surface a clear warning instead of silently producing a
+    misleading allocation. The building is frozen for ALL new assignments
+    (see _building_gender_conflict_ids) until staff resolve the
+    inconsistency manually — adding even a matching-gender student would
+    not fix an already-mixed building.
+    """
+    warnings = []
+    for apartment in apartments:
+        restriction = _get_building_gender_restriction(apartment.building)
+        if restriction is None:
+            continue
+
+        for assignment in existing_assignments_by_apartment.get(apartment.id, []):
+            occupant = assignment.student
+            occupant_gender = _safe_lower(getattr(occupant, "gender", "") or "")
+            if occupant_gender and occupant_gender != restriction:
+                warnings.append(
+                    f"Building {_safe_str(apartment.building.number)} is restricted to "
+                    f"{restriction} students, but already has an existing occupant "
+                    f"(student_id={_get_student_identifier(occupant)}) of a different "
+                    "gender; the existing assignment was preserved unchanged, and this "
+                    "building is frozen for new solver assignments until staff resolve "
+                    "the inconsistency manually."
+                )
+    return warnings
 
 
 def _apartment_is_available_for_student(
@@ -502,9 +866,33 @@ def _apartment_is_available_for_student(
     apartment,
     existing_assignments,
     existing_exclusive,
-    existing_religious_preferences,
     hard_religious_together,
+    existing_rj=False,
+    existing_non_rj=False,
+    existing_restricted_religions=frozenset(),
+    existing_religion_set=frozenset(),
+    frozen_gender_conflict_building_ids=frozenset(),
 ):
+    """
+    Return True when the apartment is a feasible candidate for this student.
+
+    When hard_religious_together is True the rule works symmetrically:
+
+    Direction 1 — existing RELIGIOUS occupants restrict the apartment:
+      • If a Religious Jewish occupant is present, only Jewish+RELIGIOUS students
+        may enter.
+      • If a Religious non-Jewish occupant of religion R is present, only students
+        with religion R (any observance level) may enter.
+
+    Direction 2 — the new student's own restriction must not conflict with existing
+    occupants:
+      • A Religious Jewish student blocks entry unless all existing occupants are
+        also Religious Jewish (existing_non_rj must be False).
+      • A Religious non-Jewish student of religion R blocks entry unless all existing
+        occupants also have religion R (existing_religion_set ⊆ {R}).
+
+    An empty apartment is always available to any student.
+    """
     building = apartment.building
 
     if not bool(getattr(building, "is_active", True)):
@@ -514,29 +902,162 @@ def _apartment_is_available_for_student(
     if getattr(apartment, "inactive_reason", "") == Apartment.InactiveReason.RESERVED:
         if not _get_student_priority(student):
             return False
+    if not _may_enter_building_179(student, apartment):
+        return False
+    if apartment.building_id in frozen_gender_conflict_building_ids:
+        # An existing occupant already conflicts with this building's
+        # gender_restriction; adding anyone new (either gender) cannot fix
+        # that, so the whole building is frozen for new assignments until
+        # staff resolve it manually.
+        return False
+    if not _may_enter_building_due_to_gender_restriction(student, apartment):
+        return False
     if not _accepted_dorm_matches(student, apartment):
         return False
     if not _housing_matches_apartment(student, apartment):
         return False
-    if not _apartment_accessibility_ok(student, apartment):
-        return False
 
     if _student_is_exclusive(student):
+        # Exclusive housing types (Z3 couple / Z4 family / Z6 single-in-
+        # apartment) each represent one COMPLETE application, not one
+        # household member. An apartment with any existing active
+        # assignment is unavailable to every additional exclusive-type
+        # applicant, unconditionally — there is no second Student record
+        # to ever admit alongside it.
         if existing_assignments:
             return False
     elif existing_exclusive:
         return False
 
     if hard_religious_together:
-        student_preference = _religious_pref_key(student)
-        if student_preference and existing_religious_preferences:
-            if existing_religious_preferences != {student_preference}:
+        s_state = _student_religious_state(student)
+        s_religion = _religion_key(student)
+
+        # Direction 1: existing RELIGIOUS occupants restrict the apartment
+        if existing_rj and not _is_religious_jewish(student):
+            return False
+        for r in existing_restricted_religions:
+            if s_religion != r:
                 return False
+
+        # Direction 2: this student's restriction must not conflict with existing occupants
+        if s_state is not None:
+            if s_state[0] == "rj":
+                if existing_non_rj:
+                    return False
+            elif s_state[0] == "religion":
+                r = s_state[1]
+                if existing_religion_set - {r}:
+                    return False
 
     return True
 
 
+def _rooms_by_apartment_id(rooms):
+    grouped = defaultdict(list)
+    for room in rooms:
+        grouped[room.apartment_id].append(room)
+    return grouped
+
+
+def _room_capacity(room):
+    try:
+        return int(getattr(room, "capacity", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _apartment_uses_room_pairing(apartment_id, rooms_by_apartment):
+    """
+    Shared-facility apartments contain more than one room, with at least
+    one room holding more than a single student (e.g. two 2-bed bedrooms
+    sharing one apartment/kitchen). For these apartments, hard/soft
+    compatibility (religion, roommate requests, sector, academic-year
+    preference, special-status preference) must be evaluated for the
+    actual pair sharing a specific ROOM, not for the apartment as a whole.
+
+    Apartments with a single room (any capacity) are left on the existing
+    apartment-level path — room == apartment there, so behavior does not
+    change. Apartments with several single-bed rooms (the existing
+    "apartment as shared living/common-space unit, private bedrooms"
+    pattern already used throughout the test suite) are also left
+    unchanged, since no two students can ever occupy the same room there.
+    """
+    apartment_rooms = rooms_by_apartment.get(apartment_id, [])
+    if len(apartment_rooms) <= 1:
+        return False
+    return any(_room_capacity(room) > 1 for room in apartment_rooms)
+
+
+def _build_candidate_rooms(
+    students,
+    room_pairing_rooms,
+    student_apartment_candidates,
+    inventory,
+    hard_religious_together,
+):
+    """
+    Room-level candidate generation for shared-facility (room-pairing)
+    apartments only. Gender/housing/accepted-dorm-type/building-179/
+    RESERVED-priority eligibility was already verified at the apartment
+    level (student_apartment_candidates); this only adds the room-specific
+    free-bed and existing-occupant religion checks, mirroring the same
+    two-directional logic used by _apartment_is_available_for_student but
+    scoped to the actual room instead of the whole apartment.
+    """
+    candidates = defaultdict(list)
+
+    for student in students:
+        apartment_ids = set(student_apartment_candidates.get(student.id, []))
+        if not apartment_ids:
+            continue
+
+        s_state = _student_religious_state(student) if hard_religious_together else None
+        s_religion = _religion_key(student) if hard_religious_together else ""
+
+        for room in room_pairing_rooms:
+            if room.apartment_id not in apartment_ids:
+                continue
+            if not inventory["free_beds_by_room"].get(room.id):
+                continue
+
+            if hard_religious_together:
+                if room.id in inventory["existing_rj_rooms"] and not _is_religious_jewish(student):
+                    continue
+
+                conflict = False
+                for r in inventory["existing_restricted_religion_by_room"].get(room.id, frozenset()):
+                    if s_religion != r:
+                        conflict = True
+                        break
+                if conflict:
+                    continue
+
+                if s_state is not None:
+                    if s_state[0] == "rj" and room.id in inventory["existing_non_rj_rooms"]:
+                        continue
+                    if s_state[0] == "religion":
+                        r = s_state[1]
+                        if inventory["existing_religion_set_by_room"].get(room.id, frozenset()) - {r}:
+                            continue
+
+            candidates[student.id].append(room.id)
+
+    return candidates
+
+
 def _ensure_beds_for_room(room):
+    """
+    Auto-create any Bed rows missing relative to Room.capacity (a data-
+    entry gap between the recorded room capacity and the actual Bed rows).
+
+    Callers pass rooms with .prefetch_related("beds") (see
+    _normalize_rooms_input), so room.beds.all() may be served from
+    Django's prefetch cache. Without invalidating that cache after
+    bulk_create, the very same solver run would still see the OLD bed
+    count when _prepare_inventory immediately re-reads room.beds.all() —
+    silently undoing this auto-repair for the run that needed it.
+    """
     capacity = int(getattr(room, "capacity", 0) or 0)
     existing_beds = list(room.beds.all())
     if capacity <= len(existing_beds):
@@ -549,6 +1070,10 @@ def _ensure_beds_for_room(room):
         ]
     )
 
+    prefetch_cache = getattr(room, "_prefetched_objects_cache", None)
+    if prefetch_cache is not None:
+        prefetch_cache.pop("beds", None)
+
 
 def _normalize_rooms_input(rooms):
     if hasattr(rooms, "select_related"):
@@ -557,6 +1082,7 @@ def _normalize_rooms_input(rooms):
                 "apartment",
                 "apartment__building",
                 "apartment__building__dorm_type",
+                "apartment__building__dorm_type__region",
             ).prefetch_related("beds")
         )
 
@@ -570,6 +1096,7 @@ def _normalize_rooms_input(rooms):
             "apartment",
             "apartment__building",
             "apartment__building__dorm_type",
+            "apartment__building__dorm_type__region",
         )
         .prefetch_related("beds")
     )
@@ -599,16 +1126,44 @@ def _prepare_inventory(rooms):
     active_bed_ids = {assignment.bed_id for assignment in active_assignments}
     existing_assignments_by_apartment = defaultdict(list)
     existing_exclusive_by_apartment = defaultdict(bool)
-    existing_religious_preferences_by_apartment = defaultdict(set)
+    # Per-apartment religion tracking for the ReligiousTogether hard constraint:
+    #   existing_rj_apartments        — apt_ids with ≥1 Religious Jewish occupant
+    #   existing_non_rj_apartments    — apt_ids with ≥1 non-Religious-Jewish occupant
+    #   existing_restricted_religion_by_apartment — religion keys of RELIGIOUS non-Jewish occupants
+    #   existing_religion_set_by_apartment        — religion keys of ALL occupants
+    existing_rj_apartments = set()
+    existing_non_rj_apartments = set()
+    existing_restricted_religion_by_apartment = defaultdict(set)
+    existing_religion_set_by_apartment = defaultdict(set)
+
+    # Same tracking again, but keyed by room_id — used for the room-pairing
+    # (shared-facility, multi-room, 2-per-room) hard-religion check, which
+    # must evaluate the actual room-sharing pair, not the whole apartment.
+    existing_rj_rooms = set()
+    existing_non_rj_rooms = set()
+    existing_restricted_religion_by_room = defaultdict(set)
+    existing_religion_set_by_room = defaultdict(set)
 
     for assignment in active_assignments:
         apartment_id = assignment.bed.room.apartment_id
+        room_id = assignment.bed.room_id
         existing_assignments_by_apartment[apartment_id].append(assignment)
         if _student_is_exclusive(assignment.student):
             existing_exclusive_by_apartment[apartment_id] = True
-        preference = _religious_pref_key(assignment.student)
-        if preference:
-            existing_religious_preferences_by_apartment[apartment_id].add(preference)
+        if _is_religious_jewish(assignment.student):
+            existing_rj_apartments.add(apartment_id)
+            existing_rj_rooms.add(room_id)
+        else:
+            existing_non_rj_apartments.add(apartment_id)
+            existing_non_rj_rooms.add(room_id)
+        state = _student_religious_state(assignment.student)
+        if state is not None and state[0] == "religion":
+            existing_restricted_religion_by_apartment[apartment_id].add(state[1])
+            existing_restricted_religion_by_room[room_id].add(state[1])
+        r = _religion_key(assignment.student)
+        if r:
+            existing_religion_set_by_apartment[apartment_id].add(r)
+            existing_religion_set_by_room[room_id].add(r)
 
     free_beds_by_apartment = defaultdict(list)
     free_beds_by_room = defaultdict(list)
@@ -636,7 +1191,14 @@ def _prepare_inventory(rooms):
         "active_assignments": active_assignments,
         "existing_assignments_by_apartment": existing_assignments_by_apartment,
         "existing_exclusive_by_apartment": existing_exclusive_by_apartment,
-        "existing_religious_preferences_by_apartment": existing_religious_preferences_by_apartment,
+        "existing_rj_apartments": existing_rj_apartments,
+        "existing_non_rj_apartments": existing_non_rj_apartments,
+        "existing_restricted_religion_by_apartment": existing_restricted_religion_by_apartment,
+        "existing_religion_set_by_apartment": existing_religion_set_by_apartment,
+        "existing_rj_rooms": existing_rj_rooms,
+        "existing_non_rj_rooms": existing_non_rj_rooms,
+        "existing_restricted_religion_by_room": existing_restricted_religion_by_room,
+        "existing_religion_set_by_room": existing_religion_set_by_room,
         "free_beds_by_apartment": free_beds_by_apartment,
         "free_beds_by_room": free_beds_by_room,
         "apartments_by_id": apartments_by_id,
@@ -648,7 +1210,16 @@ def _build_candidate_apartments(
     apartments,
     inventory,
     hard_religious_together,
+    room_pairing_apartment_ids=frozenset(),
+    frozen_gender_conflict_building_ids=frozenset(),
 ):
+    """
+    For apartments using room-pairing (see _apartment_uses_room_pairing),
+    the apartment-wide existing-occupant religion check is skipped here —
+    it is re-evaluated per ROOM in _build_candidate_rooms instead. Without
+    this, a single existing occupant in one room would incorrectly block a
+    student from every OTHER, unrelated room in the same apartment.
+    """
     candidates = defaultdict(list)
 
     for student in students:
@@ -657,13 +1228,31 @@ def _build_candidate_apartments(
             if not inventory["free_beds_by_apartment"].get(apartment_id):
                 continue
 
+            is_room_pairing = apartment_id in room_pairing_apartment_ids
+
             if _apartment_is_available_for_student(
                 student,
                 apartment,
                 inventory["existing_assignments_by_apartment"].get(apartment_id, []),
                 inventory["existing_exclusive_by_apartment"].get(apartment_id, False),
-                inventory["existing_religious_preferences_by_apartment"].get(apartment_id, set()),
                 hard_religious_together,
+                existing_rj=(
+                    False if is_room_pairing
+                    else apartment_id in inventory["existing_rj_apartments"]
+                ),
+                existing_non_rj=(
+                    False if is_room_pairing
+                    else apartment_id in inventory["existing_non_rj_apartments"]
+                ),
+                existing_restricted_religions=(
+                    frozenset() if is_room_pairing
+                    else inventory["existing_restricted_religion_by_apartment"].get(apartment_id, frozenset())
+                ),
+                existing_religion_set=(
+                    frozenset() if is_room_pairing
+                    else inventory["existing_religion_set_by_apartment"].get(apartment_id, frozenset())
+                ),
+                frozen_gender_conflict_building_ids=frozen_gender_conflict_building_ids,
             ):
                 candidates[student.id].append(apartment_id)
 
@@ -686,32 +1275,80 @@ def _add_hard_religious_together(
     assignment_vars,
     student_candidates,
 ):
-    groups_by_apartment = defaultdict(lambda: defaultdict(list))
+    """
+    Enforce the ReligiousTogether hard rule for students in this CP-SAT run.
 
-    for student in students:
-        preference = _religious_pref_key(student)
-        if not preference:
-            continue
-        for apartment_id in student_candidates.get(student.id, []):
-            variable = assignment_vars.get((student.id, apartment_id))
-            if variable is not None:
-                groups_by_apartment[apartment_id][preference].append(variable)
+    Two constraint families are added per apartment:
 
+    Constraint A — RJ isolation:
+      has_rj is True iff any Religious Jewish student is assigned.
+      When has_rj is True, every non-Religious-Jewish variable is forced to 0.
+
+    Constraint B — per-religion isolation (one per non-Jewish religion that has
+      at least one RELIGIOUS candidate):
+      has_rel_<r> is True iff any RELIGIOUS student of religion r is assigned.
+      When has_rel_<r> is True, every student whose religion != r is forced to 0.
+
+    Together these rules ensure:
+      • Religious Jewish students share only with other Religious Jewish students.
+      • Religious non-Jewish students of religion R share only with students who
+        also have religion R (any observance level).
+      • Two RELIGIOUS students of different religions cannot share — the constraints
+        block each other symmetrically.
+      • Unrestricted (non-RELIGIOUS) students of any mix of religions may share
+        freely as long as no RELIGIOUS student is present.
+    """
     created = 0
     for apartment in apartments:
-        used_vars = []
-        for group_index, member_vars in enumerate(
-            groups_by_apartment.get(apartment.id, {}).values(),
-            start=1,
-        ):
-            used_var = model.NewBoolVar(
-                f"religious_group_a{apartment.id}_{group_index}"
-            )
-            _link_group_used_var(model, used_var, member_vars)
-            used_vars.append(used_var)
+        apt_id = apartment.id
+
+        rj_vars = []
+        non_rj_vars = []
+        religious_non_jewish_by_religion = defaultdict(list)
+        all_vars_by_religion = defaultdict(list)
+
+        for student in students:
+            if apt_id not in student_candidates.get(student.id, []):
+                continue
+            variable = assignment_vars.get((student.id, apt_id))
+            if variable is None:
+                continue
+
+            state = _student_religious_state(student)
+            r = _religion_key(student)
+
+            if _is_religious_jewish(student):
+                rj_vars.append(variable)
+            else:
+                non_rj_vars.append(variable)
+
+            if state is not None and state[0] == "religion":
+                religious_non_jewish_by_religion[state[1]].append(variable)
+
+            all_vars_by_religion[r].append(variable)
+
+        # Constraint A: RJ isolation
+        if rj_vars and non_rj_vars:
+            has_rj = model.NewBoolVar(f"has_rj_a{apt_id}")
+            _link_group_used_var(model, has_rj, rj_vars)
+            for v in non_rj_vars:
+                model.Add(has_rj + v <= 1)
             created += 1
-        if used_vars:
-            model.Add(sum(used_vars) <= 1)
+
+        # Constraint B: per-religion isolation for Religious non-Jewish students
+        for rel_r, rel_vars in religious_non_jewish_by_religion.items():
+            other_vars = [
+                v
+                for other_r, var_list in all_vars_by_religion.items()
+                if other_r != rel_r
+                for v in var_list
+            ]
+            if rel_vars and other_vars:
+                has_rel_r = model.NewBoolVar(f"has_rel_{rel_r}_a{apt_id}")
+                _link_group_used_var(model, has_rel_r, rel_vars)
+                for v in other_vars:
+                    model.Add(has_rel_r + v <= 1)
+                created += 1
 
     return created
 
@@ -805,22 +1442,101 @@ def _add_soft_mix_penalty(
     return created
 
 
+def _add_priority_building_clustering(
+    model,
+    objective_terms,
+    students,
+    apartments,
+    assignment_vars,
+    student_candidates,
+    weight,
+):
+    """
+    Soft rule: prefer clustering non-exclusive priority students (priority
+    students who are NOT part of the building-179 exclusive group) into as
+    few distinct buildings as reasonably possible. Grouping is decided by
+    building_id, not dorm type or apartment id.
+
+    One boolean "building used by this group" variable is created per
+    building actually reachable by an eligible student — O(number of
+    buildings) extra variables — instead of comparing every pair of
+    students against every building (which would be an uncontrolled
+    O(students^2 x buildings) formulation).
+
+    This must never affect feasibility: it is only ever added as a soft
+    objective term, dominated by the base assignment score and, when
+    priorityFirst is enabled, by the priority assignment score (see
+    run_improved_ortools_allocation).
+    """
+    if weight <= 0:
+        return 0
+
+    apartment_by_id = {apartment.id: apartment for apartment in apartments}
+    building_vars = defaultdict(list)
+
+    for student in students:
+        if not _get_student_priority(student):
+            continue
+        for apartment_id in student_candidates.get(student.id, []):
+            apartment = apartment_by_id.get(apartment_id)
+            if apartment is None:
+                continue
+
+            if _is_building_179_exclusive_student(student, apartment):
+                # Exclusive-group students are governed entirely by the
+                # building-179 hard rule; they never participate in the
+                # "spread across as few buildings as possible" preference.
+                continue
+
+            variable = assignment_vars.get((student.id, apartment_id))
+            if variable is not None:
+                building_vars[apartment.building_id].append(variable)
+
+    created = 0
+    for building_id, member_vars in building_vars.items():
+        used_var = model.NewBoolVar(f"priority_building_used_b{building_id}")
+        _link_group_used_var(model, used_var, member_vars)
+        objective_terms.append(used_var * (-weight * WEIGHT_UNIT))
+        created += 1
+
+    return created
+
+
 def _add_greedy_hint(
     model,
     students,
     assignment_vars,
     student_candidates,
     free_capacity_by_apartment,
-    existing_religious_preferences,
+    existing_rj_apartments,
+    existing_non_rj_apartments,
+    existing_restricted_religion_by_apartment,
+    existing_religion_set_by_apartment,
     hard_religious_together,
 ):
+    """
+    Provide a warm-start hint to CP-SAT using a greedy assignment pass.
+
+    When hard_religious_together is True the hint replicates the same two-directional
+    compatibility check used by the real constraint and candidate filtering, tracking
+    per apartment:
+      apt_rj_set               — apt_ids that have ≥1 Religious Jewish occupant
+      apt_non_rj_set           — apt_ids that have ≥1 non-RJ occupant
+      apt_restricted_religions — religion keys of RELIGIOUS non-Jewish occupants
+      apt_religion_set         — all religion keys of occupants placed so far
+    """
     remaining_capacity = dict(free_capacity_by_apartment)
     exclusive_apartments = set()
-    apartment_preference = {
-        apartment_id: next(iter(preferences))
-        for apartment_id, preferences in existing_religious_preferences.items()
-        if len(preferences) == 1
-    }
+
+    apt_rj_set = set(existing_rj_apartments)
+    apt_non_rj_set = set(existing_non_rj_apartments)
+    apt_restricted_religions = defaultdict(set)
+    for apt_id, rel_set in existing_restricted_religion_by_apartment.items():
+        apt_restricted_religions[apt_id] = set(rel_set)
+    apt_religion_set = defaultdict(set)
+    for apt_id, rel_set in existing_religion_set_by_apartment.items():
+        apt_religion_set[apt_id] = set(rel_set)
+
     selected = {}
 
     ordered_students = sorted(
@@ -834,7 +1550,6 @@ def _add_greedy_hint(
     )
 
     for student in ordered_students:
-        preference = _religious_pref_key(student) if hard_religious_together else ""
         is_exclusive = _student_is_exclusive(student)
 
         candidates = sorted(
@@ -851,14 +1566,29 @@ def _add_greedy_hint(
             if apartment_id in exclusive_apartments:
                 continue
 
-            current_preference = apartment_preference.get(apartment_id)
-            if (
-                hard_religious_together
-                and preference
-                and current_preference
-                and current_preference != preference
-            ):
-                continue
+            if hard_religious_together:
+                s_state = _student_religious_state(student)
+                s_religion = _religion_key(student)
+
+                # Direction 1: existing restriction blocks student
+                if apartment_id in apt_rj_set and not _is_religious_jewish(student):
+                    continue
+                conflict = False
+                for r in apt_restricted_religions.get(apartment_id, set()):
+                    if s_religion != r:
+                        conflict = True
+                        break
+                if conflict:
+                    continue
+
+                # Direction 2: student's restriction blocks existing occupants
+                if s_state is not None:
+                    if s_state[0] == "rj" and apartment_id in apt_non_rj_set:
+                        continue
+                    if s_state[0] == "religion":
+                        r = s_state[1]
+                        if apt_religion_set.get(apartment_id, set()) - {r}:
+                            continue
 
             selected[student.id] = apartment_id
 
@@ -868,8 +1598,18 @@ def _add_greedy_hint(
             else:
                 remaining_capacity[apartment_id] -= 1
 
-            if hard_religious_together and preference and not current_preference:
-                apartment_preference[apartment_id] = preference
+            if hard_religious_together:
+                s_state = _student_religious_state(student)
+                s_religion = _religion_key(student)
+                if _is_religious_jewish(student):
+                    apt_rj_set.add(apartment_id)
+                else:
+                    apt_non_rj_set.add(apartment_id)
+                if s_state is not None and s_state[0] == "religion":
+                    apt_restricted_religions[apartment_id].add(s_state[1])
+                if s_religion:
+                    apt_religion_set[apartment_id].add(s_religion)
+
             break
 
     for key, variable in assignment_vars.items():
@@ -982,6 +1722,13 @@ def run_improved_ortools_allocation(
         "assignments": [],
         "warnings": [],
         "students_with_no_feasible_beds": [],
+        "anier_building_179_diagnostics": {
+            "imported_anier_students": 0,
+            "eligible_anier_students": 0,
+            "reserved_building_found": False,
+            "reserved_building_available_beds": 0,
+            "eligible_anier_students_sent_to_solver": 0,
+        },
     }
 
     if not students:
@@ -1000,6 +1747,24 @@ def run_improved_ortools_allocation(
         key=lambda apartment: apartment.id,
     )
 
+    all_apartments_by_id = {room.apartment_id: room.apartment for room in rooms}
+    results["warnings"].extend(
+        _building_179_existing_occupant_warnings(
+            all_apartments_by_id.values(),
+            inventory["existing_assignments_by_apartment"],
+        )
+    )
+    results["warnings"].extend(
+        _gender_restricted_building_existing_occupant_warnings(
+            all_apartments_by_id.values(),
+            inventory["existing_assignments_by_apartment"],
+        )
+    )
+    frozen_gender_conflict_building_ids = _building_gender_conflict_ids(
+        all_apartments_by_id.values(),
+        inventory["existing_assignments_by_apartment"],
+    )
+
     if not apartments:
         results["solver_status"] = "NO_FREE_BEDS"
         results["warnings"].append("No free beds are available.")
@@ -1010,22 +1775,61 @@ def run_improved_ortools_allocation(
         for apartment in apartments
     }
 
+    # Shared-facility (room-pairing) apartments: apartments with more than
+    # one room where at least one room holds more than a single student.
+    # Hard/soft compatibility for these apartments is evaluated per ROOM
+    # further below; ordinary apartments are completely unaffected.
+    rooms_by_apartment_id_map = _rooms_by_apartment_id(rooms)
+    room_pairing_apartment_ids = {
+        apartment.id
+        for apartment in apartments
+        if _apartment_uses_room_pairing(apartment.id, rooms_by_apartment_id_map)
+    }
+    ordinary_apartments = [
+        apartment for apartment in apartments
+        if apartment.id not in room_pairing_apartment_ids
+    ]
+
     student_candidates = _build_candidate_apartments(
         students,
         apartments,
         inventory,
         hard_religious_together,
+        room_pairing_apartment_ids=room_pairing_apartment_ids,
+        frozen_gender_conflict_building_ids=frozen_gender_conflict_building_ids,
     )
 
     for student in students:
         if not student_candidates.get(student.id):
             results["students_with_no_feasible_beds"].append(student.id)
 
+    results["anier_building_179_diagnostics"] = _anier_building_179_diagnostics(
+        students, apartments, student_candidates, free_capacity_by_apartment,
+    )
+    _solver_log(
+        "anier_building_179_diagnostics",
+        **results["anier_building_179_diagnostics"],
+    )
+
     roommate_pairs, unmatched_roommate_targets = _build_relevant_roommate_pairs(students)
     if unmatched_roommate_targets:
         results["warnings"].append(
             f"Unresolved roommate targets: {unmatched_roommate_targets}"
         )
+
+    # Z3/Z4/Z6 Student records each represent one COMPLETE, independent
+    # application (couple/family/single-in-apartment), never one member of
+    # a shared household. A roommate request referencing another exclusive-
+    # type student therefore has no meaning and must never combine two such
+    # records, or feed the general same-apartment/roommate-match machinery
+    # below — otherwise a stray mutual request between two unrelated
+    # exclusive applicants could incorrectly cap them at one combined
+    # assignment (since they can never legally share an apartment).
+    roommate_pairs = [
+        (student_1, student_2)
+        for student_1, student_2 in roommate_pairs
+        if not (_student_is_exclusive(student_1) or _student_is_exclusive(student_2))
+    ]
 
     model = cp_model.CpModel()
 
@@ -1036,6 +1840,61 @@ def run_improved_ortools_allocation(
         for student in students
         for apartment_id in student_candidates.get(student.id, [])
     }
+
+    # Room-level layer for shared-facility (room-pairing) apartments only.
+    # Ordinary apartments (single room, or several 1-bed rooms) are
+    # entirely unaffected — no room_assignment_vars are created for them,
+    # and their students/apartments keep using the apartment-level path
+    # above exactly as before.
+    room_pairing_rooms = [
+        room for room in rooms
+        if room.apartment_id in room_pairing_apartment_ids
+        and inventory["free_beds_by_room"].get(room.id)
+    ]
+    student_room_candidates = _build_candidate_rooms(
+        students,
+        room_pairing_rooms,
+        student_candidates,
+        inventory,
+        hard_religious_together,
+    )
+    room_assignment_vars = {
+        (student.id, room_id): model.NewBoolVar(
+            f"assign_s{student.id}_r{room_id}"
+        )
+        for student in students
+        for room_id in student_room_candidates.get(student.id, [])
+    }
+
+    # Link: a student present in a room-pairing apartment must occupy
+    # exactly one of its candidate rooms; absent from the apartment means
+    # absent from all of its rooms.
+    for student in students:
+        for apartment_id in student_candidates.get(student.id, []):
+            if apartment_id not in room_pairing_apartment_ids:
+                continue
+            apartment_room_ids = [
+                room.id for room in rooms_by_apartment_id_map.get(apartment_id, [])
+            ]
+            member_room_vars = [
+                room_assignment_vars[(student.id, room_id)]
+                for room_id in apartment_room_ids
+                if (student.id, room_id) in room_assignment_vars
+            ]
+            model.Add(
+                assignment_vars[(student.id, apartment_id)]
+                == (sum(member_room_vars) if member_room_vars else 0)
+            )
+
+    students_by_room = defaultdict(list)
+    for (student_id, room_id), variable in room_assignment_vars.items():
+        students_by_room[room_id].append(variable)
+
+    for room in room_pairing_rooms:
+        capacity = len(inventory["free_beds_by_room"].get(room.id, []))
+        room_vars_list = students_by_room.get(room.id, [])
+        if room_vars_list:
+            model.Add(sum(room_vars_list) <= capacity)
 
     assigned_expr_by_student = {}
     for student in students:
@@ -1073,23 +1932,40 @@ def run_improved_ortools_allocation(
             continue
 
         if exclusive_vars:
+            # Exclusive housing types (Z3 couple / Z4 family / Z6 single-
+            # in-apartment) each represent one COMPLETE application, not
+            # one household member — a matching Student row is never split
+            # across, or shared with, another Student row. At most one
+            # exclusive-type Student record may ever be assigned to this
+            # apartment, regardless of remaining physical bed capacity
+            # (unused beds represent the applicant's spouse/family, who
+            # are not tracked as separate records in this system).
             model.Add(sum(exclusive_vars) <= 1)
+
             shared_vars = shared_students_by_apartment.get(apartment_id, [])
             if shared_vars:
-                model.Add(sum(shared_vars) + capacity * sum(exclusive_vars) <= capacity)
-            else:
-                model.Add(sum(exclusive_vars) <= 1)
+                model.Add(
+                    sum(shared_vars) + capacity * sum(exclusive_vars) <= capacity
+                )
         else:
             model.Add(sum(all_vars) <= capacity)
 
     same_apartment_vars = {}
     common_apartments_by_pair = {}
+    same_room_vars = {}
+    common_rooms_by_pair = {}
 
     for student_1, student_2 in roommate_pairs:
         first_id, second_id = sorted((student_1.id, student_2.id))
+
+        # Room-pairing apartments are excluded here — "living together" for
+        # those is decided at the room level below, not the apartment level.
         common_apartments = sorted(
-            set(student_candidates.get(first_id, []))
-            & set(student_candidates.get(second_id, []))
+            (
+                set(student_candidates.get(first_id, []))
+                & set(student_candidates.get(second_id, []))
+            )
+            - room_pairing_apartment_ids
         )
         common_apartments_by_pair[(first_id, second_id)] = common_apartments
 
@@ -1104,33 +1980,76 @@ def run_improved_ortools_allocation(
             model.Add(variable <= second_assignment)
             model.Add(variable >= first_assignment + second_assignment - 1)
 
+        common_rooms = sorted(
+            set(student_room_candidates.get(first_id, []))
+            & set(student_room_candidates.get(second_id, []))
+        )
+        common_rooms_by_pair[(first_id, second_id)] = common_rooms
+
+        for room_id in common_rooms:
+            variable = model.NewBoolVar(
+                f"same_r_s{first_id}_s{second_id}_r{room_id}"
+            )
+            same_room_vars[(first_id, second_id, room_id)] = variable
+            first_room_assignment = room_assignment_vars[(first_id, room_id)]
+            second_room_assignment = room_assignment_vars[(second_id, room_id)]
+            model.Add(variable <= first_room_assignment)
+            model.Add(variable <= second_room_assignment)
+            model.Add(variable >= first_room_assignment + second_room_assignment - 1)
+
     if hard_religious_together:
         _add_hard_religious_together(
             model,
             students,
-            apartments,
+            ordinary_apartments,
             assignment_vars,
             student_candidates,
         )
+        if room_pairing_rooms:
+            _add_hard_religious_together(
+                model,
+                students,
+                room_pairing_rooms,
+                room_assignment_vars,
+                student_room_candidates,
+            )
 
     if hard_roommate_positive:
         for student_1, student_2 in roommate_pairs:
             first_id, second_id = sorted((student_1.id, student_2.id))
             common_apartments = common_apartments_by_pair[(first_id, second_id)]
+            common_rooms = common_rooms_by_pair[(first_id, second_id)]
             same_vars = [
                 same_apartment_vars[(first_id, second_id, apartment_id)]
                 for apartment_id in common_apartments
+            ] + [
+                same_room_vars[(first_id, second_id, room_id)]
+                for room_id in common_rooms
             ]
 
             if _students_have_mutual_positive_roommate_request(student_1, student_2):
                 same_expression = sum(same_vars) if same_vars else 0
-                model.Add(same_expression == assigned_expr_by_student[first_id])
-                model.Add(same_expression == assigned_expr_by_student[second_id])
+
+                # If both students are assigned, they must share an
+                # apartment (ordinary) or a specific room (room-pairing).
+                # Either student may still be assigned alone when another
+                # hard constraint makes the requested pairing impossible.
+                model.Add(
+                    assigned_expr_by_student[first_id]
+                    + assigned_expr_by_student[second_id]
+                    <= 1 + same_expression
+                )
             elif _students_mutually_requested_each_other(student_1, student_2):
                 for apartment_id in common_apartments:
                     model.Add(
                         assignment_vars[(first_id, apartment_id)]
                         + assignment_vars[(second_id, apartment_id)]
+                        <= 1
+                    )
+                for room_id in common_rooms:
+                    model.Add(
+                        room_assignment_vars[(first_id, room_id)]
+                        + room_assignment_vars[(second_id, room_id)]
                         <= 1
                     )
 
@@ -1142,7 +2061,10 @@ def run_improved_ortools_allocation(
             assignment_vars,
             student_candidates,
             free_capacity_by_apartment,
-            inventory["existing_religious_preferences_by_apartment"],
+            inventory["existing_rj_apartments"],
+            inventory["existing_non_rj_apartments"],
+            inventory["existing_restricted_religion_by_apartment"],
+            inventory["existing_religion_set_by_apartment"],
             hard_religious_together,
         )
 
@@ -1200,19 +2122,36 @@ def run_improved_ortools_allocation(
                 if variable is not None and reward > 0:
                     soft_terms.append(variable * reward)
 
+            for room_id in common_rooms_by_pair[(first_id, second_id)]:
+                variable = same_room_vars.get((first_id, second_id, room_id))
+                if variable is not None and reward > 0:
+                    soft_terms.append(variable * reward)
+
     religion_group_vars = 0
     if use_same_religion:
         religion_group_vars = _add_soft_group_compaction(
             model,
             soft_terms,
             students,
-            apartments,
+            ordinary_apartments,
             assignment_vars,
             student_candidates,
             _religion_key,
             religion_weight,
             "religion",
         )
+        if room_pairing_rooms:
+            religion_group_vars += _add_soft_group_compaction(
+                model,
+                soft_terms,
+                students,
+                room_pairing_rooms,
+                room_assignment_vars,
+                student_room_candidates,
+                _religion_key,
+                religion_weight,
+                "religion_room",
+            )
 
     sector_group_vars = 0
     if use_sector_matching:
@@ -1220,13 +2159,25 @@ def run_improved_ortools_allocation(
             model,
             soft_terms,
             students,
-            apartments,
+            ordinary_apartments,
             assignment_vars,
             student_candidates,
             _sector_key,
             sector_weight,
             "sector",
         )
+        if room_pairing_rooms:
+            sector_group_vars += _add_soft_group_compaction(
+                model,
+                soft_terms,
+                students,
+                room_pairing_rooms,
+                room_assignment_vars,
+                student_room_candidates,
+                _sector_key,
+                sector_weight,
+                "sector_room",
+            )
 
     year_mix_vars = 0
     if use_avoid_year_mix:
@@ -1234,13 +2185,25 @@ def run_improved_ortools_allocation(
             model,
             soft_terms,
             students,
-            apartments,
+            ordinary_apartments,
             assignment_vars,
             lambda student: _get_student_year_group(student) == "year1",
             lambda student: _get_student_year_group(student) == "year3_4",
             year_weight,
             "year",
         )
+        if room_pairing_rooms:
+            year_mix_vars += _add_soft_mix_penalty(
+                model,
+                soft_terms,
+                students,
+                room_pairing_rooms,
+                room_assignment_vars,
+                lambda student: _get_student_year_group(student) == "year1",
+                lambda student: _get_student_year_group(student) == "year3_4",
+                year_weight,
+                "year_room",
+            )
 
     atudai_hasmaha_mix_vars = 0
     if use_avoid_atudaim_hasmaha:
@@ -1248,12 +2211,36 @@ def run_improved_ortools_allocation(
             model,
             soft_terms,
             students,
-            apartments,
+            ordinary_apartments,
             assignment_vars,
             _is_atudai,
             _is_hasmaha,
             atudai_hasmaha_weight,
             "atudai_hasmaha",
+        )
+        if room_pairing_rooms:
+            atudai_hasmaha_mix_vars += _add_soft_mix_penalty(
+                model,
+                soft_terms,
+                students,
+                room_pairing_rooms,
+                room_assignment_vars,
+                _is_atudai,
+                _is_hasmaha,
+                atudai_hasmaha_weight,
+                "atudai_hasmaha_room",
+            )
+
+    priority_cluster_vars = 0
+    if use_priority_first:
+        priority_cluster_vars = _add_priority_building_clustering(
+            model,
+            soft_terms,
+            students,
+            apartments,
+            assignment_vars,
+            student_candidates,
+            PRIORITY_BUILDING_CLUSTER_WEIGHT,
         )
 
     soft_range = roommate_positive_upper_bound
@@ -1261,7 +2248,14 @@ def run_improved_ortools_allocation(
     soft_range += sector_group_vars * sector_weight * WEIGHT_UNIT
     soft_range += year_mix_vars * year_weight * WEIGHT_UNIT
     soft_range += atudai_hasmaha_mix_vars * atudai_hasmaha_weight * WEIGHT_UNIT
+    soft_range += priority_cluster_vars * PRIORITY_BUILDING_CLUSTER_WEIGHT * WEIGHT_UNIT
 
+    # Objective hierarchy safety: assignment_score strictly dominates the
+    # entire soft_range (roommate/religion/sector/year/atudai-hasmaha/
+    # priority-clustering combined), and priority_score in turn dominates
+    # len(students) assignment_score terms plus soft_range. Total
+    # assignment count and priority assignment count therefore always
+    # outweigh the building-clustering preference.
     assignment_score = max(BASE_ASSIGNMENT_SCORE, soft_range + 1)
     priority_score = 0
 
@@ -1299,6 +2293,8 @@ def run_improved_ortools_allocation(
         students=len(students),
         apartments=len(apartments),
         variables=len(assignment_vars),
+        room_pairing_apartments=len(room_pairing_apartment_ids),
+        room_variables=len(room_assignment_vars),
         roommate_pairs=len(roommate_pairs),
         hinted_assignments=hinted_assignments,
     )
@@ -1359,6 +2355,20 @@ def run_improved_ortools_allocation(
                 selected_apartment_by_student[student.id] = apartment_id
                 break
 
+    # For room-pairing apartments, the CP-SAT model itself already decided
+    # the exact room (that is the whole point of the room-level layer);
+    # read it back instead of re-deriving it from an arbitrary sort.
+    selected_room_by_student = {}
+    for student in students:
+        apartment_id = selected_apartment_by_student.get(student.id)
+        if apartment_id is None or apartment_id not in room_pairing_apartment_ids:
+            continue
+        for room_id in student_room_candidates.get(student.id, []):
+            variable = room_assignment_vars.get((student.id, room_id))
+            if variable is not None and solver.Value(variable) == 1:
+                selected_room_by_student[student.id] = room_id
+                break
+
     selected_students_by_apartment = defaultdict(list)
     for student_id, apartment_id in selected_apartment_by_student.items():
         selected_students_by_apartment[apartment_id].append(student_id)
@@ -1366,6 +2376,34 @@ def run_improved_ortools_allocation(
     selected_bed_by_student = {}
 
     for apartment_id, student_ids in selected_students_by_apartment.items():
+        if apartment_id in room_pairing_apartment_ids:
+            students_by_selected_room = defaultdict(list)
+            for student_id in student_ids:
+                room_id = selected_room_by_student.get(student_id)
+                students_by_selected_room[room_id].append(student_id)
+
+            for room_id, room_student_ids in students_by_selected_room.items():
+                ordered_room_student_ids = sorted(
+                    room_student_ids,
+                    key=lambda student_id: (
+                        _get_student_identifier(students_by_id[student_id]),
+                        student_id,
+                    ),
+                )
+                available_room_beds = sorted(
+                    inventory["free_beds_by_room"].get(room_id, []),
+                    key=lambda bed: (_safe_str(bed.label), bed.id),
+                )
+
+                if len(available_room_beds) < len(ordered_room_student_ids):
+                    raise RuntimeError(
+                        f"Room {room_id} has insufficient free beds during persistence."
+                    )
+
+                for student_id, bed in zip(ordered_room_student_ids, available_room_beds):
+                    selected_bed_by_student[student_id] = bed
+            continue
+
         ordered_student_ids = sorted(
             student_ids,
             key=lambda student_id: (

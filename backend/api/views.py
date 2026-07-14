@@ -520,6 +520,22 @@ def validate_apartment_assignment(student: Student, room: Room):
             f'but apartment has category={apartment.category}.'
         )
 
+    # Z3/Z4 exclusivity: a Student record with COUPLE/FAMILY housing type
+    # represents one COMPLETE application (the applicant and their
+    # partner/family, who are not tracked as separate Student records) —
+    # never one member of a shared household. An apartment already holding
+    # any other active assignment is unavailable, unconditionally; there is
+    # no second Student record that may ever join it.
+    if student.housing_type in (
+        Student.HousingType.COUPLE,
+        Student.HousingType.FAMILY,
+    ) and other_active_assignments.exists():
+        raise ValueError(
+            'This apartment already has an active assignment. Exclusive '
+            'couple/family apartments may only be assigned to one Student '
+            'record.'
+        )
+
 
 def assign_student_to_room(
     student: Student,
@@ -668,14 +684,37 @@ class BuildingViewSet(viewsets.ModelViewSet):
             'dorm_type__region',
         )
         user = self.request.user
+        region_value = self.request.query_params.get('region')
 
-        if user.is_central_admin:
-            return queryset
+        if user.is_central_admin or user.is_boss:
+            if region_value:
+                region = _resolve_region(region_value)
+                if not region:
+                    return queryset.none()
+                return queryset.filter(dorm_type__region=region)
+            if user.is_central_admin:
+                return queryset
+            if not user.region_id:
+                return queryset.none()
+            return queryset.filter(dorm_type__region_id=user.region_id)
 
         if not user.region_id:
             return queryset.none()
 
         return queryset.filter(dorm_type__region_id=user.region_id)
+
+    def update(self, request, *args, **kwargs):
+        # Editing a building (e.g. gender_restriction) is a boss-level
+        # action; ordinary employees may only view. get_queryset() above
+        # already scopes region_boss users to their own region, so a boss
+        # editing a building outside their region gets a 404 from
+        # get_object() below rather than reaching this check.
+        if not request.user.is_boss:
+            return Response(
+                {'error': 'רק מנהל אזור או מנהל מרכזי יכול לערוך בניין'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().update(request, *args, **kwargs)
 
     @action(detail=True, methods=['get'])
     def apartments(self, request, pk=None):
@@ -754,8 +793,19 @@ class RoomViewSet(viewsets.ReadOnlyModelViewSet):
         ).all()
 
         user = self.request.user
+        region_value = self.request.query_params.get('region')
 
-        if not user.is_central_admin and user.region_id:
+        if (user.is_central_admin or user.is_boss) and region_value:
+            region = _resolve_region(region_value)
+            if not region:
+                return queryset.none()
+            return queryset.filter(
+                apartment__building__dorm_type__region=region
+            )
+
+        if not user.is_central_admin:
+            if not user.region_id:
+                return queryset.none()
             queryset = queryset.filter(
                 apartment__building__dorm_type__region=user.region
             )
@@ -804,11 +854,26 @@ class StudentViewSet(viewsets.ModelViewSet):
                 )
             )
 
-        if not self.request.user.is_central_admin:
-            if not self.request.user.region_id:
+        user = self.request.user
+        region_value = self.request.query_params.get('region')
+
+        if user.is_central_admin or user.is_boss:
+            if region_value:
+                region = _resolve_region(region_value)
+                if not region:
+                    return queryset.none()
+                queryset = queryset.filter(accepted_dorm_type__region=region)
+            elif not user.is_central_admin:
+                if not user.region_id:
+                    return queryset.none()
+                queryset = queryset.filter(
+                    accepted_dorm_type__region_id=user.region_id
+                )
+        else:
+            if not user.region_id:
                 return queryset.none()
             queryset = queryset.filter(
-                accepted_dorm_type__region_id=self.request.user.region_id
+                accepted_dorm_type__region_id=user.region_id
             )
         search = self.request.query_params.get('search')
         if search:
@@ -2688,6 +2753,13 @@ def run_allocation(request):
                 category=Student.StudentCategory.LEAVING
             )
 
+        # Accessibility/disability students are imported and saved normally,
+        # but must never reach the OR-Tools solver — the dorm office
+        # allocates them manually. This is independent of is_priority (see
+        # priority_fields_from_special_statuses).
+        if 'accessibility_flag' in student_fields:
+            students_base = students_base.exclude(accessibility_flag=True)
+
         students_total_in_region = students_base.count()
         students = students_base
 
@@ -3119,6 +3191,12 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                     category=Student.StudentCategory.LEAVING
                 )
 
+            # Accessibility/disability students are imported and saved
+            # normally, but must never reach the OR-Tools solver — the dorm
+            # office allocates them manually (independent of is_priority).
+            if 'accessibility_flag' in student_fields:
+                students_base = students_base.exclude(accessibility_flag=True)
+
             students_total_in_region = students_base.count()
             students = students_base
 
@@ -3521,20 +3599,30 @@ def allocation_history(request):
 def allocation_results(request):
     """
     Return active BedAssignment rows for the requesting user's region.
-    Central admin may pass ?region=<id> to filter. Without a region, central admin sees all regions.
+
+    central_admin / region_boss may pass ?region=<id> for read-only cross-region
+    access; without one, central_admin sees all regions and region_boss defaults
+    to their own. Employees always get their own region — any region query param
+    is ignored.
     """
     region_value = request.query_params.get('region') or None
+    user = request.user
 
-    if region_value:
-        region = _resolve_region(region_value)
-        if not region:
-            return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
-    elif request.user.is_central_admin:
-        region = None
-    elif request.user.region:
-        region = request.user.region
+    if user.is_central_admin or user.is_boss:
+        if region_value:
+            region = _resolve_region(region_value)
+            if not region:
+                return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        elif user.is_central_admin:
+            region = None
+        elif user.region:
+            region = user.region
+        else:
+            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
     else:
-        return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+        if not user.region:
+            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+        region = user.region
 
     qs = BedAssignment.objects.filter(
         status=BedAssignment.Status.ACTIVE
@@ -3595,7 +3683,7 @@ def allocation_results(request):
 def allocation_summary(request):
     user = request.user
 
-    if user.is_central_admin:
+    if user.is_central_admin or user.is_boss:
         region_value = (
             request.query_params.get('region')
             or request.query_params.get('region_id')
@@ -3608,7 +3696,7 @@ def allocation_summary(request):
                 return Response({
                     'error': 'אזור לא נמצא'
                 }, status=status.HTTP_404_NOT_FOUND)
-        else:
+        elif user.is_central_admin:
             return Response({
                 'region': None,
                 'total_students': 0,
@@ -3658,6 +3746,12 @@ def allocation_summary(request):
                 'latest_inbox': None,
                 'latest_run': None,
             }, status=status.HTTP_200_OK)
+        elif user.region:
+            region = user.region
+        else:
+            return Response({
+                'error': 'המשתמש אינו משויך לאזור'
+            }, status=status.HTTP_400_BAD_REQUEST)
     else:
         if not user.region:
             return Response({
@@ -3670,11 +3764,12 @@ def allocation_summary(request):
     )
 
     # Keep the summary's actionable counts aligned with run_allocation:
-    # students who are leaving are reported in the breakdown but are never
-    # offered to the solver.
+    # students who are leaving, or who are accessibility/disability cases
+    # handled manually by the dorm office, are reported in the breakdown
+    # but are never offered to the solver.
     allocatable_students_qs = all_students_qs.exclude(
         category=Student.StudentCategory.LEAVING
-    )
+    ).exclude(accessibility_flag=True)
 
     total_students = allocatable_students_qs.count()
     assigned_students = allocatable_students_qs.filter(
@@ -5231,8 +5326,25 @@ def what_if_availability_confirm(request):
 @permission_classes([IsAuthenticated])
 def statistics(request):
     user = request.user
+    region_value = request.query_params.get('region')
 
-    if user.is_central_admin:
+    if user.is_central_admin or user.is_boss:
+        if region_value:
+            region = _resolve_region(region_value)
+            if not region:
+                return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        elif user.is_central_admin:
+            region = None
+        elif user.region:
+            region = user.region
+        else:
+            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        if not user.region:
+            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+        region = user.region
+
+    if region is None:
         students = Student.objects.all()
         buildings = Building.objects.filter(is_active=True)
         rooms = Room.objects.filter(
@@ -5249,41 +5361,41 @@ def statistics(request):
         transfers = Transfer.objects.filter(status=Transfer.Status.PENDING)
     else:
         students = Student.objects.filter(
-            accepted_dorm_type__region=user.region
+            accepted_dorm_type__region=region
         )
         buildings = Building.objects.filter(
-            dorm_type__region=user.region,
+            dorm_type__region=region,
             is_active=True
         )
         rooms = Room.objects.filter(
-            apartment__building__dorm_type__region=user.region,
+            apartment__building__dorm_type__region=region,
             is_active=True,
             apartment__is_active=True,
             apartment__building__is_active=True,
         )
         active_assignments = BedAssignment.objects.filter(
             status=BedAssignment.Status.ACTIVE,
-            bed__room__apartment__building__dorm_type__region=user.region,
+            bed__room__apartment__building__dorm_type__region=region,
             bed__room__is_active=True,
             bed__room__apartment__is_active=True,
             bed__room__apartment__building__is_active=True,
         )
         transfers = Transfer.objects.filter(
-            Q(from_room__apartment__building__dorm_type__region=user.region) |
-            Q(to_room__apartment__building__dorm_type__region=user.region),
+            Q(from_room__apartment__building__dorm_type__region=region) |
+            Q(to_room__apartment__building__dorm_type__region=region),
             status=Transfer.Status.PENDING
         )
 
     total_capacity = sum(rooms.values_list('capacity', flat=True))
-    if user.is_central_admin:
+    if region is None:
         total_buildings_count = Building.objects.count()
         inactive_buildings_count = Building.objects.filter(is_active=False).count()
     else:
         total_buildings_count = Building.objects.filter(
-            dorm_type__region=user.region
+            dorm_type__region=region
         ).count()
         inactive_buildings_count = Building.objects.filter(
-            dorm_type__region=user.region,
+            dorm_type__region=region,
             is_active=False
         ).count()
 
@@ -5401,6 +5513,7 @@ COLUMN_ALIASES = {
     'accessibility_flag': ['החלטה-זקוק להנגשה'],
     'disability_percent': ['%נכות'],
     'medical_reason': ['סיבה רפואית מאושרת מרופאת הטכניון'],
+    'anier_flag': ['9108-אנייר'],
 
     'roommate_flag_1': ['בקשה לגור עם סטודנטים חבר1'],
     'roommate_flag_2': ['החלטה אחרונה: בקשה לגור עם סטודנטים חבר2'],
@@ -5811,12 +5924,98 @@ def get_or_create_dorm_type_from_excel(dorm_code=None, dorm_name=None):
     return None
 
 
-def is_accessibility_priority(row):
+def read_accessibility_fields(row):
+    """
+    Read the raw accessibility/medical columns from the Excel row, exactly
+    as imported — independent of whether they end up implying priority.
+    """
     explicit_flag = parse_yes_no_code(get_alias_value(row, 'accessibility_flag', default=''))
-    disability_percent = safe_decimal(get_alias_value(row, 'disability_percent', default=''), default=Decimal('0'))
+    disability_percent = safe_decimal(get_alias_value(row, 'disability_percent', default=''), default=None)
     medical_reason = safe_str(get_alias_value(row, 'medical_reason', default=''))
+    return explicit_flag, disability_percent, medical_reason
 
+
+def is_accessibility_priority(row):
+    explicit_flag, disability_percent, medical_reason = read_accessibility_fields(row)
     return explicit_flag or (disability_percent is not None and disability_percent > 0) or bool(medical_reason)
+
+
+def _normalize_allocation_group_value(value):
+    """
+    Like normalize_compact, but additionally unifies dash characters
+    (Excel exports mix '-', '–' and '—' inconsistently across identical
+    category values) before whitespace-stripping/lowercasing.
+    """
+    text = safe_str(value).replace('–', '-').replace('—', '-')
+    return normalize_compact(text)
+
+
+# Exact allocation-group ("תיאור קבוצת הקצאה") category values confirmed to
+# mark a student as an accessibility/disability case handled manually by
+# the dorm office, even when the explicit accessibility columns
+# (accessibility_flag/disability_percent/medical_reason) are blank for
+# that row. These are official dorm-office category names, not merely
+# text that happens to mention disability — for example 'הסמכה – ותיקים+
+# חדשים שנפסלו כחדשים+בינלאומי מלאות2' is a confirmed accessibility
+# category despite not containing the word 'נכים' at all. Matched by EXACT
+# normalized value, not a substring rule, so an unrelated allocation group
+# (e.g. one that merely mentions 'הסמכה' on its own) is never
+# misclassified.
+ACCESSIBILITY_ALLOCATION_GROUP_VALUES = {
+    _normalize_allocation_group_value(value)
+    for value in (
+        'הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2',
+        'הסמכה - נכים',
+        'קדםאקדמי - כולל נכים',
+    )
+}
+
+
+def allocation_group_indicates_accessibility(allocation_group_value):
+    """
+    True only when allocation_group_value exactly matches (after dash/
+    whitespace/case normalization) one of the confirmed accessibility
+    allocation-group category values in ACCESSIBILITY_ALLOCATION_GROUP_VALUES.
+    """
+    return _normalize_allocation_group_value(allocation_group_value) in ACCESSIBILITY_ALLOCATION_GROUP_VALUES
+
+
+def priority_fields_from_special_statuses(*special_statuses):
+    """
+    is_priority/priority_reason are derived solely from special_status_1..4.
+    Accessibility/medical data (is_accessibility_priority) is imported and
+    preserved for the dorm office to allocate those students manually, but
+    must never affect is_priority, the solver, priority score, clustering,
+    or building rules.
+    """
+    non_empty = [status for status in special_statuses if status]
+    return bool(non_empty), ' | '.join(non_empty)
+
+
+def inject_special_status_marker(special_statuses, marker):
+    """
+    Insert `marker` into the first blank slot among the 4 special_status
+    values, unless it is already present in one of them. Returns a new
+    4-tuple.
+
+    Some special-status signals (e.g. the 'אנייר' / anier group) arrive
+    via their own dedicated raw Excel column ('9108-אנייר' == 'X'), not
+    already embedded in the 'תאור סטטוס מיוחד1..4' description text the
+    way הסמכה/עתודאי already are. Without this, _has_anier_special_status
+    (and priority_fields_from_special_statuses) would never see the
+    marker, even though the student was correctly flagged in the source
+    file.
+    """
+    statuses = list(special_statuses)
+    if any(marker in status for status in statuses if status):
+        return tuple(statuses)
+    for index, status in enumerate(statuses):
+        if not status:
+            statuses[index] = marker
+            return tuple(statuses)
+    # All four slots occupied: append rather than silently dropping the marker.
+    statuses[-1] = f"{statuses[-1]} | {marker}"
+    return tuple(statuses)
 
 
 def filter_payload_to_student_fields(payload):
@@ -5842,9 +6041,35 @@ def build_student_payload_from_row(row, existing_student=None, sheet_name=''):
         decision_dorm_name
     )
 
-    needs_accessibility = is_accessibility_priority(row)
+    # Accessibility/medical data is imported and stored on its own fields
+    # (accessibility_flag/disability_percent/medical_reason) so the dorm
+    # office can allocate these students manually. It must never feed
+    # is_priority — see priority_fields_from_special_statuses below.
+    accessibility_flag, disability_percent, medical_reason = read_accessibility_fields(row)
     placement_sector = parse_placement_sector(row)
     allocation_group_value = get_alias_value(row, 'allocation_group', default='')
+
+    # Some allocation groups (e.g. 'הסמכה - נכים') mark accessibility even
+    # when the explicit accessibility columns are blank for this row.
+    if allocation_group_indicates_accessibility(allocation_group_value):
+        accessibility_flag = True
+
+    special_status_1 = safe_str(get_alias_value(row, 'special_status_1'))
+    special_status_2 = safe_str(get_alias_value(row, 'special_status_2'))
+    special_status_3 = safe_str(get_alias_value(row, 'special_status_3'))
+    special_status_4 = safe_str(get_alias_value(row, 'special_status_4'))
+
+    if parse_yes_no_code(get_alias_value(row, 'anier_flag', default='')):
+        special_status_1, special_status_2, special_status_3, special_status_4 = (
+            inject_special_status_marker(
+                (special_status_1, special_status_2, special_status_3, special_status_4),
+                'אנייר',
+            )
+        )
+
+    is_priority, priority_reason = priority_fields_from_special_statuses(
+        special_status_1, special_status_2, special_status_3, special_status_4,
+    )
 
     current_dorm_type_value = (
         accepted_dorm_type.name
@@ -5895,17 +6120,21 @@ def build_student_payload_from_row(row, existing_student=None, sheet_name=''):
         'roommate_request_flag_4': extract_roommate_flag(get_alias_value(row, 'roommate_flag_4')),
         'roommate_request_flag_5': extract_roommate_flag(get_alias_value(row, 'roommate_flag_5')),
 
-        'special_status_1': safe_str(get_alias_value(row, 'special_status_1')),
-        'special_status_2': safe_str(get_alias_value(row, 'special_status_2')),
-        'special_status_3': safe_str(get_alias_value(row, 'special_status_3')),
-        'special_status_4': safe_str(get_alias_value(row, 'special_status_4')),
+        'special_status_1': special_status_1,
+        'special_status_2': special_status_2,
+        'special_status_3': special_status_3,
+        'special_status_4': special_status_4,
 
         'study_points': safe_decimal(get_alias_value(row, 'study_points', default=''), default=None),
         'current_address': safe_str(get_alias_value(row, 'current_address', default='')),
         'current_dorm_type': current_dorm_type_value,
 
-        'is_priority': needs_accessibility,
-        'priority_reason': 'נגישות/רפואי' if needs_accessibility else '',
+        'is_priority': is_priority,
+        'priority_reason': priority_reason,
+
+        'accessibility_flag': accessibility_flag,
+        'disability_percent': disability_percent,
+        'medical_reason': medical_reason,
     }
 
     optional_fields = {
