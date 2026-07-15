@@ -8,7 +8,7 @@ import Header from './components/Header';
 
 // Pages
 import LoginPage from './pages/LoginPage';
-import Dashboard from './pages/Dashboard';
+import HomePage from './pages/HomePage';
 import BuildingsPage from './pages/BuildingsPage';
 import StudentsPage from './pages/StudentsPage';
 import UploadPage from './pages/UploadPage';
@@ -95,7 +95,9 @@ function AppContent() {
         }
       >
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        <Route path="/dashboard" element={<Dashboard language={language} />} />
+        <Route path="/dashboard" element={<HomePage language={language} />} />
+        {/* Old Data & Statistics page was merged into the unified /analysis page */}
+        <Route path="/system-overview" element={<Navigate to="/analysis" replace />} />
         <Route path="/map" element={<MapPage language={language} />} />
         <Route path="/buildings" element={<BuildingsPage language={language} />} />
         <Route path="/students" element={<StudentsPage language={language} />} />

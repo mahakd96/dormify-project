@@ -26,6 +26,9 @@ urlpatterns = [
     # Statistics
     path('statistics/', views.statistics, name='statistics'),
 
+    # Operational homepage (post-login landing page)
+    path('home/', views.home_dashboard, name='home-dashboard'),
+
     # Excel Upload & Split
     path('upload/excel/', views.upload_excel, name='upload-excel'),
     path('upload/additions-excel/', views.upload_additions_excel, name='upload-additions-excel'),
