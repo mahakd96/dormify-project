@@ -59,20 +59,56 @@ function Sidebar({ collapsed, onToggle, language }) {
     }
   };
 
-  const navItems = [
-    { path: '/dashboard', icon: LayoutDashboard, label: language === 'he' ? 'לוח בקרה' : 'Dashboard', show: true },
-    { path: '/map', icon: Map, label: language === 'he' ? 'מפת המעונות' : 'Dorm Map', show: true },
-    { path: '/buildings', icon: Building2, label: language === 'he' ? 'בניינים וחדרים' : 'Buildings & Rooms', show: true },
-    { path: '/students', icon: Users, label: language === 'he' ? 'סטודנטים' : 'Students', show: true },
-    { path: '/upload', icon: Upload, label: language === 'he' ? 'העלאת קובץ' : 'Upload File', show: canUploadExcel() },
-    { path: '/priority', icon: Star, label: language === 'he' ? 'סטודנטים עם בקשות מיוחדות' : 'Students with Special Requests', show: canAssignPriority() },
-    { path: '/allocation', icon: Shuffle, label: language === 'he' ? 'שיבוץ' : 'Allocation', show: true },
-    { path: '/transfers', icon: ArrowLeftRight, label: language === 'he' ? 'בקשות מעבר' : 'Transfer Requests', show: true },
-    { path: '/reports', icon: BarChart3, label: language === 'he' ? 'דוחות' : 'Reports', show: true },
-    { path: '/analysis', icon: TrendingUp, label: language === 'he' ? 'ניתוח נתונים' : 'Data Analysis', show: true },
-      { path: '/what-if', icon: HelpCircle, label: language === 'he' ? 'כלי מה אם' : 'What-If Tool', show: true },
-    { path: '/users', icon: UserCog, label: language === 'he' ? 'מידע על עובדים ' : 'Workers Contacts', show: canManageUsers() },
-    { path: '/settings', icon: Settings, label: language === 'he' ? 'הגדרות' : 'Settings', show: true },
+  const navGroups = [
+    {
+      key: 'main',
+      title: language === 'he' ? 'ראשי' : 'Main',
+      items: [
+        { path: '/dashboard', icon: LayoutDashboard, label: language === 'he' ? 'דף הבית' : 'Home', show: true },
+      ],
+    },
+    {
+      key: 'students',
+      title: language === 'he' ? 'ניהול סטודנטים' : 'Student Management',
+      items: [
+        { path: '/upload', icon: Upload, label: language === 'he' ? 'העלאת קובץ' : 'Upload File', show: canUploadExcel() },
+        { path: '/students', icon: Users, label: language === 'he' ? 'סטודנטים' : 'Students', show: true },
+        { path: '/priority', icon: Star, label: language === 'he' ? 'סטודנטים עם בקשות מיוחדות' : 'Students with Special Requests', show: canAssignPriority() },
+      ],
+    },
+    {
+      key: 'allocation',
+      title: language === 'he' ? 'תהליך השיבוץ' : 'Allocation Process',
+      items: [
+        { path: '/allocation', icon: Shuffle, label: language === 'he' ? 'שיבוץ' : 'Allocation', show: true },
+        { path: '/transfers', icon: ArrowLeftRight, label: language === 'he' ? 'בקשות מעבר' : 'Transfer Requests', show: true },
+      ],
+    },
+    {
+      key: 'dormitory',
+      title: language === 'he' ? 'ניהול מעונות' : 'Dormitory Management',
+      items: [
+        { path: '/buildings', icon: Building2, label: language === 'he' ? 'בניינים וחדרים' : 'Buildings and Rooms', show: true },
+        { path: '/map', icon: Map, label: language === 'he' ? 'מפת המעונות' : 'Dormitory Map', show: true },
+      ],
+    },
+    {
+      key: 'reports',
+      title: language === 'he' ? 'דוחות ונתונים' : 'Reports and Data',
+      items: [
+        { path: '/reports', icon: BarChart3, label: language === 'he' ? 'דוחות' : 'Reports', show: true },
+        { path: '/analysis', icon: TrendingUp, label: language === 'he' ? 'ניתוח נתונים' : 'Analytics & Insights', show: true },
+      ],
+    },
+    {
+      key: 'system',
+      title: language === 'he' ? 'ניהול מערכת' : 'System Management',
+      items: [
+        { path: '/users', icon: UserCog, label: language === 'he' ? 'מידע על עובדים' : 'Employee Information', show: canManageUsers() },
+        { path: '/what-if', icon: HelpCircle, label: language === 'he' ? 'כללי מה אם' : 'What-If Rules', show: true },
+        { path: '/settings', icon: Settings, label: language === 'he' ? 'הגדרות' : 'Settings', show: true },
+      ],
+    },
   ];
 
   return (
@@ -95,19 +131,27 @@ function Sidebar({ collapsed, onToggle, language }) {
       )}
 
       <nav className="sidebar-nav">
-        {navItems
-          .filter((item) => item.show)
-          .map((item) => (
-            <NavLink
-              key={item.path}
-              to={item.path}
-              className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-              title={collapsed ? item.label : ''}
-            >
-              <item.icon size={20} />
-              {!collapsed && <span>{item.label}</span>}
-            </NavLink>
-          ))}
+        {navGroups.map((group) => {
+          const visibleItems = group.items.filter((item) => item.show);
+          if (visibleItems.length === 0) return null;
+
+          return (
+            <div className="nav-group" key={group.key}>
+              {!collapsed && <div className="nav-group-title">{group.title}</div>}
+              {visibleItems.map((item) => (
+                <NavLink
+                  key={item.path}
+                  to={item.path}
+                  className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                  title={collapsed ? item.label : ''}
+                >
+                  <item.icon size={20} />
+                  {!collapsed && <span>{item.label}</span>}
+                </NavLink>
+              ))}
+            </div>
+          );
+        })}
       </nav>
 
       <div className="sidebar-footer">
@@ -205,6 +249,37 @@ function Sidebar({ collapsed, onToggle, language }) {
           flex: 1;
           padding: 8px;
           overflow-y: auto;
+          overflow-x: hidden;
+        }
+
+        .nav-group {
+          margin-bottom: 6px;
+        }
+
+        .nav-group-title {
+          padding: 10px 14px 6px;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          color: rgba(255, 255, 255, 0.35);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .nav-group:first-child .nav-group-title {
+          padding-top: 2px;
+        }
+
+        .sidebar.collapsed .nav-group {
+          padding-top: 6px;
+          margin-bottom: 0;
+        }
+
+        .sidebar.collapsed .nav-group:not(:first-child) {
+          border-top: 1px solid rgba(255, 255, 255, 0.08);
+          margin-top: 6px;
         }
 
         .nav-item {

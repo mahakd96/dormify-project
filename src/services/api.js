@@ -355,6 +355,17 @@ export const allocationAPI = {
   },
 };
 
+export const homeAPI = {
+  get: async () => {
+    try {
+      const { data } = await api.get("/api/home/");
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load homepage data"));
+    }
+  },
+};
+
 export const inventoryAPI = {
   getByHousingType: async (regionId = null) => {
     try {
@@ -671,9 +682,11 @@ export const studentsAPI = {
 };
 
 export const analysisAPI = {
-  getData: async () => {
+  getData: async (regionId = null) => {
     try {
-      const { data } = await api.get("/api/analysis/");
+      const { data } = await api.get("/api/analysis/", {
+        params: regionId ? { region: regionId } : {},
+      });
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to load analysis data"));
