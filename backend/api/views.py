@@ -4074,6 +4074,32 @@ def analysis_data(request):
 
     latest_run = runs_qs.select_related('run_by', 'region').order_by('-started_at').first()
 
+    # Pending requests via the unified StudentRequest workflow (the page
+    # actually used for review/approval today) - kept separate from the
+    # legacy Transfer-based pending_transfers above, which predates it.
+    requests_qs = StudentRequest.objects.filter(status=StudentRequest.Status.PENDING)
+    if region:
+        requests_qs = requests_qs.filter(
+            Q(requested_by__region_id=region.id) |
+            Q(student__accepted_dorm_type__region_id=region.id) |
+            Q(target_room__apartment__building__dorm_type__region_id=region.id)
+        ).distinct()
+    pending_requests = requests_qs.count()
+
+    priority_unassigned_students = students_qs.filter(
+        is_priority=True
+    ).exclude(
+        id__in=assignments_qs.values('student_id')
+    ).count()
+
+    if region is None:
+        latest_batch = ImportBatch.objects.select_related('uploaded_by').order_by('-created_at').first()
+    else:
+        batch_ids = RegionInbox.objects.filter(region=region).values_list('batch_id', flat=True)
+        latest_batch = ImportBatch.objects.filter(
+            id__in=batch_ids
+        ).select_related('uploaded_by').order_by('-created_at').first()
+
     # =========================
     # Student distributions
     # These MUST be arrays because AnalysisPage uses .map()
@@ -4316,6 +4342,8 @@ def analysis_data(request):
 
             'total_transfers': total_transfers,
             'pending_transfers': pending_transfers,
+            'pending_requests': pending_requests,
+            'priority_unassigned_students': priority_unassigned_students,
         },
 
         'students_by_gender': students_by_gender,
@@ -4331,6 +4359,7 @@ def analysis_data(request):
         'transfers_by_type': transfers_by_type,
 
         'latest_run': AllocationRunSerializer(latest_run).data if latest_run else None,
+        'latest_batch': ImportBatchSerializer(latest_batch).data if latest_batch else None,
     }, status=status.HTTP_200_OK)
 
 # =========================
@@ -5423,6 +5452,435 @@ def statistics(request):
         'available_beds': available_beds,
         'occupancy_rate': occupancy_rate,
         'pending_transfers': transfers.count(),
+    })
+
+
+# =========================
+# Operational Home Page (/api/home/)
+# =========================
+
+_HOME_REQUEST_TYPE_LABELS_EN = {
+    'add_student': 'Add student',
+    'remove_student': 'Remove student',
+    'room': 'Room change',
+    'apartment': 'Apartment transfer',
+    'swap': 'Student swap',
+    'region_transfer': 'Region transfer',
+    'other': 'Other request',
+}
+
+
+def _home_action(key, label_he, label_en, route):
+    return {'key': key, 'label_he': label_he, 'label_en': label_en, 'route': route}
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def home_dashboard(request):
+    """
+    Aggregated, read-only data for the post-login operational homepage.
+
+    central_admin gets a system-wide view; region_boss/employee get their
+    own region's view (server-side enforced, mirrors the scoping already
+    used by statistics/allocation_summary/list_batches/region_inbox).
+    """
+    user = request.user
+    is_admin = user.is_central_admin
+    can_upload = is_admin
+    can_run_allocation = user.is_boss
+    can_review_requests = user.is_boss
+
+    if is_admin:
+        region = None
+    else:
+        region = user.region
+        if not region:
+            return Response({
+                'error': 'המשתמש אינו משויך לאזור',
+                'errorEn': 'User is not assigned to a region',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+    # ---- Student / occupancy metrics (same scoping rules as statistics()) ----
+    if region is None:
+        students_qs = Student.objects.all()
+        rooms_qs = Room.objects.filter(
+            is_active=True, apartment__is_active=True, apartment__building__is_active=True,
+        )
+        active_assignments_qs = BedAssignment.objects.filter(
+            status=BedAssignment.Status.ACTIVE,
+            bed__room__is_active=True,
+            bed__room__apartment__is_active=True,
+            bed__room__apartment__building__is_active=True,
+        )
+    else:
+        students_qs = Student.objects.filter(accepted_dorm_type__region=region)
+        rooms_qs = Room.objects.filter(
+            apartment__building__dorm_type__region=region,
+            is_active=True, apartment__is_active=True, apartment__building__is_active=True,
+        )
+        active_assignments_qs = BedAssignment.objects.filter(
+            status=BedAssignment.Status.ACTIVE,
+            bed__room__apartment__building__dorm_type__region=region,
+            bed__room__is_active=True,
+            bed__room__apartment__is_active=True,
+            bed__room__apartment__building__is_active=True,
+        )
+
+    allocatable_qs = students_qs.exclude(
+        category=Student.StudentCategory.LEAVING
+    ).exclude(accessibility_flag=True)
+
+    assigned_students = allocatable_qs.filter(assigned_room__isnull=False).count()
+    unassigned_students = allocatable_qs.filter(assigned_room__isnull=True).count()
+
+    total_capacity = sum(rooms_qs.values_list('capacity', flat=True))
+    occupied_beds = active_assignments_qs.values('bed_id').distinct().count()
+    available_beds = max(total_capacity - occupied_beds, 0)
+    occupancy_rate = round((occupied_beds / total_capacity) * 100) if total_capacity else 0
+
+    priority_students_pending = 0
+    if is_admin:
+        priority_students_pending = Student.objects.filter(
+            is_priority=True, assigned_room__isnull=True
+        ).count()
+
+    # ---- Pending requests (unified StudentRequest workflow used by /transfers) ----
+    def _scope_requests(qs):
+        if region is None:
+            return qs
+        return qs.filter(
+            Q(requested_by__region_id=region.id) |
+            Q(student__accepted_dorm_type__region_id=region.id) |
+            Q(target_room__apartment__building__dorm_type__region_id=region.id)
+        ).distinct()
+
+    pending_requests = _scope_requests(
+        StudentRequest.objects.filter(status=StudentRequest.Status.PENDING)
+    ).count()
+
+    # ---- Latest import batch ----
+    if is_admin:
+        latest_batch = ImportBatch.objects.select_related('uploaded_by').order_by('-created_at').first()
+    else:
+        batch_ids = RegionInbox.objects.filter(region=region).values_list('batch_id', flat=True)
+        latest_batch = ImportBatch.objects.filter(
+            id__in=batch_ids
+        ).select_related('uploaded_by').order_by('-created_at').first()
+
+    # ---- Region inbox status ----
+    latest_inbox = None
+    pending_inbox_count = 0
+    viewed_inbox_count = 0
+    if region is not None:
+        latest_inbox = RegionInbox.objects.select_related('batch').filter(
+            region=region
+        ).order_by('-created_at').first()
+        pending_inbox_count = 1 if latest_inbox and latest_inbox.status == RegionInbox.Status.PENDING else 0
+        viewed_inbox_count = 1 if latest_inbox and latest_inbox.status == RegionInbox.Status.VIEWED else 0
+    else:
+        pending_inbox_count = RegionInbox.objects.filter(status=RegionInbox.Status.PENDING).count()
+        viewed_inbox_count = RegionInbox.objects.filter(status=RegionInbox.Status.VIEWED).count()
+
+    # ---- Allocation runs ----
+    run_qs = AllocationRun.objects.select_related('region', 'run_by')
+    if region is not None:
+        run_qs = run_qs.filter(region=region)
+
+    active_run = run_qs.filter(status__in=[
+        AllocationRun.Status.QUEUED,
+        AllocationRun.Status.RUNNING,
+        AllocationRun.Status.CANCELLATION_REQUESTED,
+    ]).order_by('-started_at').first()
+    latest_run = run_qs.order_by('-started_at').first()
+    completed_like = {AllocationRun.Status.COMPLETED, AllocationRun.Status.APPROVED}
+    has_completed_run = run_qs.filter(status__in=completed_like).exists()
+    latest_run_failed = bool(latest_run and latest_run.status == AllocationRun.Status.FAILED)
+
+    regions_with_active_run = 0
+    regions_with_failed_latest = 0
+    if region is None:
+        latest_status_by_region = {}
+        for row in AllocationRun.objects.order_by('region_id', '-started_at').values('region_id', 'status'):
+            latest_status_by_region.setdefault(row['region_id'], row['status'])
+        active_like = {
+            AllocationRun.Status.QUEUED,
+            AllocationRun.Status.RUNNING,
+            AllocationRun.Status.CANCELLATION_REQUESTED,
+        }
+        regions_with_active_run = sum(1 for s in latest_status_by_region.values() if s in active_like)
+        regions_with_failed_latest = sum(
+            1 for s in latest_status_by_region.values() if s == AllocationRun.Status.FAILED
+        )
+
+    # ---- Workflow stage derivation (objective, role-independent) ----
+    if latest_batch is None:
+        stage_upload = 'active'
+    elif latest_batch.status == ImportBatch.Status.FAILED:
+        stage_upload = 'attention'
+    else:
+        stage_upload = 'completed'
+
+    if region is not None:
+        if latest_inbox is None:
+            stage_review, stage_processing = 'waiting', 'waiting'
+        elif latest_inbox.status == RegionInbox.Status.PENDING:
+            stage_review, stage_processing = 'active', 'waiting'
+        elif latest_inbox.status == RegionInbox.Status.VIEWED:
+            stage_review, stage_processing = 'completed', 'active'
+        else:  # PROCESSED / SUPERSEDED
+            stage_review, stage_processing = 'completed', 'completed'
+    else:
+        if pending_inbox_count > 0:
+            stage_review = 'active'
+            stage_processing = 'active' if viewed_inbox_count > 0 else 'waiting'
+        elif viewed_inbox_count > 0:
+            stage_review, stage_processing = 'completed', 'active'
+        elif latest_batch is not None:
+            stage_review, stage_processing = 'completed', 'completed'
+        else:
+            stage_review, stage_processing = 'waiting', 'waiting'
+
+    if active_run is not None or regions_with_active_run > 0:
+        stage_allocation = 'active'
+    elif latest_run_failed or regions_with_failed_latest > 0:
+        stage_allocation = 'attention'
+    elif not has_completed_run:
+        stage_allocation = 'waiting'
+    else:
+        stage_allocation = 'completed'
+
+    if not has_completed_run:
+        stage_results = 'waiting'
+    elif unassigned_students > 0:
+        stage_results = 'attention'
+    else:
+        stage_results = 'completed'
+
+    workflow = [
+        {'key': 'upload', 'label_he': 'העלאת קובץ', 'label_en': 'File upload', 'status': stage_upload},
+        {'key': 'data_review', 'label_he': 'סקירת נתונים', 'label_en': 'Data review', 'status': stage_review},
+        {'key': 'regional_processing', 'label_he': 'עיבוד אזורי', 'label_en': 'Regional processing', 'status': stage_processing},
+        {'key': 'allocation', 'label_he': 'שיבוץ', 'label_en': 'Allocation', 'status': stage_allocation},
+        {'key': 'results_review', 'label_he': 'סקירת תוצאות', 'label_en': 'Results review', 'status': stage_results},
+    ]
+
+    # ---- Situation sentence ----
+    if stage_upload == 'attention' or stage_allocation == 'attention':
+        situation_he = 'יש נושאים שדורשים את תשומת ליבכם בתהליך השיבוץ הנוכחי'
+        situation_en = 'There are issues in the current allocation process that need your attention'
+    elif stage_allocation == 'active':
+        situation_he = 'תהליך השיבוץ פעיל כרגע'
+        situation_en = 'The allocation process is currently running'
+    elif stage_review == 'active' or stage_processing == 'active':
+        situation_he = 'ישנם נתוני סטודנטים חדשים הממתינים לסקירה'
+        situation_en = 'New student data is waiting for review'
+    elif stage_results == 'completed':
+        situation_he = 'תהליך השיבוץ הנוכחי הושלם ואין נושאים פתוחים'
+        situation_en = 'The current allocation process is complete with no open issues'
+    else:
+        situation_he = 'הכל מתנהל כסדרו כרגע'
+        situation_en = 'Everything is on track right now'
+
+    # ---- Primary action (respects what this role can actually do) ----
+    primary_action = None
+
+    if latest_batch is not None and latest_batch.status == ImportBatch.Status.FAILED and can_upload:
+        primary_action = _home_action('upload_retry', 'העלאת הקובץ נכשלה - נסו שוב', 'Upload failed — try again', '/upload')
+    elif latest_batch is None and can_upload:
+        primary_action = _home_action('upload', 'העלאת קובץ סטודנטים', 'Upload student file', '/upload')
+    elif active_run is not None:
+        primary_action = _home_action('view_active', 'צפייה בשיבוץ הפעיל', 'View active allocation', '/allocation')
+    elif region is not None and latest_inbox is not None and latest_inbox.status == RegionInbox.Status.PENDING:
+        primary_action = (
+            _home_action('review_data', 'סקירת נתוני האזור', 'Review regional data', '/allocation')
+            if can_run_allocation else
+            _home_action('view_region_status', 'צפייה בסטטוס האזור', 'View regional status', '/allocation')
+        )
+    elif latest_run_failed and can_run_allocation:
+        primary_action = _home_action('retry_allocation', 'הרצת השיבוץ נכשלה - נסו שוב', 'Allocation failed — retry', '/allocation')
+    elif region is not None and not has_completed_run and latest_inbox is not None \
+            and latest_inbox.status in (RegionInbox.Status.VIEWED, RegionInbox.Status.PROCESSED):
+        primary_action = (
+            _home_action('run_allocation', 'הרצת שיבוץ', 'Run allocation', '/allocation')
+            if can_run_allocation else
+            _home_action('view_region_status', 'צפייה בסטטוס האזור', 'View regional status', '/allocation')
+        )
+    elif has_completed_run and unassigned_students > 0:
+        primary_action = _home_action('review_unassigned', 'סקירת סטודנטים ללא שיבוץ', 'Review unassigned students', '/students')
+    elif pending_requests > 0:
+        primary_action = (
+            _home_action('review_requests', 'סקירת בקשות ממתינות', 'Review pending requests', '/transfers')
+            if can_review_requests else
+            _home_action('view_requests', 'צפייה בבקשות', 'View requests', '/transfers')
+        )
+    elif has_completed_run:
+        primary_action = _home_action('review_results', 'צפייה בתוצאות השיבוץ', 'View allocation results', '/allocation/results')
+
+    # ---- Attention items ----
+    attention_items = []
+
+    if unassigned_students > 0:
+        attention_items.append({
+            'id': 'unassigned-students', 'severity': 'warning', 'icon': 'users', 'count': unassigned_students,
+            'title_he': 'סטודנטים ללא שיבוץ', 'title_en': 'Unassigned students',
+            'description_he': f'{unassigned_students} סטודנטים ממתינים לשיבוץ לחדר',
+            'description_en': f'{unassigned_students} students are waiting for a room assignment',
+            'route': '/students',
+        })
+
+    if pending_requests > 0:
+        attention_items.append({
+            'id': 'pending-requests', 'severity': 'warning', 'icon': 'arrow-left-right', 'count': pending_requests,
+            'title_he': 'בקשות ממתינות לטיפול', 'title_en': 'Pending requests',
+            'description_he': f'{pending_requests} בקשות סטודנטים ממתינות לטיפול',
+            'description_en': f'{pending_requests} student requests await review',
+            'route': '/transfers',
+        })
+
+    if latest_batch is not None and latest_batch.status == ImportBatch.Status.FAILED and can_upload:
+        attention_items.append({
+            'id': 'upload-failed', 'severity': 'error', 'icon': 'upload', 'count': None,
+            'title_he': 'העלאת קובץ נכשלה', 'title_en': 'File upload failed',
+            'description_he': latest_batch.error_message or 'ההעלאה האחרונה נכשלה, נסו שוב',
+            'description_en': latest_batch.error_message or 'The latest upload failed, please try again',
+            'route': '/upload',
+        })
+
+    if latest_run_failed and can_run_allocation:
+        attention_items.append({
+            'id': 'allocation-failed', 'severity': 'error', 'icon': 'shuffle', 'count': None,
+            'title_he': 'הרצת השיבוץ האחרונה נכשלה', 'title_en': 'Latest allocation run failed',
+            'description_he': latest_run.error_message or 'נסו להריץ שיבוץ מחדש',
+            'description_en': latest_run.error_message or 'Try running the allocation again',
+            'route': '/allocation',
+        })
+
+    if active_run is not None:
+        attention_items.append({
+            'id': 'allocation-running', 'severity': 'info', 'icon': 'clock', 'count': None,
+            'title_he': 'שיבוץ פעיל כעת', 'title_en': 'Allocation currently running',
+            'description_he': 'תהליך השיבוץ באזור שלכם פעיל כרגע',
+            'description_en': 'An allocation run is currently in progress',
+            'route': '/allocation',
+        })
+
+    if region is not None and latest_inbox is not None and latest_inbox.status in (
+        RegionInbox.Status.PENDING, RegionInbox.Status.VIEWED
+    ):
+        attention_items.append({
+            'id': 'inbox-not-processed', 'severity': 'warning', 'icon': 'inbox', 'count': latest_inbox.students_count,
+            'title_he': 'נתוני סטודנטים חדשים ממתינים', 'title_en': 'New student data awaiting processing',
+            'description_he': f'{latest_inbox.students_count} סטודנטים חדשים התקבלו וטרם טופלו',
+            'description_en': f'{latest_inbox.students_count} new students received and not yet processed',
+            'route': '/allocation',
+        })
+
+    if is_admin and pending_inbox_count > 0:
+        attention_items.append({
+            'id': 'regions-pending-review', 'severity': 'warning', 'icon': 'inbox', 'count': pending_inbox_count,
+            'title_he': 'אזורים עם נתונים חדשים שטרם נצפו', 'title_en': 'Regions with unviewed new data',
+            'description_he': f'{pending_inbox_count} אזורים טרם צפו בנתוני הסטודנטים החדשים שלהם',
+            'description_en': f'{pending_inbox_count} regions have not yet viewed their new student data',
+            'route': None,
+        })
+
+    if is_admin and regions_with_failed_latest > 0:
+        attention_items.append({
+            'id': 'regions-failed-allocation', 'severity': 'error', 'icon': 'shuffle', 'count': regions_with_failed_latest,
+            'title_he': 'אזורים עם הרצת שיבוץ שנכשלה', 'title_en': 'Regions with a failed allocation run',
+            'description_he': f'{regions_with_failed_latest} אזורים עם הרצת השיבוץ האחרונה שלהם נכשלה',
+            'description_en': f'{regions_with_failed_latest} regions have a failed latest allocation run',
+            'route': None,
+        })
+
+    if is_admin and priority_students_pending > 0:
+        attention_items.append({
+            'id': 'priority-students', 'severity': 'info', 'icon': 'star', 'count': priority_students_pending,
+            'title_he': 'סטודנטים בעדיפות ללא שיבוץ', 'title_en': 'Priority students without assignment',
+            'description_he': f'{priority_students_pending} סטודנטים בעדיפות ממתינים לשיבוץ',
+            'description_en': f'{priority_students_pending} priority students are waiting for assignment',
+            'route': '/priority',
+        })
+
+    severity_order = {'error': 0, 'warning': 1, 'info': 2}
+    attention_items.sort(key=lambda item: severity_order.get(item['severity'], 3))
+
+    # ---- Recent activity (uploads + allocation runs + student requests) ----
+    recent_activity = []
+
+    batch_qs = (
+        ImportBatch.objects.select_related('uploaded_by')
+        if is_admin else
+        ImportBatch.objects.filter(id__in=RegionInbox.objects.filter(region=region).values_list('batch_id', flat=True))
+    )
+    for b in batch_qs.order_by('-created_at')[:3]:
+        recent_activity.append({
+            'id': f'batch-{b.id}', 'type': 'upload', 'icon': 'upload', 'status': b.status,
+            'title_he': f'קובץ הועלה: {b.filename}', 'title_en': f'File uploaded: {b.filename}',
+            'subtitle_he': f'{b.total_students} סטודנטים', 'subtitle_en': f'{b.total_students} students',
+            'timestamp': b.created_at.isoformat() if b.created_at else None,
+            'route': '/upload' if is_admin else '/allocation',
+        })
+
+    for r in run_qs.order_by('-started_at')[:3]:
+        r_time = r.completed_at or r.started_at
+        recent_activity.append({
+            'id': f'run-{r.id}', 'type': 'allocation', 'icon': 'shuffle', 'status': r.status,
+            'title_he': f'הרצת שיבוץ - {r.region.name}', 'title_en': f'Allocation run - {r.region.name}',
+            'subtitle_he': f'{r.successful_assignments} שיבוצים מוצלחים', 'subtitle_en': f'{r.successful_assignments} successful assignments',
+            'timestamp': r_time.isoformat() if r_time else None,
+            'route': '/allocation/results' if r.status in completed_like else '/allocation',
+        })
+
+    recent_requests_qs = _scope_requests(
+        StudentRequest.objects.select_related('student', 'requested_by')
+    ).order_by('-created_at')[:5]
+    for sr in recent_requests_qs:
+        student_label = sr.student.full_name if sr.student else (sr.student_data or {}).get('first_name', '') or ''
+        type_he = sr.get_request_type_display()
+        type_en = _HOME_REQUEST_TYPE_LABELS_EN.get(sr.request_type, sr.request_type)
+        recent_activity.append({
+            'id': f'request-{sr.id}', 'type': 'request', 'icon': 'file-text', 'status': sr.status,
+            'title_he': f'{type_he} - {student_label}'.strip(' -') if student_label else type_he,
+            'title_en': f'{type_en} - {student_label}'.strip(' -') if student_label else type_en,
+            'subtitle_he': (sr.reason or '')[:80], 'subtitle_en': (sr.reason or '')[:80],
+            'timestamp': sr.created_at.isoformat() if sr.created_at else None,
+            'route': '/transfers',
+        })
+
+    recent_activity = [a for a in recent_activity if a['timestamp']]
+    recent_activity.sort(key=lambda a: a['timestamp'], reverse=True)
+    recent_activity = recent_activity[:8]
+
+    return Response({
+        'user': {
+            'name': user.get_full_name() or user.email,
+            'role': user.role,
+            'role_display': user.get_role_display(),
+            'region_id': region.id if region else None,
+            'region_name': region.name if region else None,
+        },
+        'scope': 'system' if region is None else 'region',
+        'metrics': {
+            'assigned_students': assigned_students,
+            'unassigned_students': unassigned_students,
+            'occupancy_rate': occupancy_rate,
+            'available_beds': available_beds,
+            'pending_requests': pending_requests,
+        },
+        'process': {
+            'latest_batch': ImportBatchSerializer(latest_batch).data if latest_batch else None,
+            'latest_inbox': RegionInboxSerializer(latest_inbox).data if latest_inbox else None,
+            'active_run': AllocationRunSerializer(active_run).data if active_run else None,
+            'latest_run': AllocationRunSerializer(latest_run).data if latest_run else None,
+            'has_completed_run': has_completed_run,
+        },
+        'workflow': workflow,
+        'situation_he': situation_he,
+        'situation_en': situation_en,
+        'primary_action': primary_action,
+        'attention_items': attention_items,
+        'recent_activity': recent_activity,
     })
 
 
