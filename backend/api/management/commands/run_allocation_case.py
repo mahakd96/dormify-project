@@ -690,16 +690,87 @@ class Command(BaseCommand):
             row.get("religious_for_placement", "").strip()
             or row.get("religious_preference", "").strip()
         ).lower()
+        value = " ".join(value.replace("_", " ").split())
+
         if value in {
             "",
             "לא משנה",
-            "no_preference",
-            "not_specified",
+            "ללא העדפה",
+            "אין העדפה",
+            "no preference",
+            "not specified",
             "לא צוין",
             "unknown",
+            "לא ידוע",
+            "none",
         }:
             return ""
-        return value
+
+        canonical = {
+            "דתי": "religious",
+            "דתית": "religious",
+            "דתי/ה": "religious",
+            "religious": "religious",
+            "חרדי": "haredi",
+            "חרדית": "haredi",
+            "haredi": "haredi",
+            "orthodox": "haredi",
+            "מסורתי": "traditional",
+            "מסורתית": "traditional",
+            "traditional": "traditional",
+            "חילוני": "secular",
+            "חילונית": "secular",
+            "secular": "secular",
+        }
+        return canonical.get(value, value)
+
+    def normalize_religion(self, row):
+        value = (
+            row.get("requested_religion", "").strip()
+            or row.get("religion", "").strip()
+        ).lower()
+
+        if value in {
+            "",
+            "not_specified",
+            "not specified",
+            "לא צוין",
+            "unknown",
+            "לא ידוע",
+        }:
+            return ""
+
+        religion_map = {
+            "יהודי": "jewish",
+            "jewish": "jewish",
+            "מוסלמי": "muslim",
+            "muslims": "muslim",
+            "muslim": "muslim",
+            "נוצרי": "christian",
+            "christian": "christian",
+            "דרוזי": "druze",
+            "druze": "druze",
+        }
+        return religion_map.get(value, value)
+
+    def religious_restriction_state(self, row):
+        """
+        Mirror allocation.solver._student_religious_state:
+
+        - Only the normalized value "religious" creates a hard restriction.
+        - Religious Jewish students may share only with Jewish+religious students.
+        - Religious non-Jewish students may share only with students of the
+          same religion, regardless of the roommates' observance level.
+        - Students without a religious request impose no hard religion restriction.
+        """
+        if self.normalize_strict_preference(row) != "religious":
+            return None
+
+        religion = self.normalize_religion(row)
+        if religion == "jewish":
+            return ("rj",)
+
+        return ("religion", religion) if religion else None
 
     def collect_roommate_requests(self, students_rows):
         request_map = defaultdict(dict)
@@ -1063,25 +1134,56 @@ class Command(BaseCommand):
             )
 
         # Hard ReligiousTogether expectation.
+        # This validator mirrors the solver's exact hard-rule semantics:
+        # only students marked "religious" impose a restriction.
         if self.is_constraint_hard(constraints_config, "ReligiousTogether"):
-            preference_mixes = []
+            religious_violations = []
+
             for apartment_code, student_ids in report["students_by_apartment"].items():
-                preferences = {
-                    self.normalize_strict_preference(student_rows_by_id[sid])
-                    for sid in student_ids
+                rows = [student_rows_by_id[sid] for sid in student_ids]
+                states = [self.religious_restriction_state(row) for row in rows]
+
+                # Religious Jewish: every roommate must also be Jewish+religious.
+                if any(state == ("rj",) for state in states):
+                    invalid = [
+                        row["student_id"]
+                        for row in rows
+                        if not (
+                            self.normalize_religion(row) == "jewish"
+                            and self.normalize_strict_preference(row) == "religious"
+                        )
+                    ]
+                    if invalid:
+                        religious_violations.append(
+                            f"{apartment_code}: religious Jewish mixed with {invalid}"
+                        )
+
+                # Religious non-Jewish of religion R:
+                # every roommate must have religion R, but need not be religious.
+                restricted_religions = {
+                    state[1]
+                    for state in states
+                    if state is not None and state[0] == "religion"
                 }
-                preferences.discard("")
-                if len(preferences) > 1:
-                    preference_mixes.append(
-                        f"{apartment_code}: {sorted(preferences)}"
-                    )
+
+                for religion in restricted_religions:
+                    invalid = [
+                        row["student_id"]
+                        for row in rows
+                        if self.normalize_religion(row) != religion
+                    ]
+                    if invalid:
+                        religious_violations.append(
+                            f"{apartment_code}: religious {religion} mixed with {invalid}"
+                        )
+
             self.add_check(
                 report,
                 "Hard ReligiousTogether rule respected",
                 0,
-                len(preference_mixes),
-                not preference_mixes,
-                "; ".join(preference_mixes),
+                len(religious_violations),
+                not religious_violations,
+                "; ".join(religious_violations),
             )
 
         # Hard roommatePositiveOnly expectation.

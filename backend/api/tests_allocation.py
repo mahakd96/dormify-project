@@ -2100,8 +2100,6 @@ class SolverBuilding179PriorityTest(TestCase):
             if gender == Student.Gender.MALE
             else Student.HousingType.SINGLE_FEMALE
         )
-        room_f = self._make_room(female_apartment, 'A', capacity=2)
-        room_m = self._make_room(conflicting_apartment, 'A', capacity=2)
 
         return Student.objects.create(
             student_id=student_id,
@@ -4704,23 +4702,27 @@ class HouseholdExclusivityTest(TestCase):
 # ---------------------------------------------------------------------------
 class AccessibilityAllocationExclusionTest(TestCase):
     """
-    Two related bugs in accessibility/disability handling:
+    Covers the confirmed root cause of the over-flagging bug plus the
+    surrounding accessibility/category behavior:
 
-    1. Some allocation-group values (e.g. 'הסמכה - נכים', 'קדם אקדמי - כולל
-       נכים') mark a student as an accessibility/disability case even when
-       the explicit accessibility columns are blank for that row. Before
-       this fix, only the explicit columns (accessibility_flag/
-       disability_percent/medical_reason, via read_accessibility_fields)
-       were read, so these students were imported as ordinary students.
-    2. Even a correctly-flagged accessibility_flag=True student was still
-       sent to the solver — neither api.views.run_allocation nor
-       api.views._execute_allocation_background excluded
-       accessibility_flag from the student queryset before calling
-       allocation.solver.run_improved_ortools_allocation. Accessibility
-       students must be saved/imported normally, but allocated manually by
-       the dorm office, never by OR-Tools.
+    Root cause: the allocation-group ("החלטה-תאור קבוצת הקצאה") whitelist
+    used to also include the STAYING/CONTINUING category value
+    ('הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2'), which is the
+    majority category for returning students. That single mistaken entry
+    caused 722 of 840 students to be marked accessibility_flag=True and
+    excluded from the OR-Tools solver, leaving only 118 students actually
+    allocated. Only the EXACT value 'הסמכה - נכים' may set
+    accessibility_flag=True (see ACCESSIBILITY_ALLOCATION_GROUP_VALUES /
+    allocation_group_indicates_accessibility in api/views.py).
 
-    Both fixes must never affect is_priority (see
+    Separately, an accessibility_flag=True student must still be saved
+    normally but excluded from the solver — neither api.views.run_allocation
+    nor api.views._execute_allocation_background sends
+    accessibility_flag=True students to
+    allocation.solver.run_improved_ortools_allocation; the dorm office
+    allocates them manually.
+
+    None of this may affect is_priority (see
     priority_fields_from_special_statuses / StudentPriorityImportTest),
     which is derived solely from special_status_1..4.
     """
@@ -4763,24 +4765,28 @@ class AccessibilityAllocationExclusionTest(TestCase):
         payload = build_student_payload_from_row(row)
         self.assertTrue(payload['accessibility_flag'])
 
-    def test_allocation_group_kdam_academi_nichim_marks_accessibility(self):
-        """allocation_group='קדםאקדמי - כולל נכים' must also set
-        accessibility_flag=True — an EXACT confirmed accessibility
-        category value."""
+    def test_allocation_group_kdam_academi_nichim_does_not_mark_accessibility(self):
+        """allocation_group='קדםאקדמי - כולל נכים' is NOT one of the
+        confirmed exact accessibility values and must NOT set
+        accessibility_flag=True — only 'הסמכה - נכים' does."""
         from api.views import build_student_payload_from_row
 
         row = self._make_row(student_id='ACC_GRP2', allocation_group='קדםאקדמי - כולל נכים')
         payload = build_student_payload_from_row(row)
-        self.assertTrue(payload['accessibility_flag'])
+        self.assertFalse(payload['accessibility_flag'])
 
-    def test_allocation_group_hasmaha_veterans_new_disqualified_marks_accessibility(self):
+    def test_allocation_group_staying_value_does_not_mark_accessibility(self):
         """
-        allocation_group='הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי
-        מלאות2' is a CONFIRMED accessibility category, even though it does
-        not contain the word 'נכים' at all — this is why accessibility
-        detection must be an explicit whitelist of confirmed category
-        values (ACCESSIBILITY_ALLOCATION_GROUP_VALUES), not a 'נכים'
-        substring heuristic, which would have missed this exact value.
+        Regression test for the confirmed root cause: allocation_group=
+        'הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2' identifies
+        STAYING/CONTINUING students (the majority category) and must NOT
+        set accessibility_flag=True. Before the fix, this exact value was
+        mistakenly included in the accessibility whitelist, which flagged
+        722 of 840 students as accessibility_flag=True and excluded them
+        from the OR-Tools solver, leaving only 118 actually allocated.
+        These students must still reach the solver like any other
+        staying/continuing student, since all students are re-allocated
+        from scratch.
         """
         from api.views import build_student_payload_from_row
 
@@ -4789,12 +4795,14 @@ class AccessibilityAllocationExclusionTest(TestCase):
             allocation_group='הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2',
         )
         payload = build_student_payload_from_row(row)
-        self.assertTrue(payload['accessibility_flag'])
+        self.assertFalse(payload['accessibility_flag'])
+        self.assertEqual(payload['category'], Student.StudentCategory.CONTINUING)
 
-    def test_allocation_group_dash_variant_still_matches(self):
-        """The same confirmed category value, but with a plain hyphen
+    def test_allocation_group_staying_value_dash_variant_still_classified_as_staying(self):
+        """The same staying/continuing value, but with a plain hyphen
         instead of an en-dash (a real Excel-export inconsistency), must
-        still match — proving normalization is dash-insensitive."""
+        still classify as CONTINUING and not accessibility — proving
+        normalization is dash-insensitive in both directions."""
         from api.views import build_student_payload_from_row
 
         row = self._make_row(
@@ -4802,7 +4810,38 @@ class AccessibilityAllocationExclusionTest(TestCase):
             allocation_group='הסמכה - ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2',
         )
         payload = build_student_payload_from_row(row)
-        self.assertTrue(payload['accessibility_flag'])
+        self.assertFalse(payload['accessibility_flag'])
+        self.assertEqual(payload['category'], Student.StudentCategory.CONTINUING)
+
+    def test_allocation_group_new_values_marked_new_and_not_accessibility(self):
+        """allocation_group='הסמכה – חדשים' and 'מסיימי מכינה מאוחרים – שנה
+        1' must classify as StudentCategory.NEW and must not be treated as
+        accessibility."""
+        from api.views import build_student_payload_from_row
+
+        for index, allocation_group in enumerate((
+            'הסמכה – חדשים',
+            'מסיימי מכינה מאוחרים – שנה 1',
+        ), start=1):
+            row = self._make_row(student_id=f'ACC_GRP_NEW{index}', allocation_group=allocation_group)
+            payload = build_student_payload_from_row(row)
+            self.assertFalse(payload['accessibility_flag'], allocation_group)
+            self.assertEqual(payload['category'], Student.StudentCategory.NEW, allocation_group)
+
+    def test_allocation_group_other_ordinary_value_sent_normally(self):
+        """allocation_group='תארים מתקדמים – מגיסטרים+דוקטורים+בינלאומיים'
+        (advanced degrees) is an ordinary non-empty value: not
+        accessibility, and no special category field/migration is created
+        for it — it falls back to the existing CONTINUING default."""
+        from api.views import build_student_payload_from_row
+
+        row = self._make_row(
+            student_id='ACC_GRP_OTHER1',
+            allocation_group='תארים מתקדמים – מגיסטרים+דוקטורים+בינלאומיים',
+        )
+        payload = build_student_payload_from_row(row)
+        self.assertFalse(payload['accessibility_flag'])
+        self.assertEqual(payload['category'], Student.StudentCategory.CONTINUING)
 
     def test_allocation_group_unrelated_value_does_not_mark_accessibility(self):
         """An ordinary, unrelated allocation-group value must not be
@@ -4812,6 +4851,24 @@ class AccessibilityAllocationExclusionTest(TestCase):
         row = self._make_row(student_id='ACC_GRP5', allocation_group='רגילים')
         payload = build_student_payload_from_row(row)
         self.assertFalse(payload['accessibility_flag'])
+
+    def test_allocation_group_header_is_not_treated_as_value(self):
+        """The column header text itself ('החלטה-תאור קבוצת הקצאה' / 'תיאור
+        קבוצת הקצאה') must never be read back as if it were a cell value —
+        get_row_value() only ever returns row.get(column_name), never the
+        column name itself, so a row whose allocation_group cell literally
+        equals the header text is not one of the confirmed category values
+        and must not be classified as accessibility or as any exact
+        staying/new category."""
+        from api.views import build_student_payload_from_row
+
+        row = self._make_row(
+            student_id='ACC_GRP_HDR1',
+            allocation_group='תיאור קבוצת הקצאה',
+        )
+        payload = build_student_payload_from_row(row)
+        self.assertFalse(payload['accessibility_flag'])
+        self.assertEqual(payload['category'], Student.StudentCategory.CONTINUING)
 
     def test_allocation_group_partial_match_does_not_mark_accessibility(self):
         """
@@ -4832,18 +4889,28 @@ class AccessibilityAllocationExclusionTest(TestCase):
 
     def test_allocation_group_accessibility_does_not_set_priority(self):
         """Accessibility derived from allocation_group text must never set
-        is_priority — only special_status_1..4 may do that. Checked
-        against all three confirmed accessibility category values."""
+        is_priority — only special_status_1..4 may do that."""
+        from api.views import build_student_payload_from_row
+
+        row = self._make_row(student_id='ACC_GRP_PRI1', allocation_group='הסמכה - נכים')
+        payload = build_student_payload_from_row(row)
+        self.assertTrue(payload['accessibility_flag'])
+        self.assertFalse(payload['is_priority'])
+        self.assertEqual(payload['priority_reason'], '')
+
+    def test_allocation_group_staying_and_new_values_do_not_set_priority(self):
+        """The staying/new category values must never set is_priority
+        either — only special_status_1..4 may do that."""
         from api.views import build_student_payload_from_row
 
         for index, allocation_group in enumerate((
-            'הסמכה - נכים',
-            'קדםאקדמי - כולל נכים',
             'הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2',
+            'הסמכה – חדשים',
+            'מסיימי מכינה מאוחרים – שנה 1',
         ), start=1):
-            row = self._make_row(student_id=f'ACC_GRP_PRI{index}', allocation_group=allocation_group)
+            row = self._make_row(student_id=f'ACC_GRP_PRI2_{index}', allocation_group=allocation_group)
             payload = build_student_payload_from_row(row)
-            self.assertTrue(payload['accessibility_flag'], allocation_group)
+            self.assertFalse(payload['accessibility_flag'], allocation_group)
             self.assertFalse(payload['is_priority'], allocation_group)
             self.assertEqual(payload['priority_reason'], '', allocation_group)
 
