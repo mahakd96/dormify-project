@@ -1,5 +1,0 @@
-﻿apartment_code,building_code,category,is_accessible,is_reserved,is_active,inactive_reason
-N14-A1,CANADA_TEST,female,False,False,True,
-N14-A2,CANADA_TEST,female,False,False,True,
-N14-A3,CANADA_TEST,female,False,False,True,
-N14-A4,CANADA_TEST,female,False,False,False,inactive for test

@@ -3544,43 +3544,89 @@ def delete_allocation_run(request, run_id):
 @permission_classes([IsAuthenticated])
 def get_active_allocation_run(request):
     """
-    Return the most recent QUEUED/RUNNING/CANCELLATION_REQUESTED/COMPLETED
-    AllocationRun for the user's region (or a supplied ?region=<id> param).
-    Used by the frontend on page load to recover UI state.
+    Return an active allocation run, or the latest completed run
+    only when its active assignments still exist.
     """
     region_value = request.query_params.get('region')
 
     if region_value:
         region = _resolve_region(region_value)
+
         if not region:
-            return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {'error': 'אזור לא נמצא'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
     elif request.user.is_central_admin:
-        return Response({'run': None}, status=status.HTTP_200_OK)
+        return Response(
+            {'run': None},
+            status=status.HTTP_200_OK,
+        )
+
     elif request.user.region:
         region = request.user.region
-    else:
-        return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
 
-    recoverable_statuses = [
+    else:
+        return Response(
+            {'error': 'המשתמש אינו משויך לאזור'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    active_statuses = [
         AllocationRun.Status.QUEUED,
         AllocationRun.Status.RUNNING,
         AllocationRun.Status.CANCELLATION_REQUESTED,
-        AllocationRun.Status.COMPLETED,
     ]
 
-    run = AllocationRun.objects.filter(
+    active_run = AllocationRun.objects.filter(
         region=region,
-        status__in=recoverable_statuses,
+        status__in=active_statuses,
     ).order_by('-started_at').first()
 
-    if not run:
-        return Response({'run': None}, status=status.HTTP_200_OK)
+    if active_run:
+        return Response(
+            {
+                'run': AllocationRunSerializer(
+                    active_run
+                ).data
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    latest_completed_run = AllocationRun.objects.filter(
+        region=region,
+        status=AllocationRun.Status.COMPLETED,
+    ).order_by('-started_at').first()
+
+    if not latest_completed_run:
+        return Response(
+            {'run': None},
+            status=status.HTTP_200_OK,
+        )
+
+    has_current_assignments = BedAssignment.objects.filter(
+        allocation_run=latest_completed_run,
+        status=BedAssignment.Status.ACTIVE,
+        bed__room__is_active=True,
+        bed__room__apartment__is_active=True,
+        bed__room__apartment__building__is_active=True,
+    ).exists()
+
+    if not has_current_assignments:
+        return Response(
+            {'run': None},
+            status=status.HTTP_200_OK,
+        )
 
     return Response(
-        {'run': AllocationRunSerializer(run).data},
+        {
+            'run': AllocationRunSerializer(
+                latest_completed_run
+            ).data
+        },
         status=status.HTTP_200_OK,
     )
-
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -3598,34 +3644,61 @@ def allocation_history(request):
 @permission_classes([IsAuthenticated])
 def allocation_results(request):
     """
-    Return active BedAssignment rows for the requesting user's region.
+    Return the current allocation results for the permitted region:
 
-    central_admin / region_boss may pass ?region=<id> for read-only cross-region
-    access; without one, central_admin sees all regions and region_boss defaults
-    to their own. Employees always get their own region — any region query param
-    is ignored.
+    1. Assigned students
+    2. Unassigned allocatable students
+    3. Available real Bed records
+
+    The endpoint keeps the existing permission and region-scoping rules.
     """
     region_value = request.query_params.get('region') or None
     user = request.user
 
+    # ============================================================
+    # Resolve region according to the user's permissions
+    # ============================================================
     if user.is_central_admin or user.is_boss:
         if region_value:
             region = _resolve_region(region_value)
+
             if not region:
-                return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+                return Response(
+                    {'error': 'אזור לא נמצא'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
         elif user.is_central_admin:
+            # Central admin without an explicit region sees all regions.
             region = None
+
         elif user.region:
             region = user.region
+
         else:
-            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'המשתמש אינו משויך לאזור'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
     else:
         if not user.region:
-            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'המשתמש אינו משויך לאזור'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # An ordinary regional employee is always restricted to their region.
         region = user.region
 
-    qs = BedAssignment.objects.filter(
-        status=BedAssignment.Status.ACTIVE
+    # ============================================================
+    # Assigned students
+    # ============================================================
+    assignments_qs = BedAssignment.objects.filter(
+        status=BedAssignment.Status.ACTIVE,
+        bed__room__is_active=True,
+        bed__room__apartment__is_active=True,
+        bed__room__apartment__building__is_active=True,
     ).select_related(
         'student',
         'student__accepted_dorm_type',
@@ -3639,14 +3712,22 @@ def allocation_results(request):
     )
 
     if region:
-        qs = qs.filter(
+        assignments_qs = assignments_qs.filter(
             bed__room__apartment__building__dorm_type__region=region
         )
 
+    assignments_qs = assignments_qs.order_by(
+        'bed__room__apartment__building__number',
+        'bed__room__apartment__number',
+        'bed__room__name',
+        'bed__label',
+    )
+
     assignments = []
-    for ba in qs:
-        student = ba.student
-        bed = ba.bed
+
+    for assignment in assignments_qs:
+        student = assignment.student
+        bed = assignment.bed
         room = bed.room
         apartment = room.apartment
         building = apartment.building
@@ -3655,26 +3736,332 @@ def allocation_results(request):
 
         assignments.append({
             'student_id': student.student_id,
+            'student_name': student.full_name,
             'full_name': student.full_name,
             'first_name': student.first_name,
             'last_name': student.last_name,
+
             'gender': student.gender,
+            'housing_type': student.housing_type,
+            'housing_type_display': (
+                student.get_housing_type_display()
+                if student.housing_type
+                else ''
+            ),
+
+            'requested_religion': student.requested_religion,
             'religion': student.requested_religion,
+            'religion_display': (
+                student.get_requested_religion_display()
+                if student.requested_religion
+                else ''
+            ),
+
             'religious': student.religious,
+            'placement_sector': student.placement_sector,
             'sector': student.placement_sector,
+            'is_priority': student.is_priority,
+
             'building': building.number,
+            'building_number': building.number,
+
             'apartment': apartment.number,
+            'apartment_number': apartment.number,
+
+            'apartment_type': apartment.apartment_type,
+            'apartment_type_display': (
+                apartment.get_apartment_type_display()
+                if apartment.apartment_type
+                else ''
+            ),
+
+            'apartment_category': apartment.category,
+            'apartment_category_display': (
+                apartment.get_category_display()
+                if apartment.category
+                else ''
+            ),
+
             'room': room.name,
+            'room_name': room.name,
+
             'bed': bed.label,
+            'bed_label': bed.label,
+
             'dorm_type': dorm_type.name if dorm_type else '',
+            'dorm_type_id': dorm_type.id if dorm_type else None,
+
             'region': dorm_region.name if dorm_region else '',
             'region_id': dorm_region.id if dorm_region else '',
-            'assigned_at': ba.assigned_at.isoformat() if ba.assigned_at else '',
+
+            'assignment_type': assignment.assignment_type,
+            'assignment_status': assignment.status,
+            'assigned_at': (
+                assignment.assigned_at.isoformat()
+                if assignment.assigned_at
+                else ''
+            ),
+        })
+
+    # ============================================================
+    # Unassigned students
+    #
+    # Keep this population aligned with allocation_summary and the
+    # solver population:
+    # - exclude leaving students
+    # - exclude accessibility cases handled manually
+    # - show only students without a current assignment
+    # ============================================================
+    unassigned_qs = Student.objects.select_related(
+        'accepted_dorm_type',
+        'accepted_dorm_type__region',
+    ).exclude(
+        category=Student.StudentCategory.LEAVING
+    ).exclude(
+        accessibility_flag=True
+    ).filter(
+        assigned_room__isnull=True
+    )
+
+    if region:
+        unassigned_qs = unassigned_qs.filter(
+            accepted_dorm_type__region=region
+        )
+
+    unassigned_qs = unassigned_qs.order_by(
+        '-is_priority',
+        'last_name',
+        'first_name',
+        'student_id',
+    )
+
+    unassigned_students = []
+
+    for student in unassigned_qs:
+        dorm_type = student.accepted_dorm_type
+        student_region = dorm_type.region if dorm_type else None
+
+        special_statuses = [
+            getattr(student, 'special_status_1', ''),
+            getattr(student, 'special_status_2', ''),
+            getattr(student, 'special_status_3', ''),
+            getattr(student, 'special_status_4', ''),
+        ]
+
+        special_statuses = [
+            value
+            for value in special_statuses
+            if value not in (None, '')
+        ]
+
+        unassigned_students.append({
+            'student_db_id': student.id,
+            'student_id': student.student_id,
+            'business_partner_id': getattr(
+                student,
+                'business_partner_id',
+                '',
+            ),
+
+            'student_name': student.full_name,
+            'full_name': student.full_name,
+            'first_name': student.first_name,
+            'last_name': student.last_name,
+
+            'gender': student.gender,
+            'gender_display': (
+                student.get_gender_display()
+                if student.gender
+                else ''
+            ),
+
+            'housing_type': student.housing_type,
+            'housing_type_display': (
+                student.get_housing_type_display()
+                if student.housing_type
+                else ''
+            ),
+
+            'requested_religion': student.requested_religion,
+            'religion': student.requested_religion,
+            'religion_display': (
+                student.get_requested_religion_display()
+                if student.requested_religion
+                else ''
+            ),
+
+            'religious': student.religious,
+            'placement_sector': student.placement_sector,
+            'placement_sector_display': (
+                student.get_placement_sector_display()
+                if student.placement_sector
+                else ''
+            ),
+
+            'is_priority': student.is_priority,
+            'priority_reason': student.priority_reason,
+
+            'category': student.category,
+            'category_display': (
+                student.get_category_display()
+                if student.category
+                else ''
+            ),
+
+            'accepted_dorm_type_id': (
+                dorm_type.id
+                if dorm_type
+                else None
+            ),
+            'accepted_dorm_type': (
+                dorm_type.name
+                if dorm_type
+                else ''
+            ),
+
+            'region_id': (
+                student_region.id
+                if student_region
+                else ''
+            ),
+            'region': (
+                student_region.name
+                if student_region
+                else ''
+            ),
+
+            'special_statuses': special_statuses,
+
+            # At this stage we know the student was not assigned, but we do
+            # not invent a specific reason without running a diagnostic.
+            'unassigned_reason': 'לא נמצא שיבוץ חוקי בתוצאת השיבוץ הנוכחית',
+        })
+
+    # ============================================================
+    # Available real beds
+    #
+    # Only active buildings/apartments/rooms are included.
+    # A bed with an ACTIVE BedAssignment is not available.
+    # ============================================================
+    occupied_bed_ids = BedAssignment.objects.filter(
+        status=BedAssignment.Status.ACTIVE
+    ).values_list(
+        'bed_id',
+        flat=True,
+    )
+
+    available_beds_qs = Bed.objects.filter(
+        room__is_active=True,
+        room__apartment__is_active=True,
+        room__apartment__building__is_active=True,
+    ).exclude(
+        id__in=occupied_bed_ids
+    ).select_related(
+        'room',
+        'room__apartment',
+        'room__apartment__building',
+        'room__apartment__building__dorm_type',
+        'room__apartment__building__dorm_type__region',
+    )
+
+    if region:
+        available_beds_qs = available_beds_qs.filter(
+            room__apartment__building__dorm_type__region=region
+        )
+
+    available_beds_qs = available_beds_qs.order_by(
+        'room__apartment__building__number',
+        'room__apartment__number',
+        'room__name',
+        'label',
+    )
+
+    available_beds = []
+
+    for bed in available_beds_qs:
+        room = bed.room
+        apartment = room.apartment
+        building = apartment.building
+        dorm_type = building.dorm_type
+        dorm_region = dorm_type.region if dorm_type else None
+
+        inactive_reason = getattr(apartment, 'inactive_reason', '')
+
+        is_reserved = (
+            str(inactive_reason).strip().lower() == 'reserved'
+            or str(inactive_reason).strip() == 'שמור'
+        )
+
+        available_beds.append({
+            'bed_id': bed.id,
+            'bed': bed.label,
+            'bed_label': bed.label,
+
+            'room_id': room.id,
+            'room': room.name,
+            'room_name': room.name,
+            'room_capacity': room.capacity,
+
+            'apartment_id': apartment.id,
+            'apartment': apartment.number,
+            'apartment_number': apartment.number,
+            'apartment_type': apartment.apartment_type,
+            'apartment_type_display': (
+                apartment.get_apartment_type_display()
+                if apartment.apartment_type
+                else ''
+            ),
+            'apartment_category': apartment.category,
+            'apartment_category_display': (
+                apartment.get_category_display()
+                if apartment.category
+                else ''
+            ),
+            'is_reserved': is_reserved,
+
+            'building_id': building.id,
+            'building': building.number,
+            'building_number': building.number,
+            'building_gender_restriction': getattr(
+                building,
+                'gender_restriction',
+                '',
+            ),
+
+            'dorm_type_id': (
+                dorm_type.id
+                if dorm_type
+                else None
+            ),
+            'dorm_type': (
+                dorm_type.name
+                if dorm_type
+                else ''
+            ),
+
+            'region_id': (
+                dorm_region.id
+                if dorm_region
+                else ''
+            ),
+            'region': (
+                dorm_region.name
+                if dorm_region
+                else ''
+            ),
         })
 
     return Response({
+        'counts': {
+            'assigned': len(assignments),
+            'unassigned': len(unassigned_students),
+            'available_beds': len(available_beds),
+        },
         'count': len(assignments),
+
         'assignments': assignments,
+        'unassigned_students': unassigned_students,
+        'available_beds': available_beds,
     }, status=status.HTTP_200_OK)
 
 
@@ -3772,12 +4159,26 @@ def allocation_summary(request):
     ).exclude(accessibility_flag=True)
 
     total_students = allocatable_students_qs.count()
+
+    active_assigned_student_ids = BedAssignment.objects.filter(
+        status=BedAssignment.Status.ACTIVE,
+        student__accepted_dorm_type__region=region,
+        bed__room__is_active=True,
+        bed__room__apartment__is_active=True,
+        bed__room__apartment__building__is_active=True,
+    ).values_list(
+        'student_id',
+        flat=True,
+    ).distinct()
+
     assigned_students = allocatable_students_qs.filter(
-        assigned_room__isnull=False
+        id__in=active_assigned_student_ids
     ).count()
-    students_for_allocation_qs = allocatable_students_qs.filter(
-        assigned_room__isnull=True
+
+    students_for_allocation_qs = allocatable_students_qs.exclude(
+        id__in=active_assigned_student_ids
     )
+
     unassigned_students = students_for_allocation_qs.count()
     priority_students = allocatable_students_qs.filter(
         is_priority=True
@@ -5894,22 +6295,22 @@ def home_dashboard(request):
 EXCEL_DORM_NAME_TO_OFFICIAL_CODE = {
     'ריפקין': 1,
     'קנדה': 2,
-    'מעונותקנדה': 2,
+    'מעונות קנדה': 2,
     'קסל': 3,
     'זוגות': 4,
-    'מזרחישן': 5,
-    'נווהאמריקה': 6,
+    'מזרח ישן': 5,
+    'נווה אמריקה': 6,
     'סנט': 7,
     'משפחות': 8,
-    'יחידבחדר': 10,
-    'עליוןעמים': 11,
-    'מזרחחדש': 12,
-    'סגלזוטר': 13,
-    'כפרמשתלמים': 14,
-    'כפרהסמכה': 15,
-    'רותהכהן': 16,
+    'יחיד בחדר': 10,
+    'עליון עמים': 11,
+    'מזרח חדש': 12,
+    'סגל זוטר': 13,
+    'כפר משתלמים': 14,
+    'כפר הסמכה': 15,
+    'רות הכהן': 16,
     'ברושים': 17,
-    'סנטחדש': 18,
+    'סנט חדש': 18,
 }
 
 # Real dorm-office sheets that should not enter allocation.
@@ -6281,6 +6682,15 @@ def parse_category(value, sheet_name=''):
     if sheet_norm == normalize_compact('נשארים'):
         return Student.StudentCategory.CONTINUING
 
+    # Confirmed exact allocation-group ("החלטה-תאור קבוצת הקצאה") values
+    # take priority over the generic substring heuristic below: the
+    # staying/continuing value contains the substring 'חדשים' (it lists
+    # veterans + new-who-were-disqualified-as-new), which the heuristic
+    # would otherwise misread as StudentCategory.NEW.
+    exact_category = allocation_group_category(value)
+    if exact_category is not None:
+        return exact_category
+
     value = safe_str(value)
     value_norm = normalize_compact(value)
 
@@ -6408,24 +6818,34 @@ def _normalize_allocation_group_value(value):
     return normalize_compact(text)
 
 
-# Exact allocation-group ("תיאור קבוצת הקצאה") category values confirmed to
-# mark a student as an accessibility/disability case handled manually by
-# the dorm office, even when the explicit accessibility columns
-# (accessibility_flag/disability_percent/medical_reason) are blank for
-# that row. These are official dorm-office category names, not merely
-# text that happens to mention disability — for example 'הסמכה – ותיקים+
-# חדשים שנפסלו כחדשים+בינלאומי מלאות2' is a confirmed accessibility
-# category despite not containing the word 'נכים' at all. Matched by EXACT
-# normalized value, not a substring rule, so an unrelated allocation group
-# (e.g. one that merely mentions 'הסמכה' on its own) is never
-# misclassified.
+
+# The Excel column name itself ("החלטה-תאור קבוצת הקצאה", aliased in
+# COLUMN_ALIASES['allocation_group']) is kept separate from the cell
+# VALUES it can contain below. Never compare a value against the column
+# name — see test_allocation_group_header_is_not_treated_as_value.
+ALLOCATION_GROUP_EXCEL_COLUMN_NAME = "החלטה-תאור קבוצת הקצאה"
+
+# Confirmed exact allocation-group cell values. All students in this
+# column are still sent to the solver EXCEPT the accessibility value —
+# staying/continuing and new students are both re-allocated from scratch.
+ALLOCATION_GROUP_VALUE_STAYING = "הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2"
+ALLOCATION_GROUP_VALUES_NEW = (
+    "הסמכה – חדשים",
+    "מסיימי מכינה מאוחרים – שנה 1",
+)
+ALLOCATION_GROUP_VALUE_ACCESSIBILITY = "הסמכה - נכים"
+
+_ALLOCATION_GROUP_STAYING_NORMALIZED = _normalize_allocation_group_value(ALLOCATION_GROUP_VALUE_STAYING)
+_ALLOCATION_GROUP_NEW_NORMALIZED = {
+    _normalize_allocation_group_value(value) for value in ALLOCATION_GROUP_VALUES_NEW
+}
+
+# Only 'הסמכה - נכים' marks a student as accessibility/disability. This is
+# an exact-match whitelist, never a substring/bool(cell) rule — a value
+# merely containing 'הסמכה' or 'נכים' as part of a longer, unrelated
+# category name must NOT match.
 ACCESSIBILITY_ALLOCATION_GROUP_VALUES = {
-    _normalize_allocation_group_value(value)
-    for value in (
-        'הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2',
-        'הסמכה - נכים',
-        'קדםאקדמי - כולל נכים',
-    )
+    _normalize_allocation_group_value(ALLOCATION_GROUP_VALUE_ACCESSIBILITY)
 }
 
 
@@ -6436,6 +6856,44 @@ def allocation_group_indicates_accessibility(allocation_group_value):
     allocation-group category values in ACCESSIBILITY_ALLOCATION_GROUP_VALUES.
     """
     return _normalize_allocation_group_value(allocation_group_value) in ACCESSIBILITY_ALLOCATION_GROUP_VALUES
+
+
+def allocation_group_category(allocation_group_value):
+    """
+    Exact-match staying/new classification for the confirmed
+    allocation-group values, reusing the existing Student.category field
+    (StudentCategory.CONTINUING/NEW) instead of a new database column.
+
+    Returns None when allocation_group_value is not one of the confirmed
+    staying/new values, so callers can fall back to the generic
+    substring heuristic in parse_category() for other sheets/files.
+    """
+    normalized = _normalize_allocation_group_value(allocation_group_value)
+
+    if normalized == _ALLOCATION_GROUP_STAYING_NORMALIZED:
+        return Student.StudentCategory.CONTINUING
+
+    if normalized in _ALLOCATION_GROUP_NEW_NORMALIZED:
+        return Student.StudentCategory.NEW
+
+    return None
+
+
+def classify_allocation_group_bucket(allocation_group_value):
+    """
+    Non-persisted classification used only for import-summary logging
+    (see upload_excel). Never stored on the Student model.
+    """
+    if allocation_group_indicates_accessibility(allocation_group_value):
+        return 'accessibility'
+
+    category = allocation_group_category(allocation_group_value)
+    if category == Student.StudentCategory.CONTINUING:
+        return 'staying'
+    if category == Student.StudentCategory.NEW:
+        return 'new'
+
+    return 'other'
 
 
 def priority_fields_from_special_statuses(*special_statuses):
@@ -6734,6 +7192,15 @@ def upload_excel(request):
             'leaving': 0,
         }
 
+        # Import-summary buckets derived from the allocation-group column,
+        # for logging only — never persisted on the Student model.
+        allocation_group_bucket_counts = {
+            'staying': 0,
+            'new': 0,
+            'accessibility': 0,
+            'other': 0,
+        }
+
         # If a student appears in more than one sheet, we keep the stronger status.
         category_priority = {
             Student.StudentCategory.CONTINUING: 1,
@@ -6954,6 +7421,11 @@ def upload_excel(request):
                     if final_category in sheet_counts[sheet_name]['categories']:
                         sheet_counts[sheet_name]['categories'][final_category] += 1
 
+                    allocation_group_bucket = classify_allocation_group_bucket(
+                        student_payload.get('allocation_group', '')
+                    )
+                    allocation_group_bucket_counts[allocation_group_bucket] += 1
+
                 except Exception as e:
                     add_skip('row_exception')
                     sheet_counts[sheet_name]['skipped'] += 1
@@ -6999,6 +7471,25 @@ def upload_excel(request):
             })
 
         total_imported = created_count + updated_count
+
+        # Sent to the solver = everyone except LEAVING and accessibility
+        # students, mirroring the exclusion in run_allocation/
+        # _execute_allocation_background.
+        final_students_for_solver = (
+            total_imported
+            - category_counts['leaving']
+            - allocation_group_bucket_counts['accessibility']
+        )
+        print(
+            ">>> upload_excel allocation-group summary: "
+            f"total={total_imported}, "
+            f"staying={allocation_group_bucket_counts['staying']}, "
+            f"new={allocation_group_bucket_counts['new']}, "
+            f"accessibility_excluded={allocation_group_bucket_counts['accessibility']}, "
+            f"other={allocation_group_bucket_counts['other']}, "
+            f"final_sent_to_solver={final_students_for_solver}",
+            flush=True,
+        )
 
         refresh_db_connection()
         ImportBatch.objects.filter(pk=batch.id).update(

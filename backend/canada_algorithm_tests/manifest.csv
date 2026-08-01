@@ -1,10 +1,11 @@
-﻿case_folder,case_name,students,apartments,rooms,main_expected
-case_01_balanced_solvable,Case 01 - Balanced solvable Canada case,20,4,20,"status in ['OPTIMAL', 'FEASIBLE']; successful_assignments=20; conflicts=0."
-case_02_soft_tradeoff_one_sided_bad_roommate,"Case 02 - Soft tradeoff, bad one-sided roommate request",20,4,20,"status in ['OPTIMAL', 'FEASIBLE']; successful_assignments=20; conflicts=0."
-case_03_capacity_shortage_18_beds,"Case 03 - Capacity shortage, 20 students but 18 beds",20,4,20,"status in ['OPTIMAL', 'FEASIBLE']; successful_assignments=18; conflicts=2."
-case_04_accessibility_shortage,Case 04 - Accessibility shortage,20,4,20,"status in ['OPTIMAL', 'FEASIBLE']; successful_assignments=19; conflicts=1."
-case_05_gender_conflict_female_building,Case 05 - Gender conflict in female Canada building,20,4,20,"status in ['OPTIMAL', 'FEASIBLE']; successful_assignments=17; conflicts=3."
-case_06_hard_religious_together_5_groups_4_apartments,Case 06 - Hard ReligiousTogether packing conflict,20,4,20,"status in ['OPTIMAL', 'FEASIBLE']; successful_assignments=17; conflicts=3."
-case_07_mutual_positive_roommate_vs_hard_religion,Case 07 - Mutual positive roommate request conflicts with hard religion,20,4,20,status in ['INFEASIBLE']; successful_assignments=0; conflicts=20.
-case_08_reserved_apartment_priority_only,Case 08 - Reserved apartment only priority students can use it,20,4,20,"status in ['OPTIMAL', 'FEASIBLE']; successful_assignments=18; conflicts=2."
-case_09_initial_run_without_accessibility_data,Case 09 - Initial allocation without accessibility data,20,4,20,"status in ['OPTIMAL', 'FEASIBLE']; successful_assignments=20; conflicts=0."
+﻿case_name,students,apartments,rooms,room_capacity,expected_assigned,expected_unassigned,description
+case_01_hard_gender_capacity_2,20,10,10,2,20,0,"Gender only, 10 male and 10 female students, rooms of capacity 2."
+case_02_hard_gender_capacity_1,20,20,20,1,20,0,"Gender only, 10 male and 10 female students, single rooms."
+case_03_hard_religion_capacity_2,20,10,10,2,20,0,"Religion only, all male, even religious groups, rooms of capacity 2."
+case_04_hard_religion_capacity_1,20,20,20,1,20,0,"Religion only, all male, single rooms."
+case_05_hard_religious_capacity_2,20,10,10,2,20,0,"Jewish religious status only: 10 religious and 10 non-religious, capacity 2."
+case_06_hard_religious_capacity_1,20,20,20,1,20,0,"Jewish religious status only, single rooms."
+case_07_hard_gender_religion_capacity_2,20,10,10,2,20,0,"Gender and religion together, even groups, capacity 2."
+case_08_hard_gender_religion_capacity_1,20,20,20,1,20,0,"Gender and religion together, single rooms."
+case_09_hard_gender_religion_religious_capacity_2,20,10,10,2,20,0,"Gender, religion and Jewish religious status together, capacity 2."
+case_10_hard_gender_religion_religious_capacity_1,20,20,20,1,20,0,"Gender, religion and Jewish religious status together, single rooms."

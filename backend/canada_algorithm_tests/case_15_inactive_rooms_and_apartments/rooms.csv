@@ -1,0 +1,12 @@
+﻿room_code,apartment_code,capacity,is_active,bed_label
+MR01,MA01,2,True,Bed
+MR02,MA02,2,True,Bed
+MR03,MA03,2,True,Bed
+MR04,MA04,2,True,Bed
+MR05,MA05,2,True,Bed
+MR06,MA06,2,True,Bed
+MR07,MA07,2,True,Bed
+MR08,MA08,2,True,Bed
+MR09,MA09,2,True,Bed
+MR10,MA10,2,True,Bed
+MR11,MA11,2,False,Bed

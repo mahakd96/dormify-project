@@ -1,0 +1,71 @@
+{
+  "description": "Five apartments, each with two 2-bed rooms. Two religious Jewish students and eighteen unrestricted students. ReligiousTogether must hold across the whole apartment and within every room. No particular student is required to be assigned.",
+  "constraints_config": {
+    "sameGender": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "priorityFirst": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "roommatePositiveOnly": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "ReligiousTogether": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "sameReligion": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "roommateMatch": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 8
+    },
+    "sectorMatching": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 7
+    },
+    "avoidYearMix_1_with_3_4": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    },
+    "avoidAtudaimWithHasmaha": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    }
+  },
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL"
+    ],
+    "require_optimal": true,
+    "successful_assignments": 18,
+    "conflicts": 2,
+    "maximum_relative_gap": 0.0
+  },
+  "allocation_expectations": {
+    "unassigned_count": 2
+  }
+}
