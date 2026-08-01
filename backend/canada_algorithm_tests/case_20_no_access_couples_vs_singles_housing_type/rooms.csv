@@ -1,9 +1,0 @@
-﻿room_code,apartment_code,capacity,is_active,bed_label
-N20-SF-R1,N20-SF,1,True,Bed
-N20-SF-R2,N20-SF,1,True,Bed
-N20-SM-R1,N20-SM,1,True,Bed
-N20-SM-R2,N20-SM,1,True,Bed
-N20-C1-R1,N20-C1,1,True,Bed
-N20-C1-R2,N20-C1,1,True,Bed
-N20-C2-R1,N20-C2,1,True,Bed
-N20-C2-R2,N20-C2,1,True,Bed

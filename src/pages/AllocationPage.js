@@ -691,17 +691,61 @@ function AllocationPage({ language = 'he' }) {
     return out;
   }, [constraints]);
 
-  const currentStatusKey = useMemo(() => {
-    if (!runStatus && !isRunning && !result) return 'not_started';
-    if (isRunning && isStopping) return 'cancellation_requested';
-    if (runStatus) return runStatus;
-    return 'not_started';
-  }, [runStatus, isRunning, isStopping, result]);
+    const canRun =
+    typeof canRunAllocation === 'function'
+      ? canRunAllocation()
+      : false;
 
-  const canRun      = typeof canRunAllocation === 'function' ? canRunAllocation() : false;
-  const hasStudents = (summary?.unassigned_students || 0) > 0;
-  const showStopBtn = isRunning && !isStopping && !!runId && canRun;
-  const showDelBtn  = runStatus === 'completed' && !isRunning && !!result && !!runId && canRun;
+  const currentAssignedStudents =
+    Number(summary?.assigned_students) || 0;
+
+  const currentUnassignedStudents =
+    Number(summary?.unassigned_students) || 0;
+
+  const hasCurrentAllocation =
+    currentAssignedStudents > 0;
+
+  const hasStudents =
+    currentUnassignedStudents > 0;
+
+  const currentStatusKey = useMemo(() => {
+    if (isRunning && isStopping) {
+      return 'cancellation_requested';
+    }
+
+    if (isRunning) {
+      return runStatus || 'running';
+    }
+
+    if (!hasCurrentAllocation) {
+      return 'not_started';
+    }
+
+    if (runStatus === 'completed') {
+      return 'completed';
+    }
+
+    return 'not_started';
+  }, [
+    runStatus,
+    isRunning,
+    isStopping,
+    hasCurrentAllocation,
+  ]);
+
+  const showStopBtn =
+    isRunning &&
+    !isStopping &&
+    Boolean(runId) &&
+    canRun;
+
+  const showDelBtn =
+    hasCurrentAllocation &&
+    runStatus === 'completed' &&
+    !isRunning &&
+    Boolean(result) &&
+    Boolean(runId) &&
+    canRun;
 
   // ── Elapsed Timer ────────────────────────────
   useEffect(() => {
@@ -807,39 +851,140 @@ function AllocationPage({ language = 'he' }) {
     }, 3000);
   }, [stopPolling, loadPage, showToast, t.stoppedStatus, t.unknownError]);
 
-  const recoverActiveRun = useCallback(async (regionId) => {
+  const recoverActiveRun = useCallback(
+  async (regionId, currentSummary = null) => {
     try {
-      const data = await allocationAPI.getActiveRun(regionId || undefined);
+      const data =
+        await allocationAPI.getActiveRun(
+          regionId || undefined
+        );
+
       const run = data?.run;
-      if (!run || !mountedRef.current) return;
 
-      setRunId(run.id);
-      setRunStatus(run.status);
+      if (!run || !mountedRef.current) {
+        return;
+      }
 
-      if (['queued', 'running', 'cancellation_requested'].includes(run.status)) {
+      const assignedNow =
+        Number(
+          currentSummary?.assigned_students
+        ) || 0;
+
+      const hasAssignmentsNow =
+        assignedNow > 0;
+
+      const activeStatuses = [
+        'queued',
+        'running',
+        'cancellation_requested',
+      ];
+
+      /*
+       * הרצה שרצה כרגע נשחזר תמיד,
+       * גם אם עדיין לא נוצרו שיבוצים.
+       */
+      if (activeStatuses.includes(run.status)) {
+        setRunId(run.id);
+        setRunStatus(run.status);
         setIsRunning(true);
-        if (run.status === 'cancellation_requested') setIsStopping(true);
+
+        if (
+          run.status ===
+          'cancellation_requested'
+        ) {
+          setIsStopping(true);
+        }
+
         startPolling(run.id);
-      } else if (run.status === 'completed') {
+        return;
+      }
+
+      /*
+       * אם ההרצה האחרונה הסתיימה,
+       * אבל אין כרגע שיבוצים במסד הנתונים,
+       * מדובר בהרצה היסטורית שנמחקה.
+       */
+      if (
+        run.status === 'completed' &&
+        !hasAssignmentsNow
+      ) {
+        setResult(null);
+        setRunId(null);
+        setRunStatus(null);
+        setIsRunning(false);
+        setIsStopping(false);
+        return;
+      }
+
+      /*
+       * משחזרים תוצאה שהושלמה רק כאשר
+       * עדיין קיימים שיבוצים בפועל.
+       */
+      if (
+        run.status === 'completed' &&
+        hasAssignmentsNow
+      ) {
         try {
-          const detail = await allocationAPI.getRunStatus(run.id);
-          if (mountedRef.current && detail?.run?.status === 'completed') {
+          const detail =
+            await allocationAPI.getRunStatus(
+              run.id
+            );
+
+          if (
+            mountedRef.current &&
+            detail?.run?.status === 'completed'
+          ) {
+            setRunId(run.id);
+            setRunStatus('completed');
+
             setResult({
-              successful_assignments: detail.successful_assignments ?? detail.run?.successful_assignments ?? 0,
-              roommate_matches:       detail.roommate_matches ?? detail.run?.roommate_matches ?? 0,
-              conflicts:              detail.conflicts ?? detail.run?.conflicts ?? 0,
-              assignments:            detail.assignments ?? [],
-              run:                    detail.run,
+              successful_assignments:
+                assignedNow,
+
+              roommate_matches:
+                detail.roommate_matches ??
+                detail.run
+                  ?.roommate_matches ??
+                0,
+
+              conflicts:
+                Number(
+                  currentSummary
+                    ?.unassigned_students
+                ) || 0,
+
+              assignments:
+                detail.assignments ?? [],
+
+              run: detail.run,
             });
           }
-        } catch (e) {
-          console.warn('Failed to load completed run detail:', e);
+        } catch (error) {
+          console.warn(
+            'Failed to load completed run detail:',
+            error
+          );
+
+          setResult(null);
+          setRunId(null);
+          setRunStatus(null);
         }
+
+        return;
       }
-    } catch (err) {
-      console.warn('Failed to recover active run:', err);
+
+      setResult(null);
+      setRunId(null);
+      setRunStatus(null);
+    } catch (error) {
+      console.warn(
+        'Failed to recover active run:',
+        error
+      );
     }
-  }, [startPolling]);
+  },
+  [startPolling]
+);
 
   const loadPageRef = useRef(loadPage);
   const recoverRef  = useRef(recoverActiveRun);
@@ -854,16 +999,34 @@ function AllocationPage({ language = 'he' }) {
     };
   }, [stopPolling]);
 
-  useEffect(() => {
+    useEffect(() => {
     let cancelled = false;
+
     const init = async () => {
-      const loadedSummary = await loadPageRef.current();
-      if (cancelled || !mountedRef.current) return;
-      const regionId = loadedSummary?.region?.id || null;
-      await recoverRef.current(regionId);
+      const loadedSummary =
+        await loadPageRef.current();
+
+      if (
+        cancelled ||
+        !mountedRef.current
+      ) {
+        return;
+      }
+
+      const regionId =
+        loadedSummary?.region?.id || null;
+
+      await recoverRef.current(
+        regionId,
+        loadedSummary
+      );
     };
+
     init().catch(console.warn);
-    return () => { cancelled = true; };
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // ── Action Handlers ──────────────────────────
@@ -947,11 +1110,22 @@ function AllocationPage({ language = 'he' }) {
         setIsDeleting(true);
         try {
           await allocationAPI.deleteResults(runId);
-          setResult(null);
-          setRunId(null);
-          setRunStatus(null);
-          showToast(t.deleteSuccess, 'success');
-          loadPage().catch(() => {});
+
+stopPolling();
+
+setResult(null);
+setRunId(null);
+setRunStatus(null);
+setIsRunning(false);
+setIsStopping(false);
+setProgress(0);
+
+await loadPage();
+
+showToast(
+  t.deleteSuccess,
+  'success'
+);
         } catch (err) {
           const msg = getErrorMessage(err);
           const isApproved = err?.response?.status === 409
@@ -992,12 +1166,32 @@ function AllocationPage({ language = 'he' }) {
   }
 
   // ── Last run date ────────────────────────────
-  const lastRunDate = result?.run?.completed_at || result?.run?.started_at
-    ? new Date(result.run.completed_at || result.run.started_at).toLocaleDateString(
-        language === 'he' ? 'he-IL' : 'en-US',
-        { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
-      )
-    : null;
+    const lastRunTimestamp =
+    hasCurrentAllocation
+      ? (
+          result?.run?.completed_at ||
+          result?.run?.started_at ||
+          null
+        )
+      : null;
+
+  const lastRunDate =
+    lastRunTimestamp
+      ? new Date(
+          lastRunTimestamp
+        ).toLocaleString(
+          language === 'he'
+            ? 'he-IL'
+            : 'en-US',
+          {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          }
+        )
+      : null;
 
   // ── Inventory types ──────────────────────────
   const inventoryTypes = [
@@ -1043,12 +1237,12 @@ function AllocationPage({ language = 'he' }) {
           </div>
 
           <div className="ap-header-stats">
-            {result ? (
+            {result && hasCurrentAllocation ? (
               <>
                 <div className="ap-stat-item">
                   <div className="ap-stat-icon ap-stat-green"><Check size={16} /></div>
                   <div>
-                    <div className="ap-stat-val ap-stat-green-text">{result.successful_assignments || 0}</div>
+                    <div className="ap-stat-val ap-stat-green-text">{currentAssignedStudents}</div>
                     <div className="ap-stat-lbl">{t.successfulAssign}</div>
                   </div>
                 </div>
@@ -1154,7 +1348,11 @@ function AllocationPage({ language = 'he' }) {
             <button
               className="ap-btn ap-btn-ghost"
               onClick={handleViewResults}
-              disabled={!result || runStatus !== 'completed'}
+              disabled={
+  !hasCurrentAllocation ||
+  !result ||
+  runStatus !== 'completed'
+}
             >
               <ExternalLink size={15} />
               {t.viewResults}

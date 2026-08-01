@@ -1,0 +1,93 @@
+{
+  "description": "Gender only, 10 male and 10 female students, rooms of capacity 2.",
+  "constraints_config": {
+    "sameGender": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "priorityFirst": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "roommatePositiveOnly": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "ReligiousTogether": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "sameReligion": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "roommateMatch": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 8
+    },
+    "sectorMatching": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 7
+    },
+    "avoidYearMix_1_with_3_4": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    },
+    "avoidAtudaimWithHasmaha": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    }
+  },
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL"
+    ],
+    "require_optimal": true,
+    "successful_assignments": 20,
+    "conflicts": 0,
+    "maximum_relative_gap": 0.0
+  },
+  "allocation_expectations": {
+    "must_be_assigned": [
+      "910000001",
+      "910000002",
+      "910000003",
+      "910000004",
+      "910000005",
+      "910000006",
+      "910000007",
+      "910000008",
+      "910000009",
+      "910000010",
+      "910000011",
+      "910000012",
+      "910000013",
+      "910000014",
+      "910000015",
+      "910000016",
+      "910000017",
+      "910000018",
+      "910000019",
+      "910000020"
+    ],
+    "unassigned_count": 0
+  }
+}
