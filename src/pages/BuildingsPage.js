@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   Bed,
   Building2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   DoorOpen,
@@ -24,19 +25,9 @@ import {
 
 import { api, dormInventoryAPI, whatIfAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import BuildingSetupWizard from '../components/BuildingSetupWizard';
 
-/**
- * BuildingsPage.jsx — "ניהול מבנים ומלאי מעונות" / "Buildings & Dormitory Inventory"
- *
- * Manages ONLY the physical dormitory hierarchy and its allocation-relevant
- * configuration:
- *   Region -> Dorm type -> Building -> Apartment -> Room -> Bed
- *
- * This page contains NO student data and NO student-management behavior:
- * no student fetch, no assign/move/swap/unassign, no drag-and-drop, no
- * BedAssignment mutation, no allocation-results recommendation banners.
- * That responsibility belongs entirely to StudentsPage / AllocationResultsPage.
- */
+
 
 // ---------------------------------------------------------------------------
 // Label maps
@@ -305,11 +296,9 @@ export default function BuildingsPage({ language = 'he' }) {
         noBeds: 'אין מיטות בחדר זה',
         bedRecordsMismatch: 'קיימת אי־התאמה בין קיבולת החדר לרשומות המיטה במסד הנתונים',
         bedNoActionsSupported: 'אין תמיכה בהוספה, מחיקה או השבתת מיטה בודדת בגרסה הנוכחית — ניתן לערוך רק את תווית המיטה.',
-        inspectorTitle: 'פרטי הפריט הנבחר',
-        inspectorEmpty: 'בחרו בניין, דירה, חדר או מיטה כדי לראות פרטים',
-        sectionDetails: 'פרטים',
-        sectionConfig: 'תצורה וכללים',
-        sectionCapacity: 'קיבולת ומלאי',
+        viewDetails: 'הצג פרטים',
+        hideDetails: 'הסתר פרטים',
+        viewBeds: 'הצג מיטות',
         edit: 'עריכה',
         activate: 'הפעל',
         deactivate: 'השבת',
@@ -338,7 +327,6 @@ export default function BuildingsPage({ language = 'he' }) {
         capacityLabel: 'קיבולת',
         occupancyLabel: 'תפוסה',
         availableBedsLabel: 'מיטות פנויות',
-        configWarningLabel: 'אזהרת תצורה',
         bedLabelField: 'תווית מיטה',
         parentRoomLabel: 'חדר',
         availabilityLabel: 'זמינות',
@@ -456,11 +444,9 @@ export default function BuildingsPage({ language = 'he' }) {
         noBeds: 'No beds in this room',
         bedRecordsMismatch: 'There is a mismatch between room capacity and bed records in the database',
         bedNoActionsSupported: 'Adding, deleting, or deactivating an individual bed is not supported in the current version — only the bed label can be edited.',
-        inspectorTitle: 'Selected item details',
-        inspectorEmpty: 'Select a building, apartment, room, or bed to see details',
-        sectionDetails: 'Details',
-        sectionConfig: 'Configuration and rules',
-        sectionCapacity: 'Capacity and inventory',
+        viewDetails: 'View details',
+        hideDetails: 'Hide details',
+        viewBeds: 'View beds',
         edit: 'Edit',
         activate: 'Activate',
         deactivate: 'Deactivate',
@@ -489,7 +475,6 @@ export default function BuildingsPage({ language = 'he' }) {
         capacityLabel: 'Capacity',
         occupancyLabel: 'Occupancy',
         availableBedsLabel: 'Available beds',
-        configWarningLabel: 'Configuration warning',
         bedLabelField: 'Bed label',
         parentRoomLabel: 'Room',
         availabilityLabel: 'Availability',
@@ -586,6 +571,10 @@ export default function BuildingsPage({ language = 'he' }) {
   const [availabilityDialog, setAvailabilityDialog] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState(null);
 
+
+  const [buildingDetailsOpen, setBuildingDetailsOpen] = useState(false);
+  const [wizardOpen, setWizardOpen] = useState(false);
+
   // -------------------------------------------------------------------
   // Derived data (section 16)
   // -------------------------------------------------------------------
@@ -638,9 +627,6 @@ export default function BuildingsPage({ language = 'he' }) {
 
   const selectedRoom = useMemo(() => buildingRooms.find((r) => idOf(r.id) === idOf(selectedRoomId)) || null, [buildingRooms, selectedRoomId]);
   const selectedBed = useMemo(() => roomBeds.find((b) => idOf(b.id) === idOf(selectedBedId)) || null, [roomBeds, selectedBedId]);
-
-  const selectedEntityType = selectedBed ? 'bed' : selectedRoom ? 'room' : selectedApartment ? 'apartment' : selectedBuilding ? 'building' : null;
-  const selectedEntity = selectedBed || selectedRoom || selectedApartment || selectedBuilding || null;
 
   // Summary strip is scoped to region + selected dorm type, independent of
   // the active/inactive list filter (active-only for the 5 capacity
@@ -705,6 +691,7 @@ export default function BuildingsPage({ language = 'he' }) {
   };
 
   const selectBuilding = async (buildingId) => {
+    setBuildingDetailsOpen(false);
     if (idOf(selectedBuildingId) === idOf(buildingId)) {
       setSelectedBuildingId('');
       resetSelectionBelowBuilding();
@@ -824,20 +811,20 @@ export default function BuildingsPage({ language = 'he' }) {
     }
   };
 
+
+  const handleWizardCompleted = async (building) => {
+    setWizardOpen(false);
+    try {
+      await loadBuildings(selectedRegionId);
+    } catch (err) {
+      setPageError(err?.message || t.loadError);
+    }
+    await selectBuilding(building.id);
+  };
+
   // -------------------------------------------------------------------
   // Editor (create/edit drawer)
   // -------------------------------------------------------------------
-  const openCreateBuilding = () =>
-    setEditor({
-      type: 'building',
-      mode: 'create',
-      id: null,
-      parentId: null,
-      data: { number: '', dorm_type: selectedDormTypeId !== 'all' ? selectedDormTypeId : '', gender_restriction: '' },
-      saving: false,
-      error: '',
-    });
-
   const openEditBuilding = (building) =>
     setEditor({
       type: 'building',
@@ -982,10 +969,7 @@ export default function BuildingsPage({ language = 'he' }) {
     }
   };
 
-  // -------------------------------------------------------------------
-  // Availability workflow (activate/deactivate) — reuses whatIfAPI, never
-  // patches is_active directly.
-  // -------------------------------------------------------------------
+
   const entityLabel = (targetType, target) => {
     if (targetType === 'building') return `${t.buildingNumberLabel} ${target.number}`;
     if (targetType === 'apartment') return `${t.apartmentNumberLabel} ${target.number}`;
@@ -1079,12 +1063,7 @@ export default function BuildingsPage({ language = 'he' }) {
 
   const dormTypeLabelText = (dt) => (dt ? `${dt.name}${dt.code ? ` (${dt.code})` : ''}` : '');
 
-  // -------------------------------------------------------------------
-  // Editor modal context — resolves the full hierarchy (building/apartment/
-  // room) around whatever the editor currently targets, so the modal header
-  // and read-only fields work whether it was opened from the inspector or
-  // from a nested table row rather than only from the current selection.
-  // -------------------------------------------------------------------
+
   const editorBuildingCtx =
     editor?.type === 'building' ? buildings.find((b) => idOf(b.id) === idOf(editor.id)) || selectedBuilding : null;
 
@@ -1174,7 +1153,7 @@ export default function BuildingsPage({ language = 'he' }) {
           )}
           <IconButton icon={RefreshCw} onClick={handleRefresh} title={t.refresh} />
           {canManageInventory && (
-            <button type="button" className="inv-primaryBtn" onClick={openCreateBuilding} disabled={!selectedRegionId}>
+            <button type="button" className="inv-primaryBtn" onClick={() => setWizardOpen(true)} disabled={!selectedRegionId}>
               <Plus size={15} /> {t.addBuilding}
             </button>
           )}
@@ -1294,7 +1273,7 @@ export default function BuildingsPage({ language = 'he' }) {
             count={filteredBuildings.length}
             action={
               canManageInventory && (
-                <IconButton icon={Plus} onClick={openCreateBuilding} title={t.addBuilding} disabled={!selectedRegionId} />
+                <IconButton icon={Plus} onClick={() => setWizardOpen(true)} title={t.addBuilding} disabled={!selectedRegionId} />
               )
             }
           />
@@ -1333,7 +1312,7 @@ export default function BuildingsPage({ language = 'he' }) {
           </div>
         </div>
 
-        {/* Structure workspace */}
+
         <div className="inv-panel inv-structurePanel">
           {!selectedBuilding ? (
             <EmptyPanel icon={Building2} title={t.selectBuildingTitle} hint={t.selectBuildingHint} />
@@ -1343,6 +1322,60 @@ export default function BuildingsPage({ language = 'he' }) {
             </div>
           ) : (
             <>
+              <div className="inv-summaryBar">
+                <div className="inv-summaryBarMain">
+                  <Building2 size={17} />
+                  <div>
+                    <div className="inv-summaryBarTitle">
+                      {t.buildingNumberLabel} {selectedBuilding.number}
+                    </div>
+                    <div className="inv-summaryBarMeta">{selectedBuilding.dorm_type_name}</div>
+                  </div>
+                  <StatusBadge active={selectedBuilding.is_active} activeText={t.statusActive} inactiveText={t.statusInactive} />
+                </div>
+                <div className="inv-summaryBarActions">
+                  <button type="button" className="inv-linkBtn" onClick={() => setBuildingDetailsOpen((o) => !o)}>
+                    {buildingDetailsOpen ? t.hideDetails : t.viewDetails}
+                    <ChevronDown size={13} className={buildingDetailsOpen ? 'inv-chevron is-open' : 'inv-chevron'} />
+                  </button>
+                  {canManageInventory && (
+                    <>
+                      <IconButton icon={Pencil} onClick={() => openEditBuilding(selectedBuilding)} title={t.edit} />
+                      {selectedBuilding.is_active ? (
+                        <IconButton
+                          icon={PowerOff}
+                          tone="danger"
+                          onClick={() => openAvailabilityDialog('building', selectedBuilding, 'inactivate')}
+                          title={t.deactivate}
+                        />
+                      ) : (
+                        <IconButton
+                          icon={Power}
+                          tone="success"
+                          onClick={() => openAvailabilityDialog('building', selectedBuilding, 'reactivate')}
+                          title={t.activate}
+                        />
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {buildingDetailsOpen && (
+                <div className="inv-detailsStrip">
+                  <DetailRow label={t.regionLabel} value={selectedBuilding.region_name} />
+                  <DetailRow
+                    label={t.genderRestrictionLabel}
+                    value={genderRestrictionLabels[selectedBuilding.gender_restriction] || t.noRestriction}
+                  />
+                  <DetailRow label={t.apartmentCountLabel} value={selectedBuilding.apartment_count} />
+                  <DetailRow label={t.roomCountLabel} value={selectedBuilding.room_count} />
+                  <DetailRow label={t.bedCountLabel} value={selectedBuilding.bed_count} />
+                  <DetailRow label={t.occupiedBedsLabel} value={selectedBuilding.occupied_beds} />
+                  <DetailRow label={t.freeBedsLabel} value={selectedBuilding.free_beds} />
+                </div>
+              )}
+
               <SectionHeader
                 title={t.apartmentsTable}
                 count={apartmentsForSelectedBuilding.length}
@@ -1354,361 +1387,242 @@ export default function BuildingsPage({ language = 'he' }) {
                   )
                 }
               />
-              <div className="inv-tableWrap">
-                {apartmentsForSelectedBuilding.length === 0 ? (
-                  <EmptyPanel title={t.noApartments} />
-                ) : (
-                  <table className="inv-table">
-                    <thead>
-                      <tr>
-                        <th>{t.colApartment}</th>
-                        <th>{t.colCategory}</th>
-                        <th>{t.colHousingType}</th>
-                        <th>{t.colRooms}</th>
-                        <th>{t.colOccupancy}</th>
-                        <th>{t.colStatus}</th>
-                        <th>{t.colActions}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {apartmentsForSelectedBuilding.map((apt) => (
-                        <tr
-                          key={apt.id}
-                          className={`${idOf(selectedApartmentId) === idOf(apt.id) ? 'is-selected' : ''} ${!apt.is_active ? 'is-inactive' : ''}`}
+
+              {apartmentsForSelectedBuilding.length === 0 ? (
+                <EmptyPanel title={t.noApartments} />
+              ) : (
+                <div className="inv-accordionList">
+                  {apartmentsForSelectedBuilding.map((apt) => {
+                    const isOpen = idOf(selectedApartmentId) === idOf(apt.id);
+                    return (
+                      <div key={apt.id} className={`inv-accordionItem ${isOpen ? 'is-open' : ''} ${!apt.is_active ? 'is-inactive' : ''}`}>
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          className="inv-accordionHeader"
                           onClick={() => selectApartment(apt.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              selectApartment(apt.id);
+                            }
+                          }}
                         >
-                          <td>{apt.number}</td>
-                          <td>{categoryLabels[apt.category] || apt.category}</td>
-                          <td>{apartmentTypeLabels[apt.apartment_type] || apt.apartment_type}</td>
-                          <td>{apt.actual_room_count}</td>
-                          <td>
-                            <OccupancyBadge occupied={apt.occupied_beds} total={apt.bed_count} />
-                          </td>
-                          <td>
-                            <StatusBadge active={apt.is_active} activeText={t.statusActive} inactiveText={t.statusInactive} />
-                          </td>
-                          <td onClick={(e) => e.stopPropagation()}>
-                            {canManageInventory && <IconButton icon={Pencil} onClick={() => openEditApartment(apt)} title={t.edit} />}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
+                          <ChevronDown size={14} className={isOpen ? 'inv-chevron is-open' : 'inv-chevron'} />
+                          <Home size={15} />
+                          <span className="inv-accordionTitle">
+                            {t.apartmentNumberLabel} {apt.number}
+                          </span>
+                          <span className="inv-accordionTag">{categoryLabels[apt.category] || apt.category}</span>
+                          <span className="inv-accordionTag">{apartmentTypeLabels[apt.apartment_type] || apt.apartment_type}</span>
+                          <span className="inv-accordionMeta">
+                            {apt.actual_room_count} {t.roomsCount}
+                          </span>
+                          <OccupancyBadge occupied={apt.occupied_beds} total={apt.bed_count} />
+                          <StatusBadge active={apt.is_active} activeText={t.statusActive} inactiveText={t.statusInactive} />
+                          {canManageInventory && (
+                            <span className="inv-accordionRowAction" onClick={(e) => e.stopPropagation()}>
+                              <IconButton icon={Pencil} onClick={() => openEditApartment(apt)} title={t.edit} />
+                            </span>
+                          )}
+                        </div>
 
-              {selectedApartment && (
-                <>
-                  <SectionHeader
-                    title={t.roomsTable}
-                    count={roomsForSelectedApartment.length}
-                    action={
-                      canManageInventory && (
-                        <button type="button" className="inv-secondaryBtn" onClick={() => openCreateRoom(selectedApartmentId)}>
-                          <Plus size={13} /> {t.addRoom}
-                        </button>
-                      )
-                    }
-                  />
-                  <div className="inv-tableWrap">
-                    {roomsForSelectedApartment.length === 0 ? (
-                      <EmptyPanel title={t.noRooms} />
-                    ) : (
-                      <table className="inv-table">
-                        <thead>
-                          <tr>
-                            <th>{t.colRoom}</th>
-                            <th>{t.colCapacity}</th>
-                            <th>{t.colOccupancy}</th>
-                            <th>{t.colBeds}</th>
-                            <th>{t.colStatus}</th>
-                            <th>{t.colActions}</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {roomsForSelectedApartment.map((room) => (
-                            <tr
-                              key={room.id}
-                              className={`${idOf(selectedRoomId) === idOf(room.id) ? 'is-selected' : ''} ${!room.is_active ? 'is-inactive' : ''}`}
-                              onClick={() => selectRoom(room.id)}
-                            >
-                              <td>
-                                {room.name}
-                                {room.has_missing_bed_records && (
-                                  <span className="inv-warnIcon" title={t.bedRecordsMismatch}>
-                                    <AlertTriangle size={12} />
-                                  </span>
-                                )}
-                              </td>
-                              <td>{room.capacity}</td>
-                              <td>
-                                <OccupancyBadge occupied={room.current_occupancy} total={room.capacity} />
-                              </td>
-                              <td>{room.bed_count}</td>
-                              <td>
-                                <StatusBadge active={room.is_active} activeText={t.statusActive} inactiveText={t.statusInactive} />
-                              </td>
-                              <td onClick={(e) => e.stopPropagation()}>
-                                {canManageInventory && <IconButton icon={Pencil} onClick={() => openEditRoom(room)} title={t.edit} />}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
-                  </div>
+                        {isOpen && (
+                          <div className="inv-accordionBody">
+                            <div className="inv-detailsStrip">
+                              <DetailRow label={t.apartmentCapacityLabel} value={apt.apartment_capacity ?? '—'} />
+                              <DetailRow label={t.totalBedsLabel} value={apt.bed_count} />
+                              <DetailRow label={t.freeBedsLabel} value={apt.free_beds} />
+                              {!apt.is_active && <DetailRow label={t.inactiveReasonLabel} value={apt.inactive_reason_display || t.none} />}
+                              {canManageInventory && (
+                                <div className="inv-detailsStripActions">
+                                  {apt.is_active ? (
+                                    <button
+                                      type="button"
+                                      className="inv-dangerBtn"
+                                      onClick={() => openAvailabilityDialog('apartment', apt, 'inactivate')}
+                                    >
+                                      <PowerOff size={13} /> {t.deactivate}
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      className="inv-successBtn"
+                                      onClick={() => openAvailabilityDialog('apartment', apt, 'reactivate')}
+                                    >
+                                      <Power size={13} /> {t.activate}
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
 
-                  {selectedRoom && (
-                    <>
-                      <SectionHeader
-                        title={t.bedsTable}
-                        count={roomBeds.length}
-                        action={
-                          canCreateBed && (
-                            <button type="button" className="inv-secondaryBtn">
-                              <Plus size={13} /> {t.addBed}
-                            </button>
-                          )
-                        }
-                      />
-                      <div className="inv-tableWrap">
-                        {loadingBeds ? (
-                          <div className="inv-centerInline">
-                            <Spinner size={18} />
+                            <SectionHeader
+                              title={t.roomsTable}
+                              count={roomsForSelectedApartment.length}
+                              action={
+                                canManageInventory && (
+                                  <button type="button" className="inv-secondaryBtn" onClick={() => openCreateRoom(selectedApartmentId)}>
+                                    <Plus size={13} /> {t.addRoom}
+                                  </button>
+                                )
+                              }
+                            />
+
+                            {roomsForSelectedApartment.length === 0 ? (
+                              <EmptyPanel title={t.noRooms} />
+                            ) : (
+                              <div className="inv-accordionList inv-accordionList-nested">
+                                {roomsForSelectedApartment.map((room) => {
+                                  const roomOpen = idOf(selectedRoomId) === idOf(room.id);
+                                  return (
+                                    <div
+                                      key={room.id}
+                                      className={`inv-accordionItem ${roomOpen ? 'is-open' : ''} ${!room.is_active ? 'is-inactive' : ''}`}
+                                    >
+                                      <div
+                                        role="button"
+                                        tabIndex={0}
+                                        className="inv-accordionHeader"
+                                        onClick={() => selectRoom(room.id)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter' || e.key === ' ') {
+                                            e.preventDefault();
+                                            selectRoom(room.id);
+                                          }
+                                        }}
+                                      >
+                                        <ChevronDown size={14} className={roomOpen ? 'inv-chevron is-open' : 'inv-chevron'} />
+                                        <DoorOpen size={15} />
+                                        <span className="inv-accordionTitle">
+                                          {t.colRoom} {room.name}
+                                        </span>
+                                        {room.has_missing_bed_records && (
+                                          <span className="inv-warnIcon" title={t.bedRecordsMismatch}>
+                                            <AlertTriangle size={12} />
+                                          </span>
+                                        )}
+                                        <span className="inv-accordionMeta">
+                                          {t.capacityLabel}: {room.capacity}
+                                        </span>
+                                        <OccupancyBadge occupied={room.current_occupancy} total={room.capacity} />
+                                        <StatusBadge active={room.is_active} activeText={t.statusActive} inactiveText={t.statusInactive} />
+                                        {canManageInventory && (
+                                          <span className="inv-accordionRowAction" onClick={(e) => e.stopPropagation()}>
+                                            <IconButton icon={Pencil} onClick={() => openEditRoom(room)} title={t.edit} />
+                                          </span>
+                                        )}
+                                      </div>
+
+                                      {roomOpen && (
+                                        <div className="inv-accordionBody">
+                                          <div className="inv-detailsStrip">
+                                            <DetailRow label={t.availableBedsLabel} value={room.available_beds} />
+                                            <DetailRow label={t.bedCountLabel} value={room.bed_count} />
+                                            {canManageInventory && (
+                                              <div className="inv-detailsStripActions">
+                                                {room.is_active ? (
+                                                  <button
+                                                    type="button"
+                                                    className="inv-dangerBtn"
+                                                    onClick={() => openAvailabilityDialog('room', room, 'inactivate')}
+                                                  >
+                                                    <PowerOff size={13} /> {t.deactivate}
+                                                  </button>
+                                                ) : (
+                                                  <button
+                                                    type="button"
+                                                    className="inv-successBtn"
+                                                    onClick={() => openAvailabilityDialog('room', room, 'reactivate')}
+                                                  >
+                                                    <Power size={13} /> {t.activate}
+                                                  </button>
+                                                )}
+                                              </div>
+                                            )}
+                                          </div>
+                                          {room.has_missing_bed_records && (
+                                            <p className="inv-inspectorWarning">
+                                              <AlertTriangle size={13} /> {t.bedRecordsMismatch}
+                                            </p>
+                                          )}
+
+                                          <SectionHeader
+                                            title={t.bedsTable}
+                                            count={roomBeds.length}
+                                            action={
+                                              canCreateBed && (
+                                                <button type="button" className="inv-secondaryBtn">
+                                                  <Plus size={13} /> {t.addBed}
+                                                </button>
+                                              )
+                                            }
+                                          />
+                                          <div className="inv-tableWrap">
+                                            {loadingBeds ? (
+                                              <div className="inv-centerInline">
+                                                <Spinner size={18} />
+                                              </div>
+                                            ) : roomBeds.length === 0 ? (
+                                              <EmptyPanel title={t.noBeds} />
+                                            ) : (
+                                              <table className="inv-table">
+                                                <thead>
+                                                  <tr>
+                                                    <th>{t.colBed}</th>
+                                                    <th>{t.colAvailability}</th>
+                                                    <th>{t.colActions}</th>
+                                                  </tr>
+                                                </thead>
+                                                <tbody>
+                                                  {roomBeds.map((bed) => (
+                                                    <tr
+                                                      key={bed.id}
+                                                      className={idOf(selectedBedId) === idOf(bed.id) ? 'is-selected' : ''}
+                                                      onClick={() => selectBed(bed.id)}
+                                                    >
+                                                      <td>{bed.label}</td>
+                                                      <td>
+                                                        <span className={`inv-availabilityTag ${bed.is_occupied ? 'is-occupied' : 'is-available'}`}>
+                                                          {bed.is_occupied ? t.occupied : t.available}
+                                                        </span>
+                                                      </td>
+                                                      <td onClick={(e) => e.stopPropagation()}>
+                                                        {canManageInventory && (
+                                                          <IconButton icon={Pencil} onClick={() => openEditBed(bed)} title={t.edit} />
+                                                        )}
+                                                        {canDeleteBed && (
+                                                          <IconButton
+                                                            icon={Trash2}
+                                                            tone="danger"
+                                                            onClick={() => openDeleteBedDialog(bed)}
+                                                            title={t.deleteAction}
+                                                            disabled={bed.is_occupied}
+                                                          />
+                                                        )}
+                                                      </td>
+                                                    </tr>
+                                                  ))}
+                                                </tbody>
+                                              </table>
+                                            )}
+                                            <p className="inv-bedCapabilityNote">{t.bedNoActionsSupported}</p>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
-                        ) : roomBeds.length === 0 ? (
-                          <EmptyPanel title={t.noBeds} />
-                        ) : (
-                          <table className="inv-table">
-                            <thead>
-                              <tr>
-                                <th>{t.colBed}</th>
-                                <th>{t.colAvailability}</th>
-                                <th>{t.colActions}</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {roomBeds.map((bed) => (
-                                <tr
-                                  key={bed.id}
-                                  className={idOf(selectedBedId) === idOf(bed.id) ? 'is-selected' : ''}
-                                  onClick={() => selectBed(bed.id)}
-                                >
-                                  <td>{bed.label}</td>
-                                  <td>
-                                    <span className={`inv-availabilityTag ${bed.is_occupied ? 'is-occupied' : 'is-available'}`}>
-                                      {bed.is_occupied ? t.occupied : t.available}
-                                    </span>
-                                  </td>
-                                  <td onClick={(e) => e.stopPropagation()}>
-                                    {canManageInventory && <IconButton icon={Pencil} onClick={() => openEditBed(bed)} title={t.edit} />}
-                                    {canDeleteBed && (
-                                      <IconButton
-                                        icon={Trash2}
-                                        tone="danger"
-                                        onClick={() => openDeleteBedDialog(bed)}
-                                        title={t.deleteAction}
-                                        disabled={bed.is_occupied}
-                                      />
-                                    )}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
                         )}
-                        <p className="inv-bedCapabilityNote">{t.bedNoActionsSupported}</p>
                       </div>
-                    </>
-                  )}
-                </>
+                    );
+                  })}
+                </div>
               )}
             </>
-          )}
-        </div>
-
-        {/* Inspector */}
-        <div className="inv-panel inv-inspectorPanel">
-          <SectionHeader title={t.inspectorTitle} />
-          {!selectedEntity ? (
-            <EmptyPanel title={t.inspectorEmpty} />
-          ) : (
-            <div className="inv-inspectorBody">
-              <div className="inv-inspectorHeader">
-                {selectedEntityType === 'building' && <Building2 size={18} />}
-                {selectedEntityType === 'apartment' && <Home size={18} />}
-                {selectedEntityType === 'room' && <DoorOpen size={18} />}
-                {selectedEntityType === 'bed' && <Bed size={18} />}
-                <div className="inv-inspectorHeaderText">
-                  <div className="inv-inspectorType">
-                    {selectedEntityType === 'building' && t.buildingNumberLabel}
-                    {selectedEntityType === 'apartment' && t.apartmentNumberLabel}
-                    {selectedEntityType === 'room' && t.roomNameLabel}
-                    {selectedEntityType === 'bed' && t.bedLabelField}
-                  </div>
-                  <div className="inv-inspectorLabel">
-                    {selectedEntityType === 'building' && selectedBuilding.number}
-                    {selectedEntityType === 'apartment' && selectedApartment.number}
-                    {selectedEntityType === 'room' && selectedRoom.name}
-                    {selectedEntityType === 'bed' && selectedBed.label}
-                  </div>
-                </div>
-              </div>
-
-              {canManageInventory && (
-                <div className="inv-inspectorActions">
-                  {selectedEntityType === 'building' && (
-                    <>
-                      <button type="button" className="inv-secondaryBtn" onClick={() => openEditBuilding(selectedBuilding)}>
-                        <Pencil size={13} /> {t.edit}
-                      </button>
-                      {selectedBuilding.is_active ? (
-                        <button type="button" className="inv-dangerBtn" onClick={() => openAvailabilityDialog('building', selectedBuilding, 'inactivate')}>
-                          <PowerOff size={13} /> {t.deactivate}
-                        </button>
-                      ) : (
-                        <button type="button" className="inv-successBtn" onClick={() => openAvailabilityDialog('building', selectedBuilding, 'reactivate')}>
-                          <Power size={13} /> {t.activate}
-                        </button>
-                      )}
-                    </>
-                  )}
-                  {selectedEntityType === 'apartment' && (
-                    <>
-                      <button type="button" className="inv-secondaryBtn" onClick={() => openEditApartment(selectedApartment)}>
-                        <Pencil size={13} /> {t.edit}
-                      </button>
-                      {selectedApartment.is_active ? (
-                        <button type="button" className="inv-dangerBtn" onClick={() => openAvailabilityDialog('apartment', selectedApartment, 'inactivate')}>
-                          <PowerOff size={13} /> {t.deactivate}
-                        </button>
-                      ) : (
-                        <button type="button" className="inv-successBtn" onClick={() => openAvailabilityDialog('apartment', selectedApartment, 'reactivate')}>
-                          <Power size={13} /> {t.activate}
-                        </button>
-                      )}
-                    </>
-                  )}
-                  {selectedEntityType === 'room' && (
-                    <>
-                      <button type="button" className="inv-secondaryBtn" onClick={() => openEditRoom(selectedRoom)}>
-                        <Pencil size={13} /> {t.edit}
-                      </button>
-                      {selectedRoom.is_active ? (
-                        <button type="button" className="inv-dangerBtn" onClick={() => openAvailabilityDialog('room', selectedRoom, 'inactivate')}>
-                          <PowerOff size={13} /> {t.deactivate}
-                        </button>
-                      ) : (
-                        <button type="button" className="inv-successBtn" onClick={() => openAvailabilityDialog('room', selectedRoom, 'reactivate')}>
-                          <Power size={13} /> {t.activate}
-                        </button>
-                      )}
-                    </>
-                  )}
-                  {selectedEntityType === 'bed' && (
-                    <>
-                      <button type="button" className="inv-secondaryBtn" onClick={() => openEditBed(selectedBed)}>
-                        <Pencil size={13} /> {t.edit}
-                      </button>
-                      {canDeleteBed && (
-                        <button
-                          type="button"
-                          className="inv-dangerBtn"
-                          onClick={() => openDeleteBedDialog(selectedBed)}
-                          disabled={selectedBed.is_occupied}
-                        >
-                          <Trash2 size={13} /> {t.deleteAction}
-                        </button>
-                      )}
-                    </>
-                  )}
-                </div>
-              )}
-
-              {selectedEntityType === 'building' && (
-                <>
-                  <div className="inv-inspectorSection">
-                    <h4>{t.sectionDetails}</h4>
-                    <DetailRow label={t.dormTypeLabel} value={selectedBuilding.dorm_type_name} />
-                    <DetailRow label={t.regionLabel} value={selectedBuilding.region_name} />
-                    <DetailRow label={t.activeStatusLabel} value={selectedBuilding.is_active ? t.statusActive : t.statusInactive} />
-                  </div>
-                  <div className="inv-inspectorSection">
-                    <h4>{t.sectionConfig}</h4>
-                    <DetailRow label={t.genderRestrictionLabel} value={genderRestrictionLabels[selectedBuilding.gender_restriction] || t.noRestriction} />
-                  </div>
-                  <div className="inv-inspectorSection">
-                    <h4>{t.sectionCapacity}</h4>
-                    <DetailRow label={t.apartmentCountLabel} value={selectedBuilding.apartment_count} />
-                    <DetailRow label={t.roomCountLabel} value={selectedBuilding.room_count} />
-                    <DetailRow label={t.bedCountLabel} value={selectedBuilding.bed_count} />
-                    <DetailRow label={t.occupiedBedsLabel} value={selectedBuilding.occupied_beds} />
-                    <DetailRow label={t.freeBedsLabel} value={selectedBuilding.free_beds} />
-                  </div>
-                </>
-              )}
-
-              {selectedEntityType === 'apartment' && (
-                <>
-                  <div className="inv-inspectorSection">
-                    <h4>{t.sectionDetails}</h4>
-                    <DetailRow label={t.parentBuildingLabel} value={selectedBuilding?.number} />
-                    <DetailRow label={t.activeStatusLabel} value={selectedApartment.is_active ? t.statusActive : t.statusInactive} />
-                    {!selectedApartment.is_active && (
-                      <DetailRow label={t.inactiveReasonLabel} value={selectedApartment.inactive_reason_display || t.none} />
-                    )}
-                  </div>
-                  <div className="inv-inspectorSection">
-                    <h4>{t.sectionConfig}</h4>
-                    <DetailRow label={t.genderCategoryLabel} value={categoryLabels[selectedApartment.category] || selectedApartment.category} />
-                    <DetailRow label={t.housingTypeLabel} value={apartmentTypeLabels[selectedApartment.apartment_type] || selectedApartment.apartment_type} />
-                  </div>
-                  <div className="inv-inspectorSection">
-                    <h4>{t.sectionCapacity}</h4>
-                    <DetailRow label={t.plannedRoomCountLabel} value={selectedApartment.room_count} />
-                    <DetailRow label={t.actualRoomCountLabel} value={selectedApartment.actual_room_count} />
-                    <DetailRow label={t.apartmentCapacityLabel} value={selectedApartment.apartment_capacity ?? '—'} />
-                    <DetailRow label={t.totalBedsLabel} value={selectedApartment.bed_count} />
-                    <DetailRow label={t.occupiedBedsLabel} value={selectedApartment.occupied_beds} />
-                    <DetailRow label={t.freeBedsLabel} value={selectedApartment.free_beds} />
-                  </div>
-                </>
-              )}
-
-              {selectedEntityType === 'room' && (
-                <>
-                  <div className="inv-inspectorSection">
-                    <h4>{t.sectionDetails}</h4>
-                    <DetailRow label={t.parentApartmentLabel} value={selectedApartment?.number} />
-                    <DetailRow label={t.activeStatusLabel} value={selectedRoom.is_active ? t.statusActive : t.statusInactive} />
-                  </div>
-                  <div className="inv-inspectorSection">
-                    <h4>{t.sectionCapacity}</h4>
-                    <DetailRow label={t.capacityLabel} value={selectedRoom.capacity} />
-                    <DetailRow label={t.occupancyLabel} value={selectedRoom.current_occupancy} />
-                    <DetailRow label={t.availableBedsLabel} value={selectedRoom.available_beds} />
-                    <DetailRow label={t.bedCountLabel} value={selectedRoom.bed_count} />
-                  </div>
-                  {selectedRoom.has_missing_bed_records && (
-                    <div className="inv-inspectorSection">
-                      <h4>{t.configWarningLabel}</h4>
-                      <p className="inv-inspectorWarning">
-                        <AlertTriangle size={13} /> {t.bedRecordsMismatch}
-                      </p>
-                    </div>
-                  )}
-                </>
-              )}
-
-              {selectedEntityType === 'bed' && (
-                <div className="inv-inspectorSection">
-                  <h4>{t.sectionDetails}</h4>
-                  <DetailRow label={t.parentRoomLabel} value={selectedRoom?.name} />
-                  <DetailRow label={t.availabilityLabel} value={selectedBed.is_occupied ? t.occupied : t.available} />
-                  <p className="inv-inspectorWarning">{t.bedNoActionsSupported}</p>
-                </div>
-              )}
-            </div>
           )}
         </div>
       </div>
@@ -1719,7 +1633,11 @@ export default function BuildingsPage({ language = 'he' }) {
           instead of being confined to wherever it happens to be nested. */}
       {editor &&
         createPortal(
-          <div className="inv-modalOverlay" onClick={() => (!editor.saving ? closeEditor() : null)}>
+          <div
+            className="inv-modalOverlay"
+            dir={isHe ? 'rtl' : 'ltr'}
+            onClick={() => (!editor.saving ? closeEditor() : null)}
+          >
             <div className="inv-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <div className="inv-modalHeader">
               <div className="inv-modalHeaderIcon">
@@ -2094,6 +2012,24 @@ export default function BuildingsPage({ language = 'he' }) {
         </div>
       )}
 
+      {}
+      {wizardOpen && (
+        <BuildingSetupWizard
+          language={language}
+          dormTypesInRegion={dormTypesInRegion}
+          defaultDormTypeId={selectedDormTypeId !== 'all' ? selectedDormTypeId : ''}
+          regionName={selectedRegion?.name}
+          categoryLabels={categoryLabels}
+          apartmentTypeLabels={apartmentTypeLabels}
+          genderRestrictionLabels={genderRestrictionLabels}
+          onClose={(building) => {
+            setWizardOpen(false);
+            if (building) handleWizardCompleted(building);
+          }}
+          onCompleted={handleWizardCompleted}
+        />
+      )}
+
       <style>{`
         .inv-page {
           --inv-bg: #f4f5f7;
@@ -2209,7 +2145,7 @@ export default function BuildingsPage({ language = 'he' }) {
         /* Workspace grid */
         .inv-workspace {
           display: grid;
-          grid-template-columns: minmax(250px, 285px) minmax(520px, 1fr) minmax(285px, 330px);
+          grid-template-columns: minmax(250px, 285px) minmax(520px, 1fr);
           gap: 12px;
           align-items: start;
         }
@@ -2268,18 +2204,59 @@ export default function BuildingsPage({ language = 'he' }) {
         .inv-availabilityTag.is-occupied { background: var(--inv-warning-soft); color: var(--inv-warning); }
         .inv-bedCapabilityNote { font-size: 10.5px; color: var(--inv-muted); margin: 6px 2px 0; }
 
-        /* Inspector */
-        .inv-inspectorBody { display: flex; flex-direction: column; gap: 10px; }
-        .inv-inspectorHeader { display: flex; align-items: center; gap: 8px; color: var(--inv-primary); }
-        .inv-inspectorHeaderText { color: var(--inv-text); }
-        .inv-inspectorType { font-size: 10px; color: var(--inv-muted); text-transform: uppercase; letter-spacing: 0.02em; }
-        .inv-inspectorLabel { font-size: 14px; font-weight: 750; }
-        .inv-inspectorActions { display: flex; gap: 6px; flex-wrap: wrap; }
-        .inv-inspectorSection { border-top: 1px solid var(--inv-border); padding-top: 8px; }
-        .inv-inspectorSection h4 { margin: 0 0 6px; font-size: 10.5px; color: var(--inv-muted); text-transform: uppercase; letter-spacing: 0.02em; }
         .inv-inspectorWarning { display: flex; align-items: center; gap: 5px; color: var(--inv-warning); font-size: 11px; margin: 0; }
         .inv-detailRow { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
         .inv-detailRow span { color: var(--inv-muted); }
+
+        /* Progressive disclosure: building summary bar, on-demand detail
+           strips, and the apartment/room accordion that replaced the old
+           always-visible three-table + inspector layout. */
+        .inv-summaryBar {
+          display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+          padding: 8px 10px; border: 1px solid var(--inv-border); border-radius: 10px; background: var(--inv-panel-subtle); margin-bottom: 10px;
+        }
+        .inv-summaryBarMain { display: flex; align-items: center; gap: 9px; color: var(--inv-primary); }
+        .inv-summaryBarMain > svg { flex-shrink: 0; }
+        .inv-summaryBarTitle { font-size: 13.5px; font-weight: 750; color: var(--inv-text); }
+        .inv-summaryBarMeta { font-size: 11px; color: var(--inv-muted); }
+        .inv-summaryBarActions { display: flex; align-items: center; gap: 6px; }
+        .inv-linkBtn {
+          display: inline-flex; align-items: center; gap: 4px; background: none; border: none; cursor: pointer;
+          color: var(--inv-primary); font-size: 11.5px; font-weight: 650; padding: 4px 2px;
+        }
+        .inv-chevron { transition: transform 0.15s ease; transform: rotate(-90deg); }
+        [dir='rtl'] .inv-chevron { transform: rotate(90deg); }
+        .inv-chevron.is-open { transform: rotate(0deg); }
+
+        .inv-detailsStrip {
+          display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 2px 16px;
+          background: var(--inv-panel-subtle); border: 1px solid var(--inv-border); border-radius: 9px;
+          padding: 8px 12px; margin: 0 0 10px;
+        }
+        .inv-detailsStripActions { display: flex; align-items: center; grid-column: 1 / -1; margin-top: 4px; }
+
+        .inv-accordionList { display: flex; flex-direction: column; gap: 6px; }
+        .inv-accordionList-nested { margin: 8px 0 10px; padding-inline-start: 18px; border-inline-start: 2px solid var(--inv-border); }
+        .inv-accordionItem { border: 1px solid var(--inv-border); border-radius: 10px; overflow: hidden; background: var(--inv-panel); }
+        .inv-accordionItem.is-open { border-color: var(--inv-border-strong); }
+        .inv-accordionItem.is-inactive { opacity: 0.6; }
+        .inv-accordionHeader {
+          width: 100%; display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: none; border: none;
+          cursor: pointer; text-align: start; font: inherit; color: var(--inv-text); flex-wrap: wrap; row-gap: 4px;
+        }
+        .inv-accordionItem.is-open > .inv-accordionHeader { background: var(--inv-primary-soft); }
+        .inv-accordionHeader:hover { background: var(--inv-panel-subtle); }
+        .inv-accordionItem.is-open > .inv-accordionHeader:hover { background: var(--inv-primary-soft); }
+        .inv-accordionTitle { font-weight: 700; font-size: 12.5px; white-space: nowrap; }
+        .inv-accordionTag {
+          font-size: 10px; font-weight: 650; color: var(--inv-muted); background: var(--inv-panel-subtle);
+          border: 1px solid var(--inv-border); border-radius: 6px; padding: 1px 6px; white-space: nowrap;
+        }
+        .inv-accordionMeta { font-size: 11px; color: var(--inv-muted); white-space: nowrap; }
+        .inv-accordionRowAction { margin-inline-start: auto; }
+        .inv-accordionBody { padding: 0 10px 10px; border-top: 1px solid var(--inv-border); }
+        .inv-accordionBody .inv-sectionHeader { padding-top: 8px; }
+        .inv-accordionBody .inv-sectionHeader h3 { font-size: 11.5px; }
 
         /* Drawer / dialog */
         .inv-overlay {
@@ -2402,13 +2379,8 @@ export default function BuildingsPage({ language = 'he' }) {
         .inv-impactNote { font-size: 11px; color: var(--inv-muted); margin: 0; }
 
         /* Responsive */
-        @media (max-width: 1280px) {
-          .inv-workspace { grid-template-columns: minmax(250px, 285px) 1fr; }
-          .inv-inspectorPanel { grid-column: 1 / -1; }
-        }
         @media (max-width: 960px) {
           .inv-workspace { grid-template-columns: 1fr; }
-          .inv-inspectorPanel { grid-column: auto; }
           .inv-buildingList { max-height: 260px; }
         }
         @media (max-width: 640px) {
