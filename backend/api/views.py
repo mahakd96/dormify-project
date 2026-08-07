@@ -814,6 +814,190 @@ class BuildingViewSet(viewsets.ModelViewSet):
         serializer = RoomSerializer(rooms, many=True)
         return Response({'rooms': serializer.data})
 
+    @action(detail=True, methods=['post'], url_path='bulk-create-inventory')
+    def bulk_create_inventory(self, request, pk=None):
+        """
+        Transactionally create many Apartments - each with its own Rooms and
+        materialized Beds - under this Building in a single call. Backend
+        counterpart of the Building Setup Wizard's apartment/room
+        configuration-group step, so staff never have to create a dozen
+        near-identical apartments one at a time.
+
+        Reuses ApartmentSerializer/RoomSerializer for validation exactly
+        like the single-object create endpoints above, and the same
+        `f'Bed {i}'` materialization convention used everywhere else in the
+        codebase (manage.py materialize_beds, allocation.solver
+        ._ensure_beds_for_room) - so the result is indistinguishable from
+        manually created inventory.
+
+        Expected body:
+        {
+          "apartment_groups": [
+            {
+              "category": "female", "apartment_type": "single",
+              "apartment_capacity": 3,
+              "numbers": ["101", "102", ...],
+              "room_groups": [{"capacity": 1, "count": 3}]
+            },
+            ...
+          ]
+        }
+        Apartment numbers are generated/edited client-side (Apartment.number
+        is free-text with no format constraint - see model) and submitted
+        explicitly, never guessed server-side.
+        """
+        if not request.user.is_boss:
+            return _inventory_create_permission_error()
+
+        building = self.get_object()
+
+        if not request.user.is_central_admin:
+            region_id = building.dorm_type.region_id if building.dorm_type else None
+            if region_id != request.user.region_id:
+                return Response(
+                    {'error': 'ניתן ליצור מלאי רק בבניין באזור המשויך למשתמש'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+        groups = request.data.get('apartment_groups')
+        if not isinstance(groups, list) or not groups:
+            return Response(
+                {'error': 'apartment_groups must be a non-empty list.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        all_numbers = []
+        for group_index, group in enumerate(groups):
+            if not isinstance(group, dict):
+                return Response(
+                    {'error': f'apartment_groups[{group_index}] must be an object.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            numbers = group.get('numbers')
+            if not isinstance(numbers, list) or not numbers:
+                return Response(
+                    {'error': f'apartment_groups[{group_index}].numbers must be a non-empty list.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            room_groups = group.get('room_groups')
+            if not isinstance(room_groups, list) or not room_groups:
+                return Response(
+                    {'error': f'apartment_groups[{group_index}].room_groups must be a non-empty list.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            for rg_index, room_group in enumerate(room_groups):
+                capacity = room_group.get('capacity') if isinstance(room_group, dict) else None
+                count = room_group.get('count') if isinstance(room_group, dict) else None
+                if not isinstance(capacity, int) or capacity < 1:
+                    return Response(
+                        {'error': f'apartment_groups[{group_index}].room_groups[{rg_index}].capacity must be a positive integer.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if not isinstance(count, int) or count < 1:
+                    return Response(
+                        {'error': f'apartment_groups[{group_index}].room_groups[{rg_index}].count must be a positive integer.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            all_numbers.extend(str(n) for n in numbers)
+
+        if len(all_numbers) != len(set(all_numbers)):
+            return Response(
+                {
+                    'error': 'Apartment numbers must be unique within this request.',
+                    'code': 'DUPLICATE_APARTMENT_NUMBER',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        existing = set(
+            Apartment.objects.filter(
+                building=building, number__in=all_numbers
+            ).values_list('number', flat=True)
+        )
+        if existing:
+            return Response(
+                {
+                    'error': 'One or more apartment numbers already exist in this building.',
+                    'code': 'DUPLICATE_APARTMENT_NUMBER',
+                    'conflicting_numbers': sorted(existing),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        created_apartments = 0
+        created_rooms = 0
+        created_beds = 0
+
+        try:
+            with transaction.atomic():
+                for group in groups:
+                    room_groups = group['room_groups']
+                    total_room_count = sum(rg['count'] for rg in room_groups)
+
+                    for number in group['numbers']:
+                        apartment_data = {
+                            'building': building.id,
+                            'number': str(number),
+                            'category': group.get('category'),
+                            'apartment_type': group.get('apartment_type'),
+                            'room_count': total_room_count,
+                            'apartment_capacity': group.get('apartment_capacity'),
+                        }
+                        conflict = check_apartment_write_conflict(None, apartment_data)
+                        if conflict:
+                            raise DRFValidationError(conflict)
+
+                        apartment_serializer = ApartmentSerializer(data=apartment_data)
+                        apartment_serializer.is_valid(raise_exception=True)
+                        apartment = apartment_serializer.save()
+                        created_apartments += 1
+
+                        room_sequence = 0
+                        for room_group in room_groups:
+                            for _ in range(room_group['count']):
+                                room_sequence += 1
+                                room_data = {
+                                    'apartment': apartment.id,
+                                    'name': str(room_sequence),
+                                    'capacity': room_group['capacity'],
+                                }
+                                conflict = check_room_write_conflict(None, room_data)
+                                if conflict:
+                                    raise DRFValidationError(conflict)
+
+                                room_serializer = RoomSerializer(data=room_data)
+                                room_serializer.is_valid(raise_exception=True)
+                                room = room_serializer.save()
+                                created_rooms += 1
+
+                                beds = [
+                                    Bed(room=room, label=f'Bed {bed_index}')
+                                    for bed_index in range(1, room_group['capacity'] + 1)
+                                ]
+                                Bed.objects.bulk_create(beds)
+                                created_beds += len(beds)
+        except DRFValidationError as exc:
+            return Response(
+                {
+                    'error': 'Bulk inventory creation failed; no changes were made.',
+                    'detail': exc.detail,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as exc:
+            traceback.print_exc()
+            return Response(
+                {'error': str(exc), 'error_type': exc.__class__.__name__},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response({
+            'success': True,
+            'building_id': building.id,
+            'created_apartments': created_apartments,
+            'created_rooms': created_rooms,
+            'created_beds': created_beds,
+        }, status=status.HTTP_201_CREATED)
 
 
 class ApartmentViewSet(viewsets.ModelViewSet):
