@@ -854,10 +854,10 @@ class SolverReligiousJewishRuleTest(TestCase):
         """
         Generic Apartment.InactiveReason.RESERVED behavior (any building,
         any is_priority=True student) — unrelated to, and not to be
-        confused with, the building-179 Upper Dorm Office exclusive-group
-        policy, which has its own dedicated tests in
-        SolverBuilding179PriorityTest and requires priority + הסמכה + אנייר
-        + the Upper Dorm Office region, not merely is_priority=True.
+        confused with, the Building-179 / כפר הסמכה automatic-allocation
+        preference, which has its own dedicated tests in
+        Building179AutomaticAllocationTest and is keyed on the אנייר
+        marker plus accepted_dorm_type.code == 15, not is_priority=True.
         """
         dorm = DormType.objects.create(name='TestDorm')
         building = Building.objects.create(number=1, dorm_type=dorm)
@@ -1984,36 +1984,65 @@ class SolverCombinedAllConstraintsTest(TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Upper Dorm Office / building-179 exclusive-group policy
+# Building 179 / כפר הסמכה (DormType.code == 15) automatic-allocation
+# preference: a one-way reservation with overflow, not hard bidirectional
+# exclusivity.
+#
+# Confirmed business rules under test:
+#   - Building 179 belongs to DormType.code == 15 (כפר הסמכה). DormType.code
+#     == 11 (עליון עמים) is a separate, unrelated dorm type.
+#   - An eligible Hasmaha ANIR student (אנייר marker AND
+#     accepted_dorm_type.code == 15) prefers Building 179 but is not locked
+#     to it — they may overflow to any other active, compatible apartment
+#     within DormType 15.
+#   - Students who are not eligible Hasmaha ANIR students (ordinary,
+#     generic-priority, or ANIR-but-wrong-dorm-type) may never
+#     automatically consume Building-179 inventory.
+#   - This policy governs automatic allocation only; authorized staff may
+#     still manually assign/move any student into or out of Building 179
+#     (see ManualBuilding179OverrideTest below).
+#
+# Replaces the historical SolverBuilding179PriorityTest, which tested a
+# now-confirmed-incorrect rule (region-based detection via a nonexistent
+# UPPER_DORM_OFFICE_REGION_IDS constant, a 4-condition eligibility
+# requirement, and hard bidirectional exclusivity with no overflow).
 # ---------------------------------------------------------------------------
 
-class SolverBuilding179PriorityTest(TestCase):
+class Building179AutomaticAllocationTest(TestCase):
     """
-    Focused tests for the Upper Dorm Office building-179 exclusive-group
-    policy implemented in allocation/solver.py.
+    Confirmed business rules under test (audit sections 4, 9A):
 
-    Business rule under test:
-      - A student belongs to the building-179 exclusive group only when ALL
-        FOUR characteristics hold: is_priority, belongs to הסמכה (special
-        status), carries the אנייר special status, and the allocation is
-        for the Upper Dorm Office region.
-      - Exclusive-group students may be assigned only to building 179 (any
-        apartment/bed in it, not merely RESERVED ones) and remain
-        unassigned rather than fall back to another building.
-      - Building 179 in the Upper Dorm Office region rejects every student
-        who is not in the exact exclusive group.
-      - Other priority students are not restricted to, and may not enter,
-        building 179; they may bypass their imported accepted_dorm_type and
-        are softly clustered into as few buildings as possible.
-      - Ordinary non-priority students are unaffected by any of this.
+      Case A — an eligible Hasmaha ANIR student (carries the אנייר special-
+      status marker AND accepted_dorm_type.code == 15):
+        - Building 179 is their preferred automatic-allocation destination.
+        - Ordinary and generic-priority (non-eligible) students may never
+          automatically consume Building-179 inventory.
+        - They are NOT hard-locked to Building 179 — when it lacks a
+          compatible bed, they automatically overflow to any other active,
+          compatible apartment within DormType 15, found via ordinary
+          accepted-dorm-type matching (never a hard-coded building-number
+          list, so a future building added to DormType 15 works with no
+          code change).
+        - All normal hard constraints (gender, religion, capacity, housing
+          type, existing occupants, roommate rules) still apply.
 
-    NOTE ON DATA ASSUMPTIONS (see final report): no region record for the
-    "Upper Dorm Office" and no literal 'אנייר' value exist anywhere else in
-    this repository. The Region below uses id='upper_dorm_office', which
-    allocation/solver.py recognizes via UPPER_DORM_OFFICE_REGION_IDS.
+      Case B — an ANIR student whose accepted_dorm_type.code != 15:
+        - Must never be redirected to Building 179.
+        - Must remain restricted to their own accepted dorm type/region,
+          exactly like any other non-priority student — the אנייר marker
+          alone must never waive that restriction (this directly tests the
+          confirmed fix to _should_enforce_accepted_dorm_type).
+
+      Case C — an ANIR student in a region with no כפר הסמכה inventory at
+      all: assigned normally, as an ordinary priority student; a dedicated
+      ANIR building is not required outside גוש עליון.
+
+    This policy is automatic-allocation only; manual staff overrides
+    (explicitly permitted) are covered separately in
+    ManualBuilding179OverrideTest below.
     """
 
-    UPPER_OFFICE_CONFIG = {
+    DEFAULT_CONFIG = {
         "sameGender": {"enabled": True, "strict": True, "critical": True, "weight": 0},
         "priorityFirst": {"enabled": True, "strict": True, "critical": True, "weight": 0},
         "roommatePositiveOnly": {"enabled": True, "strict": True, "critical": True, "weight": 0},
@@ -2030,30 +2059,36 @@ class SolverBuilding179PriorityTest(TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-        # The Upper Dorm Office region and its buildings.
-        self.upper_region = Region.objects.create(
-            id="upper_dorm_office",
-            name="מעונות הלשכה העליונה",
+        # כפר הסמכה (DormType.code == 15) in its confirmed region גוש עליון,
+        # with Building 179 (the preferred destination) plus one additional
+        # building (176) representing ordinary overflow inventory of the
+        # SAME dorm type — deliberately not a hard-coded {176,177,178,179}
+        # list; any other/future building under code 15 must behave the
+        # same way (see test_overflow_not_restricted_to_hardcoded_building_list).
+        self.upper_region = Region.objects.create(id="gush_elyon", name="גוש עליון")
+        self.hasmaha_dorm_type = DormType.objects.create(
+            name="כפר הסמכה", code=15, region=self.upper_region,
         )
-        self.dorm_type_a = DormType.objects.create(
-            name="UpperOfficeDormA", region=self.upper_region,
+        self.building_179 = Building.objects.create(number=179, dorm_type=self.hasmaha_dorm_type)
+        self.building_176 = Building.objects.create(number=176, dorm_type=self.hasmaha_dorm_type)
+
+        # A second, real, unrelated dorm type in the SAME region (code 11 =
+        # עליון עמים, confirmed unrelated to this policy) — used for Case B.
+        self.other_upper_dorm_type = DormType.objects.create(
+            name="עליון עמים", code=11, region=self.upper_region,
         )
-        self.dorm_type_b = DormType.objects.create(
-            name="UpperOfficeDormB", region=self.upper_region,
+        self.other_upper_building = Building.objects.create(
+            number=201, dorm_type=self.other_upper_dorm_type,
         )
 
-        self.building_179 = Building.objects.create(number=179, dorm_type=self.dorm_type_a)
-        self.building_101 = Building.objects.create(number=101, dorm_type=self.dorm_type_a)
-        self.building_102 = Building.objects.create(number=102, dorm_type=self.dorm_type_b)
-
-        # A second, unrelated region that also happens to have a building
-        # numbered 179 — used to verify region scoping (test 15).
+        # A building numbered 179 under a completely unrelated dorm
+        # type/region — must remain an entirely ordinary building.
         self.other_region = Region.objects.create(id="other_region", name="אזור אחר")
-        self.other_dorm_type = DormType.objects.create(
+        self.other_region_dorm_type = DormType.objects.create(
             name="OtherRegionDorm", region=self.other_region,
         )
-        self.other_building_179 = Building.objects.create(
-            number=179, dorm_type=self.other_dorm_type,
+        self.other_region_building_179 = Building.objects.create(
+            number=179, dorm_type=self.other_region_dorm_type,
         )
 
     # ------------------------------------------------------------------
@@ -2068,6 +2103,7 @@ class SolverBuilding179PriorityTest(TestCase):
         apartment_type=Apartment.ApartmentType.SINGLE,
         bed_count=2,
         room_name="A",
+        is_active=True,
     ):
         apartment = Apartment.objects.create(
             building=building,
@@ -2076,9 +2112,11 @@ class SolverBuilding179PriorityTest(TestCase):
             apartment_type=apartment_type,
             room_count=1,
             apartment_capacity=bed_count,
-            is_active=True,
+            is_active=is_active,
         )
-        room = Room.objects.create(apartment=apartment, name=room_name, capacity=bed_count)
+        room = Room.objects.create(
+            apartment=apartment, name=room_name, capacity=bed_count, is_active=is_active,
+        )
         for index in range(bed_count):
             Bed.objects.create(room=room, label=str(index + 1))
         return room
@@ -2088,18 +2126,19 @@ class SolverBuilding179PriorityTest(TestCase):
         student_id,
         *,
         gender=Student.Gender.FEMALE,
+        housing_type=None,
         priority=False,
-        hasmaha=False,
         anier=False,
         accepted_dorm_type=None,
         religion=Student.Religion.NOT_SPECIFIED,
         religious=Student.Religious.NOT_SPECIFIED,
     ):
-        housing_type = (
-            Student.HousingType.SINGLE_MALE
-            if gender == Student.Gender.MALE
-            else Student.HousingType.SINGLE_FEMALE
-        )
+        if housing_type is None:
+            housing_type = (
+                Student.HousingType.SINGLE_MALE
+                if gender == Student.Gender.MALE
+                else Student.HousingType.SINGLE_FEMALE
+            )
 
         return Student.objects.create(
             student_id=student_id,
@@ -2108,21 +2147,11 @@ class SolverBuilding179PriorityTest(TestCase):
             gender=gender,
             housing_type=housing_type,
             is_priority=priority,
-            special_status_1="הסמכה" if hasmaha else "",
-            special_status_2="אנייר" if anier else "",
+            special_status_1="אנייר" if anier else "",
             accepted_dorm_type=accepted_dorm_type,
             requested_religion=religion,
             religious=religious,
         )
-
-    def _make_mutual_positive_roommate_pair(self, student_1, student_2):
-        student_1.roommate_request_student_id_1 = student_2.student_id
-        student_1.roommate_request_flag_1 = True
-        student_1.save(update_fields=["roommate_request_student_id_1", "roommate_request_flag_1"])
-
-        student_2.roommate_request_student_id_1 = student_1.student_id
-        student_2.roommate_request_flag_1 = True
-        student_2.save(update_fields=["roommate_request_student_id_1", "roommate_request_flag_1"])
 
     def _resolve_assignment_location(self, assignment):
         bed = Bed.objects.select_related(
@@ -2131,528 +2160,701 @@ class SolverBuilding179PriorityTest(TestCase):
         ).get(id=assignment["bed_id"])
         return bed.room.apartment, bed.room, bed
 
-    def _assignment_maps(self, result):
-        assignments = result.get("proposed_assignments", [])
-        student_to_building = {}
-        student_to_apartment = {}
-        by_building = defaultdict(list)
-
-        for assignment in assignments:
-            apartment, room, bed = self._resolve_assignment_location(assignment)
-            student_id = assignment["student_db_id"]
-            student_to_building[student_id] = apartment.building_id
-            student_to_apartment[student_id] = apartment.id
-            by_building[apartment.building_id].append(student_id)
-
-        return student_to_building, student_to_apartment, by_building
+    def _assigned_building_number(self, result, student):
+        for assignment in result["proposed_assignments"]:
+            if assignment["student_db_id"] == student.id:
+                apartment, _, _ = self._resolve_assignment_location(assignment)
+                return apartment.building.number
+        return None
 
     def _run(self, students, rooms, config=None):
-        import inspect
-        from allocation.solver import (
-            run_improved_ortools_allocation,
-            _is_building_179_exclusive_student,
+        from allocation.solver import run_improved_ortools_allocation
+        return run_improved_ortools_allocation(
+            list(students), list(rooms), config or self.DEFAULT_CONFIG,
         )
-
-        test_name = inspect.stack()[1].function
-        students = list(students)
-        rooms = list(rooms)
-
-        result = run_improved_ortools_allocation(
-            students,
-            rooms,
-            config or self.UPPER_OFFICE_CONFIG,
-        )
-
-        assignments = result.get("proposed_assignments", [])
-        assigned_ids = {item["student_db_id"] for item in assignments}
-
-        printable_rows = []
-        for assignment in assignments:
-            student = Student.objects.get(id=assignment["student_db_id"])
-            apartment, room, bed = self._resolve_assignment_location(assignment)
-            region = apartment.building.dorm_type.region
-            printable_rows.append((apartment, room, bed, student, region))
-
-        printable_rows.sort(
-            key=lambda row: (
-                row[0].building.number or 0,
-                str(row[0].number),
-                str(row[1].name),
-                str(row[2].label),
-            )
-        )
-
-        print("\n" + "=" * 160)
-        print(f"BUILDING-179 / UPPER DORM OFFICE TEST: {test_name}")
-        print(
-            f"status={result.get('solver_status')} | students={len(students)} | "
-            f"assigned={result.get('successful_assignments', 0)} | "
-            f"conflicts={result.get('conflicts', 0)}"
-        )
-        print("=" * 160)
-
-        if printable_rows:
-            print(
-                f"{'BLDG':<6} {'DORMTYPE':<16} {'APT':<6} {'ROOM':<6} {'BED':<6} "
-                f"{'STUDENT':<10} {'ACC.DORM':<16} {'PRIORITY':<9} {'STATUSES':<16} "
-                f"{'EXCLUSIVE179':<12}"
-            )
-            print("-" * 160)
-            for apartment, room, bed, student, region in printable_rows:
-                accepted = student.accepted_dorm_type.name if student.accepted_dorm_type_id else "-"
-                statuses = " | ".join(
-                    value
-                    for value in (
-                        student.special_status_1,
-                        student.special_status_2,
-                        student.special_status_3,
-                        student.special_status_4,
-                    )
-                    if value
-                ) or "-"
-                is_exclusive = _is_building_179_exclusive_student(student, apartment)
-                print(
-                    f"{str(apartment.building.number):<6} "
-                    f"{apartment.building.dorm_type.name:<16} "
-                    f"{str(apartment.number):<6} "
-                    f"{str(room.name):<6} "
-                    f"{str(bed.label):<6} "
-                    f"{student.student_id:<10} "
-                    f"{accepted:<16} "
-                    f"{str(bool(student.is_priority)):<9} "
-                    f"{statuses:<16} "
-                    f"{str(bool(is_exclusive)):<12}"
-                )
-        else:
-            print("No assignments.")
-
-        unassigned = [student for student in students if student.id not in assigned_ids]
-        if unassigned:
-            print("\nUNASSIGNED")
-            print(f"{'STUDENT':<10} {'PRIORITY':<9} {'STATUSES':<16}")
-            print("-" * 60)
-            for student in sorted(unassigned, key=lambda item: item.student_id):
-                statuses = " | ".join(
-                    value
-                    for value in (
-                        student.special_status_1,
-                        student.special_status_2,
-                        student.special_status_3,
-                        student.special_status_4,
-                    )
-                    if value
-                ) or "-"
-                print(f"{student.student_id:<10} {str(bool(student.is_priority)):<9} {statuses:<16}")
-
-        print("=" * 160 + "\n")
-        return result
 
     # ------------------------------------------------------------------
-    # 1. Exact exclusive-group student is assigned to building 179.
+    # 1. Eligible Hasmaha ANIR student gets Building 179 when space exists.
     # ------------------------------------------------------------------
 
-    def test_exclusive_group_student_assigned_to_building_179(self):
-        """An exact exclusive-group student (priority + הסמכה + אנייר, Upper
-        Dorm Office region) is assigned into building 179."""
+    def test_hasmaha_anier_student_gets_building_179_when_space_exists(self):
         room179 = self._make_room(self.building_179, "1", bed_count=2)
-
         student = self._make_student(
-            "EX1", priority=True, hasmaha=True, anier=True,
+            "H1", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
         )
 
         result = self._run([student], [room179])
         self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
-
-        by_building, _, _ = self._assignment_maps(result)
-        self.assertEqual(by_building[student.id], self.building_179.id)
-
-        payload = result["proposed_assignments"][0]
-        bed = Bed.objects.get(id=payload["bed_id"])
-        self.assertEqual(bed.room.apartment.building.number, 179)
-        self.assertIsNotNone(bed.room)
-        self.assertIsNotNone(bed)
+        self.assertEqual(self._assigned_building_number(result, student), 179)
 
     # ------------------------------------------------------------------
-    # 2. Exclusive-group student cannot be assigned to any other building;
-    #    remains unassigned when building 179 has no compatible free bed.
+    # 2/3. Overflow within DormType 15 when 179 is full — driven by
+    #      accepted-dorm-type matching, not a hard-coded building list.
     # ------------------------------------------------------------------
 
-    def test_exclusive_group_student_unassigned_when_building_179_full(self):
-        """When building 179 has no free bed, an exclusive-group student
-        must remain unassigned rather than fall back to another building."""
+    def test_hasmaha_anier_student_overflows_within_dormtype_when_179_full(self):
+        """When Building 179 has no free bed, an eligible Hasmaha ANIR
+        student must be assigned elsewhere in DormType 15 (Building 176)
+        rather than left unassigned."""
         room179 = self._make_room(self.building_179, "1", bed_count=1)
-        room101 = self._make_room(self.building_101, "1", bed_count=2)
+        room176 = self._make_room(self.building_176, "1", bed_count=1)
 
         existing_occupant = self._make_student(
-            "EXOLD", priority=True, hasmaha=True, anier=True,
+            "H_EXIST", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
         )
         BedAssignment.objects.create(
-            student=existing_occupant,
-            bed=room179.beds.first(),
+            student=existing_occupant, bed=room179.beds.first(),
             status=BedAssignment.Status.ACTIVE,
             assignment_type=BedAssignment.AssignmentType.MANUAL,
         )
 
         new_student = self._make_student(
-            "EX2", priority=True, hasmaha=True, anier=True,
+            "H2", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
         )
 
-        result = self._run([new_student], [room179, room101])
-        self.assertEqual(result["successful_assignments"], 0, result["proposed_assignments"])
-        assigned_ids = {item["student_db_id"] for item in result["proposed_assignments"]}
-        self.assertNotIn(new_student.id, assigned_ids)
+        result = self._run([new_student], [room179, room176])
+        self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
+        self.assertEqual(self._assigned_building_number(result, new_student), 176)
 
-        # The pre-existing occupant's assignment must remain untouched.
+        # The pre-existing occupant of 179 must remain untouched.
         existing_assignment = BedAssignment.objects.get(student=existing_occupant)
         self.assertEqual(existing_assignment.status, BedAssignment.Status.ACTIVE)
         self.assertEqual(existing_assignment.bed_id, room179.beds.first().id)
 
-    # ------------------------------------------------------------------
-    # 3. Building 179 rejects a non-priority student.
-    # ------------------------------------------------------------------
+    def test_overflow_not_restricted_to_hardcoded_building_list(self):
+        """Overflow must work through accepted DormType code 15, not a
+        hard-coded {176,177,178,179} list — a brand-new building number
+        (999) added to the SAME dorm type must be usable automatically
+        with no code change, while Building 179 itself is full."""
+        room179 = self._make_room(self.building_179, "1", bed_count=1)
+        future_building = Building.objects.create(number=999, dorm_type=self.hasmaha_dorm_type)
+        room_future = self._make_room(future_building, "1", bed_count=1)
 
-    def test_building_179_rejects_non_priority_student(self):
-        """A non-priority student (no special status at all) cannot enter
-        building 179 and remains unassigned when it is the only option."""
-        room179 = self._make_room(self.building_179, "1", bed_count=2)
-        student = self._make_student("NP1", priority=False)
+        existing_occupant = self._make_student(
+            "H_EXIST2", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+        )
+        BedAssignment.objects.create(
+            student=existing_occupant, bed=room179.beds.first(),
+            status=BedAssignment.Status.ACTIVE,
+            assignment_type=BedAssignment.AssignmentType.MANUAL,
+        )
 
-        result = self._run([student], [room179])
-        self.assertEqual(result["successful_assignments"], 0, result["proposed_assignments"])
+        new_student = self._make_student(
+            "H3", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+        )
 
-    # ------------------------------------------------------------------
-    # 4. Building 179 rejects a priority student without אנייר.
-    # ------------------------------------------------------------------
-
-    def test_building_179_rejects_priority_student_without_anier(self):
-        """A priority student who lacks the אנייר special status (and also
-        lacks הסמכה) cannot enter building 179."""
-        room179 = self._make_room(self.building_179, "1", bed_count=2)
-        student = self._make_student("NA1", priority=True, hasmaha=False, anier=False)
-
-        result = self._run([student], [room179])
-        self.assertEqual(result["successful_assignments"], 0, result["proposed_assignments"])
-
-    # ------------------------------------------------------------------
-    # 5. Building 179 rejects a priority + הסמכה student lacking אנייר.
-    # ------------------------------------------------------------------
-
-    def test_building_179_rejects_priority_hasmaha_without_anier(self):
-        """A priority student who belongs to הסמכה but does NOT carry the
-        אנייר status still cannot enter building 179."""
-        room179 = self._make_room(self.building_179, "1", bed_count=2)
-        student = self._make_student("NA2", priority=True, hasmaha=True, anier=False)
-
-        result = self._run([student], [room179])
-        self.assertEqual(result["successful_assignments"], 0, result["proposed_assignments"])
+        result = self._run([new_student], [room179, room_future])
+        self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
+        self.assertEqual(self._assigned_building_number(result, new_student), 999)
 
     # ------------------------------------------------------------------
-    # 6. Building 179 rejects a student with אנייר missing another
-    #    required characteristic (priority).
+    # Regression test for a real production defect (allocation run 113):
+    # an eligible Hasmaha ANIR student who also happens to be is_priority
+    # (the common case — the Excel import pipeline sets is_priority=True
+    # as a side effect of populating special_status_1..4, so most ANIR
+    # students are also generic-priority students) was being offered
+    # candidates in completely unrelated dorm types, because the
+    # pre-existing generic is_priority bypass in
+    # _should_enforce_accepted_dorm_type was firing for them too — 22 of
+    # 142 eligible ANIR students in that run leaked into DormType codes
+    # 6, 11, and 18. This test reproduces the exact shape of that bug:
+    # Building 179 unavailable, a compatible bed available in DormType 15
+    # (valid overflow) AND a compatible bed available in an unrelated
+    # DormType (the leak this test must prove no longer happens), all in
+    # the same solver call.
     # ------------------------------------------------------------------
 
-    def test_building_179_rejects_anier_student_missing_priority(self):
-        """A student who carries הסמכה and אנייר but is NOT flagged priority
-        still cannot enter building 179 — is_priority alone (or its absence)
-        must not be the deciding factor."""
-        room179 = self._make_room(self.building_179, "1", bed_count=2)
-        student = self._make_student("NA3", priority=False, hasmaha=True, anier=True)
+    def test_hasmaha_anier_priority_student_overflows_within_dormtype_not_to_unrelated_dorm_type(self):
+        room179 = self._make_room(self.building_179, "1", bed_count=1)
+        room176 = self._make_room(self.building_176, "1", bed_count=1)
+        unrelated_room = self._make_room(self.other_upper_building, "1", bed_count=1)
 
-        result = self._run([student], [room179])
-        self.assertEqual(result["successful_assignments"], 0, result["proposed_assignments"])
-
-    # ------------------------------------------------------------------
-    # 7. Non-exclusive priority student may be assigned outside their
-    #    imported accepted_dorm_type.
-    # ------------------------------------------------------------------
-
-    def test_non_exclusive_priority_student_bypasses_accepted_dorm_type(self):
-        """A priority student who is not in the building-179 exclusive
-        group may be placed outside their imported accepted_dorm_type."""
-        room101 = self._make_room(self.building_101, "1", bed_count=2)
+        existing_occupant = self._make_student(
+            "REG_EXIST", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+        )
+        BedAssignment.objects.create(
+            student=existing_occupant, bed=room179.beds.first(),
+            status=BedAssignment.Status.ACTIVE,
+            assignment_type=BedAssignment.AssignmentType.MANUAL,
+        )
 
         student = self._make_student(
-            "PRI_BYPASS", priority=True,
-            accepted_dorm_type=self.dorm_type_b,
+            "REG1", anier=True, priority=True, accepted_dorm_type=self.hasmaha_dorm_type,
         )
 
-        result = self._run([student], [room101])
+        result = self._run([student], [room179, room176, unrelated_room])
         self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
-        _, student_to_apartment, _ = self._assignment_maps(result)
-        self.assertEqual(student_to_apartment[student.id], room101.apartment.id)
+        self.assertEqual(
+            self._assigned_building_number(result, student),
+            self.building_176.number,
+            "An eligible Hasmaha ANIR student who is also is_priority must "
+            "overflow within DormType 15, never leak into an unrelated "
+            "dorm type merely because a compatible bed exists there.",
+        )
 
-    # ------------------------------------------------------------------
-    # 8. A normal non-priority student still respects accepted_dorm_type.
-    # ------------------------------------------------------------------
-
-    def test_non_priority_student_respects_accepted_dorm_type(self):
-        """An ordinary non-priority student is only assignable within their
-        imported accepted_dorm_type, even when a closer building exists."""
-        room101 = self._make_room(self.building_101, "1", bed_count=2)  # dorm_type_a
-        room102 = self._make_room(self.building_102, "1", bed_count=2)  # dorm_type_b
+    def test_hasmaha_anier_priority_student_prefers_179_when_available(self):
+        """The is_priority side effect must not disturb the ordinary
+        Building-179 preference when 179 is actually available."""
+        room179 = self._make_room(self.building_179, "1", bed_count=2)
+        unrelated_room = self._make_room(self.other_upper_building, "1", bed_count=2)
 
         student = self._make_student(
-            "NP_STRICT", priority=False,
-            accepted_dorm_type=self.dorm_type_b,
+            "REG2", anier=True, priority=True, accepted_dorm_type=self.hasmaha_dorm_type,
         )
 
-        result = self._run([student], [room101, room102])
+        result = self._run([student], [room179, unrelated_room])
         self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
-        _, student_to_apartment, _ = self._assignment_maps(result)
-        self.assertEqual(student_to_apartment[student.id], room102.apartment.id)
+        self.assertEqual(self._assigned_building_number(result, student), 179)
 
     # ------------------------------------------------------------------
-    # 9. Multiple non-exclusive priority students cluster into the same
-    #    building when capacity allows and all else is equal.
+    # 4/5. Ordinary and generic-priority (non-eligible) students cannot
+    #      automatically enter Building 179.
     # ------------------------------------------------------------------
 
-    def test_non_exclusive_priority_students_cluster_same_building(self):
-        """Two non-exclusive priority students, with no other factor to
-        distinguish them, are preferably placed in the same building."""
-        room101 = self._make_room(self.building_101, "1", bed_count=2)
-        room102 = self._make_room(self.building_102, "1", bed_count=2)
+    def test_ordinary_student_cannot_enter_building_179_automatically(self):
+        room179 = self._make_room(self.building_179, "1", bed_count=2)
+        student = self._make_student("O1", priority=False, anier=False)
 
-        student_1 = self._make_student("CL1", priority=True)
-        student_2 = self._make_student("CL2", priority=True)
+        result = self._run([student], [room179])
+        self.assertEqual(result["successful_assignments"], 0, result["proposed_assignments"])
+        self.assertIn(student.id, result["students_with_no_feasible_beds"])
 
-        result = self._run([student_1, student_2], [room101, room102])
-        self.assertEqual(result["successful_assignments"], 2, result["proposed_assignments"])
+    def test_generic_priority_non_anier_student_cannot_enter_building_179_automatically(self):
+        """is_priority=True alone (no אנייר marker) must never be
+        sufficient to enter Building 179 automatically."""
+        room179 = self._make_room(self.building_179, "1", bed_count=2)
+        student = self._make_student("O2", priority=True, anier=False)
 
-        by_building, _, _ = self._assignment_maps(result)
+        result = self._run([student], [room179])
+        self.assertEqual(result["successful_assignments"], 0, result["proposed_assignments"])
+        self.assertIn(student.id, result["students_with_no_feasible_beds"])
+
+    # ------------------------------------------------------------------
+    # Regression guard: the pre-existing generic is_priority bypass in
+    # _should_enforce_accepted_dorm_type is unrelated to the ANIR fix
+    # above and must keep working exactly as before for non-ANIR
+    # students — the accepted-dorm-type fix only tightens enforcement for
+    # אנייר-marked students, it must not affect anyone else.
+    # ------------------------------------------------------------------
+
+    def test_generic_priority_non_anier_student_still_bypasses_accepted_dorm_type(self):
+        """A non-ANIR priority student may still be placed outside their
+        imported accepted_dorm_type — this pre-existing, unrelated
+        behavior must be untouched by the ANIR accepted-dorm-type fix."""
+        other_room = self._make_room(self.other_upper_building, "1", bed_count=2)
+
+        student = self._make_student(
+            "GEN_PRI1", priority=True, anier=False,
+            accepted_dorm_type=self.hasmaha_dorm_type,
+        )
+
+        result = self._run([student], [other_room])
+        self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
         self.assertEqual(
-            by_building[student_1.id], by_building[student_2.id],
-            "Non-exclusive priority students should be clustered into the same building.",
+            self._assigned_building_number(result, student),
+            self.other_upper_building.number,
         )
 
-    # ------------------------------------------------------------------
-    # 10. When one building lacks capacity, priority students spread across
-    #     buildings and the solver still maximizes total assignments.
-    # ------------------------------------------------------------------
+    def test_non_priority_non_anier_student_respects_accepted_dorm_type(self):
+        """An ordinary non-priority, non-ANIR student is only assignable
+        within their imported accepted_dorm_type — unrelated to, and
+        unaffected by, the ANIR accepted-dorm-type fix."""
+        room179 = self._make_room(self.building_179, "1", bed_count=2)
+        other_room = self._make_room(self.other_upper_building, "1", bed_count=2)
 
-    def test_priority_students_spread_when_capacity_forces_it(self):
-        """3 non-exclusive priority students but only 1 free bed in building
-        101 and 2 in building 102: all 3 must still be assigned, spread
-        across both buildings — clustering never reduces total assignment."""
-        room101 = self._make_room(self.building_101, "1", bed_count=1)
-        room102 = self._make_room(self.building_102, "1", bed_count=2)
+        student = self._make_student(
+            "GEN_STRICT1", priority=False, anier=False,
+            accepted_dorm_type=self.other_upper_dorm_type,
+        )
 
-        students = [self._make_student(f"SP{i}", priority=True) for i in range(1, 4)]
-
-        result = self._run(students, [room101, room102])
-        self.assertEqual(result["successful_assignments"], 3, result["proposed_assignments"])
-
-        by_building, _, by_building_map = self._assignment_maps(result)
-        buildings_used = set(by_building.values())
+        result = self._run([student], [room179, other_room])
+        self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
         self.assertEqual(
-            buildings_used,
-            {self.building_101.id, self.building_102.id},
-            "Capacity shortage should force use of both buildings.",
+            self._assigned_building_number(result, student),
+            self.other_upper_building.number,
         )
 
     # ------------------------------------------------------------------
-    # 11. Priority grouping never overrides gender/housing compatibility.
+    # 6/8. Case B: an ANIR student whose accepted dorm type is not code 15
+    #      stays in that dorm type — never redirected to 179, and the אנייר
+    #      marker never waives accepted-dorm-type enforcement by itself.
     # ------------------------------------------------------------------
 
-    def test_priority_clustering_never_overrides_gender(self):
-        """A female and a male non-exclusive priority student cannot be
-        clustered into the same apartment/building when only gender-
-        appropriate apartments exist for each of them."""
-        room101_female = self._make_room(
-            self.building_101, "1", category=Apartment.Category.FEMALE, bed_count=2,
-        )
-        room102_male = self._make_room(
-            self.building_102, "1", category=Apartment.Category.MALE, bed_count=2,
+    def test_anier_student_in_other_upper_region_dorm_type_stays_in_accepted_dorm_type(self):
+        """An ANIR-marked student accepted into a DIFFERENT dorm type
+        (still inside גוש עליון, the same region as כפר הסמכה) must be
+        assigned within that accepted dorm type, never redirected to
+        Building 179."""
+        room179 = self._make_room(self.building_179, "1", bed_count=2)
+        other_room = self._make_room(self.other_upper_building, "1", bed_count=2)
+
+        student = self._make_student(
+            "B1", anier=True, accepted_dorm_type=self.other_upper_dorm_type,
         )
 
-        female_student = self._make_student("GF1", gender=Student.Gender.FEMALE, priority=True)
-        male_student = self._make_student("GM1", gender=Student.Gender.MALE, priority=True)
-
-        result = self._run(
-            [female_student, male_student],
-            [room101_female, room102_male],
+        result = self._run([student], [room179, other_room])
+        self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
+        self.assertEqual(
+            self._assigned_building_number(result, student),
+            self.other_upper_building.number,
         )
-        self.assertEqual(result["successful_assignments"], 2, result["proposed_assignments"])
 
-        by_building, _, _ = self._assignment_maps(result)
-        self.assertEqual(by_building[female_student.id], self.building_101.id)
-        self.assertEqual(by_building[male_student.id], self.building_102.id)
+    def test_anier_student_not_allowed_to_cross_accepted_dorm_types_merely_because_of_marker(self):
+        """Confirms the accepted-dorm-type fix directly: the אנייר marker
+        by itself must not waive accepted_dorm_type enforcement. A non-
+        priority ANIR student accepted into the OTHER dorm type, with only
+        a Building-179 bed available, must remain unassigned rather than
+        being admitted into Building 179."""
+        room179 = self._make_room(self.building_179, "1", bed_count=2)
+
+        student = self._make_student(
+            "B2", priority=False, anier=True, accepted_dorm_type=self.other_upper_dorm_type,
+        )
+
+        result = self._run([student], [room179])
+        self.assertEqual(result["successful_assignments"], 0, result["proposed_assignments"])
+        self.assertIn(student.id, result["students_with_no_feasible_beds"])
+
+    def test_anier_priority_student_not_allowed_to_cross_accepted_dorm_types_merely_because_of_marker(self):
+        """Same as above, but with is_priority=True — the exact
+        combination that reproduced the production regression (run 113):
+        an ANIR student accepted into a different dorm type, who also
+        carries is_priority=True, must still be confined to their own
+        accepted dorm type. A compatible bed in Building 179 AND a
+        compatible bed in a third, unrelated dorm type are both available;
+        neither may be used — only their own accepted dorm type."""
+        room179 = self._make_room(self.building_179, "1", bed_count=2)
+        third_dorm_type = DormType.objects.create(
+            name="ThirdUnrelatedDorm", region=self.upper_region,
+        )
+        third_building = Building.objects.create(number=301, dorm_type=third_dorm_type)
+        third_room = self._make_room(third_building, "1", bed_count=2)
+        own_room = self._make_room(self.other_upper_building, "1", bed_count=2)
+
+        student = self._make_student(
+            "B2_PRI", priority=True, anier=True, accepted_dorm_type=self.other_upper_dorm_type,
+        )
+
+        result = self._run([student], [room179, third_room, own_room])
+        self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
+        self.assertEqual(
+            self._assigned_building_number(result, student),
+            self.other_upper_building.number,
+            "A priority ANIR student accepted into a different dorm type "
+            "must stay confined to that accepted dorm type, never "
+            "Building 179 and never a third unrelated dorm type.",
+        )
 
     # ------------------------------------------------------------------
-    # 12. Priority grouping never overrides the hard religious rule.
+    # 7. Case C: an ANIR student in another region (no כפר הסמכה inventory
+    #    in this run at all) is assigned normally, without needing a
+    #    dedicated ANIR building.
     # ------------------------------------------------------------------
 
-    def test_priority_clustering_never_overrides_religion(self):
-        """A Religious Jewish and a Religious Muslim non-exclusive priority
-        student cannot share the one apartment in building 101 (hard
-        ReligiousTogether); the solver must still assign both, splitting
-        them across buildings instead of clustering them together."""
-        room101 = self._make_room(self.building_101, "1", bed_count=2)
-        room102 = self._make_room(self.building_102, "1", bed_count=2)
+    def test_anier_student_in_other_region_can_be_assigned_without_dedicated_building(self):
+        """An ANIR-marked student accepted into a dorm type in an entirely
+        different region (no כפר הסמכה inventory anywhere in this run) must
+        still be assigned normally, as an ordinary priority student — a
+        dedicated ANIR building is not required outside גוש עליון."""
+        ordinary_dorm_type = DormType.objects.create(
+            name="OtherRegionOrdinary", region=self.other_region,
+        )
+        ordinary_building = Building.objects.create(number=301, dorm_type=ordinary_dorm_type)
+        other_room = self._make_room(ordinary_building, "1", bed_count=2)
+
+        student = self._make_student(
+            "C1", anier=True, priority=True, accepted_dorm_type=ordinary_dorm_type,
+        )
+
+        result = self._run([student], [other_room])
+        self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
+        self.assertEqual(self._assigned_building_number(result, student), 301)
+
+    def test_building_179_in_other_region_is_not_exclusive(self):
+        """A building numbered 179 belonging to an unrelated (non-Hasmaha)
+        dorm type behaves like any ordinary building — an ordinary student
+        may freely enter it."""
+        other_room179 = self._make_room(self.other_region_building_179, "1", bed_count=2)
+        student = self._make_student("SCOPE1", priority=False)
+
+        result = self._run([student], [other_room179])
+        self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
+
+    # ------------------------------------------------------------------
+    # 9/10/11. Hard constraints always override the Building-179 preference.
+    # ------------------------------------------------------------------
+
+    def test_building_179_preference_never_overrides_gender(self):
+        room179_male = self._make_room(
+            self.building_179, "1", category=Apartment.Category.MALE, bed_count=2,
+        )
+        female_student = self._make_student(
+            "G1", gender=Student.Gender.FEMALE, anier=True,
+            accepted_dorm_type=self.hasmaha_dorm_type,
+        )
+
+        result = self._run([female_student], [room179_male])
+        self.assertEqual(result["successful_assignments"], 0, result["proposed_assignments"])
+
+    def test_building_179_preference_never_overrides_religion(self):
+        """A Religious Jewish and a Religious Muslim eligible Hasmaha ANIR
+        student cannot share the one Building-179 apartment under hard
+        ReligiousTogether; both must still be assigned, split across
+        Building 179 and the overflow building instead."""
+        room179 = self._make_room(self.building_179, "1", bed_count=2)
+        room176 = self._make_room(self.building_176, "1", bed_count=2)
 
         rj_student = self._make_student(
-            "RELJ", priority=True,
+            "RJ1", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
             religion=Student.Religion.Jewish, religious=Student.Religious.RELIGIOUS,
         )
         muslim_student = self._make_student(
-            "RELM", priority=True,
+            "RM1", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
             religion=Student.Religion.Muslim, religious=Student.Religious.RELIGIOUS,
         )
 
-        result = self._run([rj_student, muslim_student], [room101, room102])
+        result = self._run([rj_student, muslim_student], [room179, room176])
         self.assertEqual(result["successful_assignments"], 2, result["proposed_assignments"])
-
-        _, student_to_apartment, _ = self._assignment_maps(result)
         self.assertNotEqual(
-            student_to_apartment[rj_student.id],
-            student_to_apartment[muslim_student.id],
-            "Incompatible religious students must not share an apartment "
-            "even though clustering would prefer it.",
+            self._assigned_building_number(result, rj_student),
+            self._assigned_building_number(result, muslim_student),
         )
 
-    # ------------------------------------------------------------------
-    # 13. A hard mutual roommate request cannot force an exclusive-group
-    #     student out of 179, or a non-exclusive student into 179.
-    # ------------------------------------------------------------------
-
-    def test_mutual_roommate_request_cannot_breach_building_179_policy(self):
-        """An exclusive-group student in building 179 and a non-exclusive
-        priority student request each other as mutual positive roommates.
-        Since they can never share an apartment (their candidate apartments
-        never overlap), the solver may leave one or both unassigned, but it
-        must never move the exclusive student out of 179 or let the
-        non-exclusive student into 179."""
-        room179 = self._make_room(self.building_179, "1", bed_count=2)
-        room101 = self._make_room(self.building_101, "1", bed_count=2)
-
-        exclusive_student = self._make_student(
-            "MR_EX", priority=True, hasmaha=True, anier=True,
+    def test_building_179_preference_never_overrides_housing_type(self):
+        """An eligible Hasmaha ANIR COUPLE-housing student cannot be forced
+        into a SINGLE-only Building-179 apartment; with no compatible
+        apartment type available anywhere, they remain unassigned rather
+        than being placed incompatibly."""
+        room179_single = self._make_room(
+            self.building_179, "1",
+            category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE,
+            bed_count=2,
         )
-        non_exclusive_student = self._make_student(
-            "MR_NE", priority=True,
-        )
-        self._make_mutual_positive_roommate_pair(exclusive_student, non_exclusive_student)
-
-        result = self._run(
-            [exclusive_student, non_exclusive_student],
-            [room179, room101],
+        couple_student = self._make_student(
+            "HT1", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+            housing_type=Student.HousingType.COUPLE,
         )
 
-        by_building, _, _ = self._assignment_maps(result)
-
-        if exclusive_student.id in by_building:
-            self.assertEqual(by_building[exclusive_student.id], self.building_179.id)
-        if non_exclusive_student.id in by_building:
-            self.assertNotEqual(by_building[non_exclusive_student.id], self.building_179.id)
+        result = self._run([couple_student], [room179_single])
+        self.assertEqual(result["successful_assignments"], 0, result["proposed_assignments"])
 
     # ------------------------------------------------------------------
-    # 14. Existing active assignments in building 179 are not deleted or
-    #     modified.
+    # 12/13. Couples/families use the correct apartment type within
+    #        Hasmaha inventory (Excel-confirmed: Building 179 spans both
+    #        "רווקים/רווקות" and "זוגות" sections).
     # ------------------------------------------------------------------
 
-    def test_existing_building_179_assignment_untouched_and_warned(self):
-        """An existing occupant of building 179 who does NOT belong to the
-        exclusive group keeps their active assignment unchanged, and the
-        solver surfaces a clear diagnostic warning instead of silently
-        producing a misleading allocation."""
+    def test_couples_anier_student_uses_appropriate_couples_apartment(self):
+        room179_couple = self._make_room(
+            self.building_179, "1",
+            category=Apartment.Category.MIXED,
+            apartment_type=Apartment.ApartmentType.COUPLE,
+            bed_count=2,
+        )
+        couple_student = self._make_student(
+            "CP1", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+            housing_type=Student.HousingType.COUPLE,
+        )
+
+        result = self._run([couple_student], [room179_couple])
+        self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
+        self.assertEqual(self._assigned_building_number(result, couple_student), 179)
+
+    def test_family_anier_student_uses_appropriate_family_apartment(self):
+        room176_family = self._make_room(
+            self.building_176, "1",
+            category=Apartment.Category.MIXED,
+            apartment_type=Apartment.ApartmentType.FAMILY,
+            bed_count=3,
+        )
+        family_student = self._make_student(
+            "FM1", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+            housing_type=Student.HousingType.FAMILY,
+        )
+
+        result = self._run([family_student], [room176_family])
+        self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
+        self.assertEqual(self._assigned_building_number(result, family_student), 176)
+
+    # ------------------------------------------------------------------
+    # 14. Inactive Building-179 inventory is never counted as usable
+    #     capacity — the student must overflow instead.
+    # ------------------------------------------------------------------
+
+    def test_inactive_179_inventory_not_counted(self):
+        inactive_room179 = self._make_room(
+            self.building_179, "1", bed_count=2, is_active=False,
+        )
+        active_room176 = self._make_room(self.building_176, "1", bed_count=2)
+
+        student = self._make_student(
+            "IA1", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+        )
+
+        result = self._run([student], [inactive_room179, active_room176])
+        self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
+        self.assertEqual(self._assigned_building_number(result, student), 176)
+
+    # ------------------------------------------------------------------
+    # 15. Existing occupants of Building 179 are never modified.
+    # ------------------------------------------------------------------
+
+    def test_existing_occupants_of_179_remain_untouched(self):
         room179 = self._make_room(self.building_179, "1", bed_count=2)
 
         legacy_occupant = self._make_student("LEGACY1", priority=False)
         legacy_bed = room179.beds.first()
         BedAssignment.objects.create(
-            student=legacy_occupant,
-            bed=legacy_bed,
+            student=legacy_occupant, bed=legacy_bed,
             status=BedAssignment.Status.ACTIVE,
             assignment_type=BedAssignment.AssignmentType.MANUAL,
         )
 
         other_student = self._make_student("OTHER1", priority=False)
-        room101 = self._make_room(self.building_101, "1", bed_count=2)
+        room176 = self._make_room(self.building_176, "1", bed_count=2)
 
-        result = self._run([other_student], [room179, room101])
+        result = self._run([other_student], [room179, room176])
 
         legacy_assignment = BedAssignment.objects.get(student=legacy_occupant)
         self.assertEqual(legacy_assignment.status, BedAssignment.Status.ACTIVE)
         self.assertEqual(legacy_assignment.bed_id, legacy_bed.id)
 
         self.assertTrue(
-            any("179" in warning and "exclusive group" in warning for warning in result["warnings"]),
+            any(
+                "179" in warning and "eligible Hasmaha ANIR" in warning
+                for warning in result["warnings"]
+            ),
             f"Expected a building-179 existing-occupant warning, got: {result['warnings']}",
         )
 
     # ------------------------------------------------------------------
-    # 15. A building numbered 179 in another region is not accidentally
-    #     treated as the Upper Office's exclusive building.
+    # 16. Persistence records the actual overflow destination correctly.
     # ------------------------------------------------------------------
 
-    def test_building_179_in_other_region_is_not_exclusive(self):
-        """Building 179 belonging to a different (non-Upper-Office) region
-        behaves like an ordinary building: an otherwise-non-priority
-        student can freely enter it."""
-        other_room179 = self._make_room(self.other_building_179, "1", bed_count=2)
-        student = self._make_student("SCOPE1", priority=False)
+    def test_persistence_records_actual_overflow_destination(self):
+        room179 = self._make_room(self.building_179, "1", bed_count=1)
+        room176 = self._make_room(self.building_176, "1", bed_count=1)
 
-        result = self._run([student], [other_room179])
-        self.assertEqual(result["successful_assignments"], 1, result["proposed_assignments"])
-        _, student_to_apartment, _ = self._assignment_maps(result)
-        self.assertEqual(student_to_apartment[student.id], other_room179.apartment.id)
+        existing_occupant = self._make_student(
+            "P_EXIST", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+        )
+        BedAssignment.objects.create(
+            student=existing_occupant, bed=room179.beds.first(),
+            status=BedAssignment.Status.ACTIVE,
+            assignment_type=BedAssignment.AssignmentType.MANUAL,
+        )
+
+        student = self._make_student(
+            "P1", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+        )
+
+        result = self._run([student], [room179, room176])
+        self.assertTrue(result["solution_persisted"])
+
+        persisted = BedAssignment.objects.get(student=student, status=BedAssignment.Status.ACTIVE)
+        self.assertEqual(persisted.bed.room.apartment.building.number, 176)
+
+        student.refresh_from_db()
+        self.assertEqual(student.assigned_room_id, persisted.bed.room_id)
 
     # ------------------------------------------------------------------
-    # 16. Mixed end-to-end scenario.
+    # Diagnostics: reflect the new eligibility/overflow/unassigned counts.
     # ------------------------------------------------------------------
 
-    def test_mixed_scenario_ordinary_priority_and_exclusive_students(self):
-        """
-        End-to-end scenario mixing ordinary students, non-exclusive priority
-        students and exclusive building-179 students. Verifies:
-          - every exclusive student is either in building 179 or unassigned;
-          - every new occupant of building 179 belongs to the exclusive group;
-          - no non-exclusive priority student is in building 179;
-          - ordinary students still follow accepted_dorm_type;
-          - all apartment capacities and hard constraints remain valid.
-        """
-        room179 = self._make_room(self.building_179, "1", bed_count=2)
-        room101 = self._make_room(self.building_101, "1", bed_count=2)
-        room102 = self._make_room(self.building_102, "1", bed_count=2)
+    def test_anier_building_179_diagnostics_report_overflow_and_unassigned(self):
+        room179 = self._make_room(self.building_179, "1", bed_count=1)
+        room176 = self._make_room(self.building_176, "1", bed_count=1)
 
-        exclusive_students = [
-            self._make_student(f"MIX_EX{i}", priority=True, hasmaha=True, anier=True)
-            for i in range(1, 3)
-        ]
-        non_exclusive_priority_students = [
-            self._make_student(f"MIX_PR{i}", priority=True)
-            for i in range(1, 3)
-        ]
-        ordinary_students = [
-            self._make_student(
-                f"MIX_ORD{i}", priority=False, accepted_dorm_type=self.dorm_type_b,
-            )
-            for i in range(1, 2)
-        ]
+        overflowed = self._make_student(
+            "DIAG_OVER", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+        )
+        in_179 = self._make_student(
+            "DIAG_179", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+        )
+        unplaceable = self._make_student(
+            "DIAG_UNPLACED", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+            gender=Student.Gender.MALE,
+        )
+        not_hasmaha_accepted = self._make_student(
+            "DIAG_NOTHASMAHA", anier=True, accepted_dorm_type=self.other_upper_dorm_type,
+        )
 
-        students = exclusive_students + non_exclusive_priority_students + ordinary_students
-        result = self._run(students, [room179, room101, room102])
+        result = self._run(
+            [overflowed, in_179, unplaceable, not_hasmaha_accepted], [room179, room176],
+        )
 
-        student_to_building, student_to_apartment, by_building = self._assignment_maps(result)
+        diagnostics = result["anier_building_179_diagnostics"]
+        self.assertEqual(diagnostics["imported_anier_students"], 4)
+        self.assertEqual(diagnostics["eligible_hasmaha_anier_students"], 3)
+        self.assertTrue(diagnostics["reserved_building_found"])
+        self.assertEqual(diagnostics["assigned_to_building_179"], 1)
+        self.assertEqual(diagnostics["assigned_via_overflow_in_dorm_type"], 1)
+        self.assertEqual(diagnostics["unassigned_eligible_hasmaha_anier"], 1)
+        # Defensive counter: must be 0 for a valid run — see
+        # test_anier_building_179_diagnostics_never_counts_cross_dorm_type_leak_as_overflow
+        # for the case that specifically stresses this counter with a
+        # tempting unrelated-dorm-type bed present.
+        self.assertEqual(diagnostics["assigned_outside_hasmaha_dorm_type"], 0)
+        self.assertFalse(
+            any("assigned outside DormType 15" in warning for warning in result["warnings"]),
+        )
 
-        for student in exclusive_students:
-            if student.id in student_to_building:
-                self.assertEqual(student_to_building[student.id], self.building_179.id)
+    def test_anier_building_179_diagnostics_never_counts_cross_dorm_type_leak_as_overflow(self):
+        """Regression coverage for the diagnostics-side half of the run-113
+        bug: an eligible Hasmaha ANIR student who is also is_priority, with
+        a tempting compatible bed available in an unrelated dorm type
+        alongside genuine DormType-15 overflow capacity, must be counted
+        under assigned_via_overflow_in_dorm_type (not
+        assigned_outside_hasmaha_dorm_type) precisely because the
+        accepted-dorm-type fix keeps them out of the unrelated dorm type
+        in the first place — the defensive counter stays at 0."""
+        room179 = self._make_room(self.building_179, "1", bed_count=1)
+        room176 = self._make_room(self.building_176, "1", bed_count=1)
+        unrelated_room = self._make_room(self.other_upper_building, "1", bed_count=1)
 
-        for student_id in by_building.get(self.building_179.id, []):
-            occupant = Student.objects.get(id=student_id)
-            self.assertTrue(
-                occupant.is_priority and "הסמכה" in occupant.special_status_1
-                and "אנייר" in occupant.special_status_2,
-                f"Non-exclusive student {occupant.student_id} found in building 179.",
-            )
+        existing_occupant = self._make_student(
+            "DIAG_LEAK_EXIST", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+        )
+        BedAssignment.objects.create(
+            student=existing_occupant, bed=room179.beds.first(),
+            status=BedAssignment.Status.ACTIVE,
+            assignment_type=BedAssignment.AssignmentType.MANUAL,
+        )
 
-        for student in non_exclusive_priority_students:
-            if student.id in student_to_building:
-                self.assertNotEqual(student_to_building[student.id], self.building_179.id)
+        student = self._make_student(
+            "DIAG_LEAK1", anier=True, priority=True, accepted_dorm_type=self.hasmaha_dorm_type,
+        )
 
-        for student in ordinary_students:
-            if student.id in student_to_apartment:
-                self.assertEqual(student_to_apartment[student.id], room102.apartment.id)
+        result = self._run([student], [room179, room176, unrelated_room])
+
+        diagnostics = result["anier_building_179_diagnostics"]
+        self.assertEqual(diagnostics["assigned_via_overflow_in_dorm_type"], 1)
+        self.assertEqual(diagnostics["assigned_outside_hasmaha_dorm_type"], 0)
+        self.assertEqual(
+            self._assigned_building_number(result, student), self.building_176.number,
+        )
+
+    def test_anier_building_179_diagnostics_when_building_missing(self):
+        """When Building 179 itself is not part of this run's inventory
+        (e.g. room data not yet imported for it), diagnostics must report
+        reserved_building_found=False, and the eligible student must still
+        be actually assigned normally within their accepted dorm type —
+        not merely silently excluded."""
+        room176 = self._make_room(self.building_176, "1", bed_count=1)
+
+        eligible_anier = self._make_student(
+            "DIAG_MISSING1", anier=True, accepted_dorm_type=self.hasmaha_dorm_type,
+        )
+
+        # Deliberately omit any Building-179 room from this run's inventory.
+        result = self._run([eligible_anier], [room176])
+
+        diagnostics = result["anier_building_179_diagnostics"]
+        self.assertEqual(diagnostics["eligible_hasmaha_anier_students"], 1)
+        self.assertFalse(diagnostics["reserved_building_found"])
+        self.assertEqual(diagnostics["reserved_building_available_beds"], 0)
+
+        assigned_ids = {item["student_db_id"] for item in result["proposed_assignments"]}
+        self.assertIn(eligible_anier.id, assigned_ids)
+        self.assertEqual(self._assigned_building_number(result, eligible_anier), 176)
+
+
+# ---------------------------------------------------------------------------
+# Manual staff override of the Building-179 automatic-allocation policy.
+#
+# Confirmed business rule: the ANIR/Building-179 preference is an
+# automatic-allocation rule only. Authorized staff may still manually
+# assign any student into Building 179, or move an eligible ANIR student
+# out of it, via the ordinary manual assignment endpoints. These endpoints
+# (assign_student_room / move_student_room, backed by
+# validate_apartment_assignment) deliberately never call
+# _may_use_building_179_automatically or any other ANIR-specific helper —
+# these tests are a positive-path regression guard against a future,
+# incorrect hard block being added there.
+# ---------------------------------------------------------------------------
+
+class ManualBuilding179OverrideTest(TestCase):
+    def setUp(self):
+        self.region = _make_region("ManualOverrideRegion")
+        self.admin = _make_central_admin()
+        self.dorm_type = DormType.objects.create(
+            name="כפר הסמכה", code=15, region=self.region,
+        )
+        self.building_179 = Building.objects.create(number=179, dorm_type=self.dorm_type)
+
+        self.apartment = Apartment.objects.create(
+            building=self.building_179, number="1",
+            category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE,
+            room_count=1,
+        )
+        self.room = Room.objects.create(apartment=self.apartment, name="A", capacity=2)
+        self.bed_1 = Bed.objects.create(room=self.room, label="1")
+        self.bed_2 = Bed.objects.create(room=self.room, label="2")
+
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def test_staff_can_manually_assign_non_anier_student_into_building_179(self):
+        """A non-ANIR student may be manually assigned into Building 179 —
+        the manual endpoint must not enforce the automatic-allocation-only
+        ANIR eligibility rule."""
+        student = Student.objects.create(
+            student_id="MANUAL_NONANIER1", first_name="T", last_name="S",
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            accepted_dorm_type=self.dorm_type,
+        )
+
+        response = self.client.post(
+            "/api/room-assignments/assign/",
+            {"student_id": student.id, "room_id": self.room.id},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+
+        student.refresh_from_db()
+        self.assertEqual(student.assigned_room_id, self.room.id)
+
+    def test_staff_can_manually_move_eligible_anier_student_out_of_building_179(self):
+        """An eligible Hasmaha ANIR student already in Building 179 may be
+        manually moved to an ordinary building — the manual endpoint must
+        not lock them into 179."""
+        anier_student = Student.objects.create(
+            student_id="MANUAL_ANIER1", first_name="T", last_name="S",
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            accepted_dorm_type=self.dorm_type, special_status_1="אנייר",
+        )
+        BedAssignment.objects.create(
+            student=anier_student, bed=self.bed_1,
+            status=BedAssignment.Status.ACTIVE,
+            assignment_type=BedAssignment.AssignmentType.MANUAL,
+        )
+        anier_student.assigned_room = self.room
+        anier_student.save(update_fields=["assigned_room"])
+
+        other_building = Building.objects.create(number=176, dorm_type=self.dorm_type)
+        other_apartment = Apartment.objects.create(
+            building=other_building, number="1",
+            category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE,
+            room_count=1,
+        )
+        other_room = Room.objects.create(apartment=other_apartment, name="A", capacity=1)
+        Bed.objects.create(room=other_room, label="1")
+
+        response = self.client.post(
+            "/api/room-assignments/move/",
+            {"student_id": anier_student.id, "room_id": other_room.id},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+
+        anier_student.refresh_from_db()
+        self.assertEqual(anier_student.assigned_room_id, other_room.id)
+
+        old_assignment = BedAssignment.objects.get(student=anier_student, bed=self.bed_1)
+        self.assertEqual(old_assignment.status, BedAssignment.Status.ENDED)
 
 
 # ---------------------------------------------------------------------------
@@ -5010,34 +5212,84 @@ class AccessibilityAllocationExclusionTest(TestCase):
         self.assertTrue(ordinary.is_assigned)
         self.assertFalse(accessible.is_assigned)
 
+    # ------------------------------------------------------------------
+    # 4. A student who is both eligible-ANIR/priority AND accessibility-
+    #    flagged: accessibility exclusion wins for automatic allocation,
+    #    while ANIR/priority metadata remains fully intact. Accessibility
+    #    and priority/ANIR status are independent fields — exclusion from
+    #    the solver is a read-time queryset filter, never a data mutation.
+    # ------------------------------------------------------------------
+
+    def test_anier_priority_accessibility_student_excluded_but_metadata_preserved(self):
+        """A student who carries the אנייר marker (is_priority=True as a
+        side effect) AND accessibility_flag=True must never be sent to the
+        automatic solver — accessibility exclusion wins — but is_priority,
+        priority_reason, the אנייר special_status marker, and the
+        accessibility fields themselves must all remain stored and
+        readable afterward. Exclusion is a queryset filter, never a data
+        mutation."""
+        region = _make_region('AnierAccessRegion')
+        boss = _make_region_boss(region)
+        dorm_type = DormType.objects.create(name='כפר הסמכה', code=15, region=region)
+        building = Building.objects.create(number=179, dorm_type=dorm_type)
+        apartment = Apartment.objects.create(
+            building=building, number='1', category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
+        )
+        room = Room.objects.create(apartment=apartment, name='A', capacity=1)
+        Bed.objects.create(room=room, label='1')
+
+        student = Student.objects.create(
+            student_id='ANIER_ACC1', first_name='Anier', last_name='Accessible',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            accepted_dorm_type=dorm_type,
+            is_priority=True, special_status_1='אנייר', priority_reason='אנייר',
+            accessibility_flag=True, disability_percent=50, medical_reason='test reason',
+        )
+
+        patcher = patch('allocation.solver.close_old_connections')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.post('/api/allocation/run/', {'region': region.id}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+
+        student.refresh_from_db()
+        # Excluded from automatic allocation despite an available, otherwise
+        # fully-compatible Building-179 bed.
+        self.assertFalse(student.is_assigned)
+        # ANIR/priority/accessibility metadata all remain intact — exclusion
+        # never clears or rewrites any of it.
+        self.assertTrue(student.is_priority)
+        self.assertEqual(student.priority_reason, 'אנייר')
+        self.assertEqual(student.special_status_1, 'אנייר')
+        self.assertTrue(student.accessibility_flag)
+        self.assertEqual(student.disability_percent, 50)
+        self.assertEqual(student.medical_reason, 'test reason')
+
 
 # ---------------------------------------------------------------------------
-# Anir (אנייר) reserved-building policy: upload mapping + solver detection.
+# Anir (אנייר) upload/import mapping: the Excel column that sets the marker.
+#
+# Solver-side eligibility/Building-179 behavior for this marker is covered
+# separately by Building179AutomaticAllocationTest, which uses the
+# confirmed-correct DormType.code == 15 (כפר הסמכה) mapping. This class
+# previously also contained solver-eligibility tests built on
+# DormType.code == 11 — code 11 is confirmed to be עליון עמים, a real,
+# different dorm type unrelated to this policy, so those tests modeled an
+# impossible configuration and have been removed rather than fixed in
+# place; Building179AutomaticAllocationTest is their authoritative
+# replacement.
 # ---------------------------------------------------------------------------
-class AnierBuildingMappingTest(TestCase):
+class AnierImportMappingTest(TestCase):
     """
-    Root cause of the reserved Anir (building 179) building receiving zero
-    students — two independent defects, both required to be fixed:
-
-    1. Upload mapping: the main upload's Excel column '9108-אנייר' (an 'X'
-       flag) was never read anywhere — COLUMN_ALIASES had no entry for it,
-       so no student ever got the 'אנייר' marker recorded in
-       special_status_1..4, and _has_anier_special_status was always False
-       for everyone. Fixed by adding the 'anier_flag' alias and injecting
-       the marker via inject_special_status_marker in
-       build_student_payload_from_row — shared by both
-       /api/upload/excel/ and /api/upload/additions-excel/ (both call this
-       same function, so one fix covers both flows).
-
-    2. Solver region detection: allocation.solver._is_upper_dorm_office_region
-       only recognized the allocation Region's own name/id. Confirmed by
-       inspection: in production, the Region itself carries no such
-       marker — only a DormType named 'עליון עמים' (code 11) does, and
-       building 179 (confirmed correct) sits under that DormType. So even
-       a correctly-flagged, eligible Anir student could never be
-       recognized as an exclusive-group member. Fixed by
-       allocation.solver._is_upper_dorm_office_dorm_type (DormType.code==11),
-       used together with (not instead of) the region-name fallback.
+    Upload mapping: the main upload's Excel column '9108-אנייר' (an 'X'
+    flag) must be read and normalized into special_status_1..4 via
+    inject_special_status_marker in build_student_payload_from_row —
+    shared by both /api/upload/excel/ and /api/upload/additions-excel/
+    (both call this same function, so one fix covers both flows).
     """
 
     def _make_row(self, **overrides):
@@ -5179,367 +5431,6 @@ class AnierBuildingMappingTest(TestCase):
             student.special_status_3, student.special_status_4,
         ])
 
-    # ------------------------------------------------------------------
-    # 3. Solver: DormType.code==11 recognition (the real production
-    #    signal), independent of the Region's own name/id.
-    # ------------------------------------------------------------------
-
-    UPPER_OFFICE_CONFIG = {
-        'sameGender': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
-        'priorityFirst': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
-        'roommatePositiveOnly': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
-        'ReligiousTogether': {'enabled': False},
-    }
-
-    def _make_upper_office_building_179(self, region_id, region_name, dorm_name, beds=1):
-        """
-        The Region deliberately carries NO 'Upper Dorm Office' marker of
-        its own (generic id/name) — only the DormType (code=11) does,
-        matching confirmed production data (building 179 is confirmed
-        correct; the Region itself is generic).
-        """
-        region = Region.objects.create(id=region_id, name=region_name)
-        dorm_type = DormType.objects.create(name=dorm_name, code=11, region=region)
-        building = Building.objects.create(number=179, dorm_type=dorm_type)
-        apartment = Apartment.objects.create(
-            building=building, number='1', category=Apartment.Category.FEMALE,
-            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
-        )
-        room = Room.objects.create(apartment=apartment, name='A', capacity=beds)
-        for index in range(beds):
-            Bed.objects.create(room=room, label=str(index + 1))
-        return region, dorm_type, building, apartment, room
-
-    def _make_eligible_anier(self, student_id):
-        return Student.objects.create(
-            student_id=student_id, first_name='T', last_name='S',
-            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
-            is_priority=True, special_status_1='הסמכה', special_status_2='אנייר',
-        )
-
-    def _patch_close_old_connections(self):
-        patcher = patch('allocation.solver.close_old_connections')
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    # ------------------------------------------------------------------
-    # 3a. An eligible Anir student CAN enter building 179.
-    # ------------------------------------------------------------------
-
-    def test_eligible_anier_student_can_enter_building_179(self):
-        """An eligible Anir student (is_priority + הסמכה + אנייר) is
-        recognized purely via DormType.code==11 — the Region carries no
-        marker of its own — and is assigned into building 179."""
-        from allocation.solver import run_improved_ortools_allocation
-
-        _, _, _, _, room = self._make_upper_office_building_179(
-            'anier_region_a', 'Region A', 'עליון עמים A', beds=1,
-        )
-        eligible_anier = self._make_eligible_anier('ANIER_OK1')
-
-        self._patch_close_old_connections()
-        result = run_improved_ortools_allocation([eligible_anier], [room], self.UPPER_OFFICE_CONFIG)
-
-        assigned_ids = {item['student_db_id'] for item in result['proposed_assignments']}
-        self.assertIn(eligible_anier.id, assigned_ids)
-
-    # ------------------------------------------------------------------
-    # 3b. A non-Anir student can NEVER enter building 179.
-    # ------------------------------------------------------------------
-
-    def test_non_anier_student_never_enters_building_179(self):
-        """An ordinary student — even one flagged priority — must never
-        be assigned into building 179 when they are not the exclusive
-        Anir group (missing הסמכה/אנייר)."""
-        from allocation.solver import run_improved_ortools_allocation
-
-        _, _, _, _, room = self._make_upper_office_building_179(
-            'anier_region_b', 'Region B', 'עליון עמים B', beds=1,
-        )
-        ordinary_priority = Student.objects.create(
-            student_id='ANIER_REJ1', first_name='T', last_name='S',
-            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
-            is_priority=True,
-        )
-
-        self._patch_close_old_connections()
-        result = run_improved_ortools_allocation([ordinary_priority], [room], self.UPPER_OFFICE_CONFIG)
-
-        assigned_ids = {item['student_db_id'] for item in result['proposed_assignments']}
-        self.assertNotIn(ordinary_priority.id, assigned_ids)
-        self.assertIn(ordinary_priority.id, result['students_with_no_feasible_beds'])
-
-    # ------------------------------------------------------------------
-    # 3c. Building 179 may remain partially empty.
-    # ------------------------------------------------------------------
-
-    def test_building_179_may_remain_partially_empty(self):
-        """Building 179 has capacity for 3, but only 1 eligible Anir
-        student exists. The other 2 beds must remain empty — an ordinary
-        student must never be backfilled into them."""
-        from allocation.solver import run_improved_ortools_allocation
-
-        _, _, _, _, room = self._make_upper_office_building_179(
-            'anier_region_c', 'Region C', 'עליון עמים C', beds=3,
-        )
-        eligible_anier = self._make_eligible_anier('ANIER_PARTIAL1')
-        ordinary = Student.objects.create(
-            student_id='ANIER_PARTIAL_ORD1', first_name='T', last_name='S',
-            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
-        )
-
-        self._patch_close_old_connections()
-        result = run_improved_ortools_allocation(
-            [eligible_anier, ordinary], [room], self.UPPER_OFFICE_CONFIG,
-        )
-
-        assigned_ids = {item['student_db_id'] for item in result['proposed_assignments']}
-        self.assertIn(eligible_anier.id, assigned_ids)
-        self.assertNotIn(ordinary.id, assigned_ids)
-        self.assertEqual(result['successful_assignments'], 1)
-
-        diagnostics = result['anier_building_179_diagnostics']
-        self.assertTrue(diagnostics['reserved_building_found'])
-        self.assertEqual(diagnostics['reserved_building_available_beds'], 3)
-
-    # ------------------------------------------------------------------
-    # 3d. Exclusive Anir students are NOT assigned to another building.
-    # ------------------------------------------------------------------
-
-    def test_eligible_anier_student_not_assigned_to_another_building_when_179_full(self):
-        """
-        When building 179's only bed is already occupied by another
-        exclusive-group member, a NEW eligible Anir student must remain
-        UNASSIGNED rather than fall back to a separate, otherwise fully
-        compatible ordinary building/apartment that is also available.
-
-        Regression test for a real pre-existing bug: the exclusivity
-        check previously evaluated "is this student exclusive" bundled
-        together with "is THIS SPECIFIC candidate apartment the Upper
-        Dorm Office" (allocation.solver._is_building_179_exclusive_student
-        took an apartment/region argument and folded its own upper-office
-        check into the same boolean). That meant an eligible Anir student
-        was judged "not exclusive" the instant they were evaluated against
-        an ordinary, non-upper-office apartment — incorrectly admitting
-        them there. Fixed by _is_anier_exclusive_student, a purely
-        student-level predicate independent of any apartment.
-        """
-        from allocation.solver import run_improved_ortools_allocation
-
-        region, dorm_type_11, building_179, apartment_179, room_179 = self._make_upper_office_building_179(
-            'anier_region_d', 'Region D', 'עליון עמים D', beds=1,
-        )
-        existing_occupant = self._make_eligible_anier('ANIER_EXIST1')
-        existing_bed = room_179.beds.first()
-        BedAssignment.objects.create(
-            student=existing_occupant, bed=existing_bed,
-            status=BedAssignment.Status.ACTIVE, assignment_type=BedAssignment.AssignmentType.MANUAL,
-        )
-
-        # A separate, otherwise-compatible ordinary building in the SAME
-        # region (region-level matching would incorrectly treat this as
-        # upper-office too, if the bug were still present).
-        other_dorm_type = DormType.objects.create(name='OrdinaryDorm', region=region)
-        other_building = Building.objects.create(number=50, dorm_type=other_dorm_type)
-        other_apartment = Apartment.objects.create(
-            building=other_building, number='1', category=Apartment.Category.FEMALE,
-            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
-        )
-        other_room = Room.objects.create(apartment=other_apartment, name='A', capacity=1)
-        Bed.objects.create(room=other_room, label='1')
-
-        new_eligible_anier = self._make_eligible_anier('ANIER_NOFALLBACK1')
-
-        self._patch_close_old_connections()
-        result = run_improved_ortools_allocation(
-            [new_eligible_anier], [room_179, other_room], self.UPPER_OFFICE_CONFIG,
-        )
-
-        assigned_ids = {item['student_db_id'] for item in result['proposed_assignments']}
-        self.assertNotIn(new_eligible_anier.id, assigned_ids)
-        self.assertIn(new_eligible_anier.id, result['students_with_no_feasible_beds'])
-
-    # ------------------------------------------------------------------
-    # 3e. Anir status alone (missing another required condition) must
-    #      NOT be treated as eligible.
-    # ------------------------------------------------------------------
-
-    def test_anier_without_hasmaha_is_not_treated_as_eligible(self):
-        """A student flagged priority + אנייר but WITHOUT הסמכה must not
-        be treated as an exclusive-group member — they must not enter
-        building 179, and must be assigned normally elsewhere."""
-        from allocation.solver import run_improved_ortools_allocation
-
-        _, _, _, _, room_179 = self._make_upper_office_building_179(
-            'anier_region_e', 'Region E', 'עליון עמים E', beds=1,
-        )
-        no_hasmaha = Student.objects.create(
-            student_id='ANIER_NOHASMAHA1', first_name='T', last_name='S',
-            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
-            is_priority=True, special_status_1='אנייר',
-        )
-
-        other_dorm_type = DormType.objects.create(name='OrdinaryDormE')
-        other_building = Building.objects.create(number=51, dorm_type=other_dorm_type)
-        other_apartment = Apartment.objects.create(
-            building=other_building, number='1', category=Apartment.Category.FEMALE,
-            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
-        )
-        other_room = Room.objects.create(apartment=other_apartment, name='A', capacity=1)
-        Bed.objects.create(room=other_room, label='1')
-
-        self._patch_close_old_connections()
-        result = run_improved_ortools_allocation(
-            [no_hasmaha], [room_179, other_room], self.UPPER_OFFICE_CONFIG,
-        )
-
-        assigned_ids = {item['student_db_id'] for item in result['proposed_assignments']}
-        self.assertIn(no_hasmaha.id, assigned_ids)
-        assigned_building_id = self._resolve_assignment_location(
-            next(a for a in result['proposed_assignments'] if a['student_db_id'] == no_hasmaha.id)
-        )[0].building_id
-        self.assertEqual(assigned_building_id, other_building.id)
-
-    def test_anier_without_priority_is_not_treated_as_eligible(self):
-        """A student with הסמכה + אנייר but is_priority=False must not be
-        treated as an exclusive-group member either — is_priority is one
-        of the four required conditions, not optional."""
-        from allocation.solver import run_improved_ortools_allocation
-
-        _, _, _, _, room_179 = self._make_upper_office_building_179(
-            'anier_region_f', 'Region F', 'עליון עמים F', beds=1,
-        )
-        no_priority = Student.objects.create(
-            student_id='ANIER_NOPRIORITY1', first_name='T', last_name='S',
-            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
-            is_priority=False, special_status_1='הסמכה', special_status_2='אנייר',
-        )
-
-        other_dorm_type = DormType.objects.create(name='OrdinaryDormF')
-        other_building = Building.objects.create(number=52, dorm_type=other_dorm_type)
-        other_apartment = Apartment.objects.create(
-            building=other_building, number='1', category=Apartment.Category.FEMALE,
-            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
-        )
-        other_room = Room.objects.create(apartment=other_apartment, name='A', capacity=1)
-        Bed.objects.create(room=other_room, label='1')
-
-        self._patch_close_old_connections()
-        result = run_improved_ortools_allocation(
-            [no_priority], [room_179, other_room], self.UPPER_OFFICE_CONFIG,
-        )
-
-        assigned_ids = {item['student_db_id'] for item in result['proposed_assignments']}
-        self.assertIn(no_priority.id, assigned_ids)
-        assigned_building_id = self._resolve_assignment_location(
-            next(a for a in result['proposed_assignments'] if a['student_db_id'] == no_priority.id)
-        )[0].building_id
-        self.assertEqual(assigned_building_id, other_building.id)
-
-    def _resolve_assignment_location(self, assignment):
-        bed = Bed.objects.select_related(
-            'room', 'room__apartment', 'room__apartment__building',
-        ).get(id=assignment['bed_id'])
-        return bed.room.apartment, bed.room, bed
-
-    # ------------------------------------------------------------------
-    # 4. Diagnostics: surfaced on every solver run.
-    # ------------------------------------------------------------------
-
-    def test_anier_building_179_diagnostics(self):
-        """run_improved_ortools_allocation must report accurate Anir/
-        building-179 diagnostics: counts of imported/eligible Anir
-        students, whether the reserved building was found, its available
-        beds, and how many eligible students actually got a candidate
-        connecting them to it."""
-        from allocation.solver import run_improved_ortools_allocation
-
-        generic_region = Region.objects.create(id='generic_region_2', name='Region Two')
-        dorm_type_11 = DormType.objects.create(name='עליון עמים 2', code=11, region=generic_region)
-        building_179 = Building.objects.create(number=179, dorm_type=dorm_type_11)
-        apartment = Apartment.objects.create(
-            building=building_179, number='1', category=Apartment.Category.FEMALE,
-            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
-        )
-        room = Room.objects.create(apartment=apartment, name='A', capacity=3)
-        for label in ('1', '2', '3'):
-            Bed.objects.create(room=room, label=label)
-
-        eligible_anier = Student.objects.create(
-            student_id='DIAG_ANIER1', first_name='T', last_name='S',
-            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
-            is_priority=True, special_status_1='הסמכה', special_status_2='אנייר',
-        )
-        imported_but_not_eligible = Student.objects.create(
-            student_id='DIAG_ANIER2', first_name='T', last_name='S',
-            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
-            is_priority=False, special_status_1='אנייר',
-        )
-
-        patcher = patch('allocation.solver.close_old_connections')
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-        config = {
-            'sameGender': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
-            'priorityFirst': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
-            'roommatePositiveOnly': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
-            'ReligiousTogether': {'enabled': False},
-        }
-        result = run_improved_ortools_allocation(
-            [eligible_anier, imported_but_not_eligible], [room], config,
-        )
-
-        diagnostics = result['anier_building_179_diagnostics']
-        self.assertEqual(diagnostics['imported_anier_students'], 2)
-        self.assertEqual(diagnostics['eligible_anier_students'], 1)
-        self.assertTrue(diagnostics['reserved_building_found'])
-        self.assertEqual(diagnostics['reserved_building_available_beds'], 3)
-        self.assertEqual(diagnostics['eligible_anier_students_sent_to_solver'], 1)
-
-    def test_anier_building_179_diagnostics_when_building_missing(self):
-        """When no building 179 / Upper Dorm Office apartment exists in
-        this run's inventory, diagnostics must report
-        reserved_building_found=False and available beds=0, even though
-        eligible Anir students are present — surfacing the exact symptom
-        of the original bug."""
-        from allocation.solver import run_improved_ortools_allocation
-
-        ordinary_region = Region.objects.create(id='ordinary_region_1', name='Ordinary Region')
-        ordinary_dorm = DormType.objects.create(name='OrdinaryDorm', region=ordinary_region)
-        ordinary_building = Building.objects.create(number=42, dorm_type=ordinary_dorm)
-        apartment = Apartment.objects.create(
-            building=ordinary_building, number='1', category=Apartment.Category.FEMALE,
-            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
-        )
-        room = Room.objects.create(apartment=apartment, name='A', capacity=1)
-        Bed.objects.create(room=room, label='1')
-
-        eligible_anier = Student.objects.create(
-            student_id='DIAG_ANIER3', first_name='T', last_name='S',
-            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
-            is_priority=True, special_status_1='הסמכה', special_status_2='אנייר',
-        )
-
-        patcher = patch('allocation.solver.close_old_connections')
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-        config = {
-            'sameGender': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
-            'priorityFirst': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
-            'roommatePositiveOnly': {'enabled': True, 'strict': True, 'critical': True, 'weight': 0},
-            'ReligiousTogether': {'enabled': False},
-        }
-        result = run_improved_ortools_allocation([eligible_anier], [room], config)
-
-        diagnostics = result['anier_building_179_diagnostics']
-        self.assertEqual(diagnostics['imported_anier_students'], 1)
-        self.assertEqual(diagnostics['eligible_anier_students'], 1)
-        self.assertFalse(diagnostics['reserved_building_found'])
-        self.assertEqual(diagnostics['reserved_building_available_beds'], 0)
-        self.assertEqual(diagnostics['eligible_anier_students_sent_to_solver'], 0)
-
 
 # ---------------------------------------------------------------------------
 # End-to-end proof that /api/upload/additions-excel/ shares the identical
@@ -5622,4 +5513,466 @@ class AdditionsUploadSharedMappingTest(TestCase):
         # special statuses (never from the accessibility columns).
         self.assertTrue(student.is_priority)
         self.assertEqual(student.priority_reason, 'הסמכה | אנייר')
+
+
+# ---------------------------------------------------------------------------
+# Population summary ("קלטנו X / Y הוחרגו / Z נשלחו לשיבוץ"): why the number
+# of students imported into a region is greater than the number actually
+# sent to the OR-Tools solver. Covers api.views._population_summary_for_region
+# directly, plus its wiring into run_allocation and allocation_summary.
+# ---------------------------------------------------------------------------
+class PopulationSummaryTest(TestCase):
+
+    def _make_population(self, region, dorm_type, suffix=''):
+        """
+        9 students total, deliberately covering every distinct-count case:
+          - 3 ordinary, unassigned  -> eligible, sent to solver
+          - 2 accessibility only
+          - 2 leaving only
+          - 1 both accessibility AND leaving (the overlap case)
+          - 1 ordinary but ALREADY ASSIGNED -> imported, not accessibility/
+            leaving, but still not sent to solver (demonstrates that
+            excluded_total alone does not explain imported - sent_to_solver).
+        """
+        def make(sid, **kw):
+            return Student.objects.create(
+                student_id=f'{sid}{suffix}', first_name='T', last_name='S',
+                gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+                accepted_dorm_type=dorm_type, **kw,
+            )
+
+        ordinary = [make(f'POP_ORD{i}') for i in range(1, 4)]
+        accessibility = [
+            make(f'POP_ACC{i}', accessibility_flag=True) for i in range(1, 3)
+        ]
+        leaving = [
+            make(f'POP_LEAVE{i}', category=Student.StudentCategory.LEAVING) for i in range(1, 3)
+        ]
+        both = make('POP_BOTH1', accessibility_flag=True, category=Student.StudentCategory.LEAVING)
+
+        building = Building.objects.create(number=500, dorm_type=dorm_type)
+        apartment = Apartment.objects.create(
+            building=building, number='1', category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
+        )
+        room = Room.objects.create(apartment=apartment, name='A', capacity=1)
+        bed = Bed.objects.create(room=room, label='1')
+        already_assigned = make('POP_ASSIGNED1', assigned_room=room)
+        BedAssignment.objects.create(
+            student=already_assigned, bed=bed, status=BedAssignment.Status.ACTIVE,
+            assignment_type=BedAssignment.AssignmentType.INITIAL,
+        )
+
+        return {
+            'ordinary': ordinary, 'accessibility': accessibility,
+            'leaving': leaving, 'both': both, 'already_assigned': already_assigned,
+        }
+
+    def test_population_summary_counts(self):
+        """Direct unit coverage of the distinct-count math: excluded_overlap
+        counts the accessibility+leaving student once, excluded_total is the
+        union (not a naive sum), and sent_to_solver additionally accounts
+        for students who are eligible but already assigned."""
+        from api.views import _population_summary_for_region
+
+        region = _make_region('PopSummaryRegion')
+        dorm_type = DormType.objects.create(name='PopDorm', region=region)
+        self._make_population(region, dorm_type)
+
+        summary = _population_summary_for_region(region)
+
+        self.assertEqual(summary['imported_students'], 9)
+        self.assertEqual(summary['excluded_accessibility'], 3)  # 2 + the overlap student
+        self.assertEqual(summary['excluded_leaving'], 3)        # 2 + the overlap student
+        self.assertEqual(summary['excluded_overlap'], 1)
+        self.assertEqual(summary['excluded_total'], 5)          # union, not 3+3=6
+        self.assertEqual(summary['sent_to_solver'], 3)          # 9 - 5 excluded - 1 already assigned
+        self.assertEqual(len(summary['sent_to_solver_student_ids']), 3)
+
+    def test_population_summary_scope_isolation(self):
+        """A student imported into an unrelated region/upload must never be
+        counted in this region's population summary — scoped strictly to
+        Student rows whose accepted_dorm_type belongs to this region."""
+        from api.views import _population_summary_for_region
+
+        region = _make_region('PopScopeRegion')
+        dorm_type = DormType.objects.create(name='PopScopeDorm', region=region)
+        self._make_population(region, dorm_type)
+
+        other_region = _make_region('PopScopeOtherRegion')
+        other_dorm_type = DormType.objects.create(name='PopScopeOtherDorm', region=other_region)
+        self._make_population(other_region, other_dorm_type, suffix='_OTHER')
+
+        summary = _population_summary_for_region(region)
+        self.assertEqual(summary['imported_students'], 9)
+
+        other_summary = _population_summary_for_region(other_region)
+        self.assertEqual(other_summary['imported_students'], 9)
+
+    def test_run_allocation_response_includes_population_summary(self):
+        """/api/allocation/run/ must return a population_summary whose
+        sent_to_solver_student_ids exactly matches the real solver-input
+        queryset, and after completion assigned + unassigned == sent_to_solver."""
+        region = _make_region('PopRunRegion')
+        boss = _make_region_boss(region)
+        dorm_type = DormType.objects.create(name='PopRunDorm', region=region)
+        self._make_population(region, dorm_type)
+
+        # No rooms available beyond the one already fully occupied above ->
+        # every eligible student stays unassigned, which is fine: this test
+        # is about the population_summary shape, not solver outcomes.
+        patcher = patch('allocation.solver.close_old_connections')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.post('/api/allocation/run/', {'region': region.id}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+
+        summary = response.data['result']['population_summary']
+        self.assertEqual(summary['imported_students'], 9)
+        self.assertEqual(summary['excluded_total'], 5)
+        self.assertEqual(summary['sent_to_solver'], 3)
+        self.assertEqual(summary['assigned'] + summary['unassigned'], summary['sent_to_solver'])
+
+    def test_allocation_summary_preview_includes_population_summary(self):
+        """GET /api/allocation/summary/ (pre-run preview) must also expose
+        population_summary, scoped to the same region, before any
+        AllocationRun exists."""
+        region = _make_region('PopPreviewRegion')
+        boss = _make_region_boss(region)
+        dorm_type = DormType.objects.create(name='PopPreviewDorm', region=region)
+        self._make_population(region, dorm_type)
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.get('/api/allocation/summary/', {'region': region.id})
+        self.assertEqual(response.status_code, 200, response.data)
+
+        summary = response.data['population_summary']
+        self.assertEqual(summary['imported_students'], 9)
+        self.assertEqual(summary['sent_to_solver'], 3)
+
+
+# ---------------------------------------------------------------------------
+# Unassigned-analysis ("למה חלק מהסטודנטים לא שובצו?"): grouped, staged
+# hard-constraint explanation for why unassigned students remain unassigned,
+# reusing allocation.solver.analyze_unassigned_group so the reported reason
+# can never diverge from the solver's own eligibility rules.
+# ---------------------------------------------------------------------------
+class UnassignedAnalysisTest(TestCase):
+
+    def test_female_single_blocked_by_male_only_inventory_reports_gender_mismatch(self):
+        """Models the validated run-115 example: an unassigned female,
+        single-housing student whose accepted dorm type has plenty of
+        PHYSICALLY free beds, but none of them are compatible (all free
+        inventory is male-single/couple). Must report
+        HOUSING_TYPE_OR_GENDER_MISMATCH with compatible_free_beds == 0,
+        never a generic "no free beds" reason."""
+        region = _make_region('UnassignedGenderRegion')
+        boss = _make_region_boss(region)
+        dorm_type = DormType.objects.create(name='Dorm15Like', code=15, region=region)
+        building = Building.objects.create(number=179, dorm_type=dorm_type)
+
+        male_single_apt = Apartment.objects.create(
+            building=building, number='1', category=Apartment.Category.MALE,
+            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
+        )
+        male_room = Room.objects.create(apartment=male_single_apt, name='M1', capacity=2)
+        Bed.objects.create(room=male_room, label='1')
+        Bed.objects.create(room=male_room, label='2')
+
+        couple_apt = Apartment.objects.create(
+            building=building, number='2', category=Apartment.Category.MIXED,
+            apartment_type=Apartment.ApartmentType.COUPLE, room_count=1,
+        )
+        couple_room = Room.objects.create(apartment=couple_apt, name='C1', capacity=2)
+        Bed.objects.create(room=couple_room, label='1')
+        Bed.objects.create(room=couple_room, label='2')
+
+        Student.objects.create(
+            student_id='UNASSIGNED_F1', first_name='F', last_name='Student',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            accepted_dorm_type=dorm_type,
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.get('/api/allocation/results/', {'region': region.id})
+        self.assertEqual(response.status_code, 200, response.data)
+
+        analysis = response.data['unassigned_analysis']
+        self.assertEqual(len(analysis), 1)
+        group = analysis[0]
+        self.assertEqual(group['accepted_dorm_type_id'], dorm_type.id)
+        self.assertEqual(group['accepted_dorm_type_code'], 15)
+        self.assertEqual(group['gender'], Student.Gender.FEMALE)
+        self.assertEqual(group['housing_type'], Student.HousingType.SINGLE_FEMALE)
+        self.assertEqual(group['student_count'], 1)
+        self.assertEqual(group['physically_free_beds_in_accepted_dorm'], 4)
+        self.assertEqual(group['compatible_free_beds'], 0)
+        self.assertEqual(group['reason_code'], 'HOUSING_TYPE_OR_GENDER_MISMATCH')
+
+        breakdown_categories = {
+            (row['category'], row['apartment_type']) for row in group['inventory_breakdown']
+        }
+        self.assertIn((Apartment.Category.MALE, Apartment.ApartmentType.SINGLE), breakdown_categories)
+        self.assertIn((Apartment.Category.MIXED, Apartment.ApartmentType.COUPLE), breakdown_categories)
+
+        # Still keeps the existing free-beds report/table intact alongside
+        # the new analysis (Part 2 requires not removing it).
+        self.assertIn('available_beds', response.data)
+
+    def test_no_physical_free_beds_reports_that_reason_not_gender_mismatch(self):
+        """When the accepted dorm type has zero physically free beds at
+        all, the reason must be NO_PHYSICAL_FREE_BEDS_IN_ACCEPTED_DORM, not
+        a gender/housing mismatch — the two must stay distinguishable."""
+        region = _make_region('UnassignedNoFreeRegion')
+        boss = _make_region_boss(region)
+        dorm_type = DormType.objects.create(name='FullDorm', region=region)
+        building = Building.objects.create(number=300, dorm_type=dorm_type)
+        apartment = Apartment.objects.create(
+            building=building, number='1', category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
+        )
+        room = Room.objects.create(apartment=apartment, name='A', capacity=1)
+        bed = Bed.objects.create(room=room, label='1')
+
+        occupant = Student.objects.create(
+            student_id='FULL_OCC1', first_name='Occ', last_name='Student',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            accepted_dorm_type=dorm_type, assigned_room=room,
+        )
+        BedAssignment.objects.create(
+            student=occupant, bed=bed, status=BedAssignment.Status.ACTIVE,
+            assignment_type=BedAssignment.AssignmentType.INITIAL,
+        )
+
+        Student.objects.create(
+            student_id='FULL_UNASSIGNED1', first_name='U', last_name='Student',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            accepted_dorm_type=dorm_type,
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.get('/api/allocation/results/', {'region': region.id})
+        self.assertEqual(response.status_code, 200, response.data)
+
+        analysis = response.data['unassigned_analysis']
+        self.assertEqual(len(analysis), 1)
+        self.assertEqual(analysis[0]['reason_code'], 'NO_PHYSICAL_FREE_BEDS_IN_ACCEPTED_DORM')
+        self.assertEqual(analysis[0]['physically_free_beds_in_accepted_dorm'], 0)
+        self.assertEqual(analysis[0]['compatible_free_beds'], 0)
+
+    def test_no_accepted_dorm_type_grouped_separately(self):
+        """A student with no accepted_dorm_type at all must be grouped
+        under NO_ACCEPTED_DORM_TYPE with accepted_dorm_type_id/code None,
+        never crash the grouping/analysis pipeline. Tested directly against
+        the helper since the region-scoped allocation_results endpoint
+        cannot itself resolve a region for a student with no dorm type."""
+        from api.views import _build_unassigned_analysis
+
+        student = Student.objects.create(
+            student_id='NO_DORM1', first_name='N', last_name='D',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            accepted_dorm_type=None,
+        )
+        analysis = _build_unassigned_analysis([student])
+        self.assertEqual(len(analysis), 1)
+        self.assertIsNone(analysis[0]['accepted_dorm_type_id'])
+        self.assertIsNone(analysis[0]['accepted_dorm_type_code'])
+        self.assertEqual(analysis[0]['reason_code'], 'NO_ACCEPTED_DORM_TYPE')
+
+
+# ---------------------------------------------------------------------------
+# Retry-unassigned-students ("נסה לשבץ שוב את הסטודנטים שלא שובצו"): a
+# narrowly-scoped retry that must never touch previously-successful
+# assignments, must only re-solve for the original run's unassigned
+# population, and must be safely re-runnable without creating duplicates.
+# ---------------------------------------------------------------------------
+class RetryUnassignedAllocationTest(TestCase):
+
+    def _make_scenario(self):
+        region = _make_region('RetryRegion')
+        boss = _make_region_boss(region)
+        dorm_type = DormType.objects.create(name='RetryDorm', region=region)
+        building = Building.objects.create(number=700, dorm_type=dorm_type)
+        apartment = Apartment.objects.create(
+            building=building, number='1', category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1,
+        )
+        room = Room.objects.create(apartment=apartment, name='A', capacity=1)
+        bed = Bed.objects.create(room=room, label='1')
+
+        assigned_student = Student.objects.create(
+            student_id='RETRY_ASSIGNED1', first_name='A', last_name='S',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            accepted_dorm_type=dorm_type, assigned_room=room,
+        )
+        unassigned_student = Student.objects.create(
+            student_id='RETRY_UNASSIGNED1', first_name='U', last_name='S',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+            accepted_dorm_type=dorm_type,
+        )
+
+        original_run = AllocationRun.objects.create(
+            region=region, run_by=boss, status=AllocationRun.Status.COMPLETED,
+            students_processed=2, successful_assignments=1, conflicts=1,
+            completed_at=timezone.now(),
+            diagnostics={
+                'warnings': [], 'anier_building_179_diagnostics': {},
+                'population_summary': {
+                    'imported_students': 2, 'excluded_accessibility': 0,
+                    'excluded_leaving': 0, 'excluded_overlap': 0, 'excluded_total': 0,
+                    'sent_to_solver': 2,
+                    'sent_to_solver_student_ids': [assigned_student.id, unassigned_student.id],
+                    'assigned': 1, 'unassigned': 1,
+                },
+            },
+        )
+        assignment = BedAssignment.objects.create(
+            student=assigned_student, bed=bed, status=BedAssignment.Status.ACTIVE,
+            assignment_type=BedAssignment.AssignmentType.INITIAL, allocation_run=original_run,
+        )
+
+        return region, boss, dorm_type, building, apartment, room, bed, \
+            assigned_student, unassigned_student, original_run, assignment
+
+    def test_retry_with_no_new_inventory_preserves_prior_assignment_and_retries_only_unassigned(self):
+        (region, boss, dorm_type, building, apartment, room, bed,
+         assigned_student, unassigned_student, original_run, assignment) = self._make_scenario()
+
+        patcher = patch('allocation.solver.close_old_connections')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.post(f'/api/allocation/runs/{original_run.id}/retry-unassigned/', {}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['result']['retried_student_count'], 1)
+        self.assertEqual(response.data['result']['successful_assignments'], 0)
+
+        # The previously-successful assignment is completely untouched.
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.status, BedAssignment.Status.ACTIVE)
+        self.assertEqual(assignment.bed_id, bed.id)
+        assigned_student.refresh_from_db()
+        self.assertEqual(assigned_student.assigned_room_id, room.id)
+
+        # Still unassigned since no new inventory was added.
+        unassigned_student.refresh_from_db()
+        self.assertIsNone(unassigned_student.assigned_room_id)
+
+        # A new, separate AllocationRun was created and linked back.
+        retry_run_id = response.data['result']['run']['id']
+        self.assertNotEqual(retry_run_id, original_run.id)
+        retry_run = AllocationRun.objects.get(pk=retry_run_id)
+        self.assertEqual(retry_run.diagnostics['retry_of_run_id'], original_run.id)
+
+        # Only one active assignment total exists for this bed — no
+        # duplicate was created.
+        self.assertEqual(
+            BedAssignment.objects.filter(bed=bed, status=BedAssignment.Status.ACTIVE).count(), 1,
+        )
+
+    def test_retry_after_new_inventory_added_assigns_previously_unassigned_student(self):
+        """Once staff add a genuinely new free bed, retrying the same run
+        must be able to assign the previously-unassigned student, without
+        disturbing the original assignment."""
+        (region, boss, dorm_type, building, apartment, room, bed,
+         assigned_student, unassigned_student, original_run, assignment) = self._make_scenario()
+
+        # Staff adds capacity: a second bed in a new room of the same
+        # accepted dorm type / matching category+type.
+        new_room = Room.objects.create(apartment=apartment, name='B', capacity=1)
+        Bed.objects.create(room=new_room, label='1')
+
+        patcher = patch('allocation.solver.close_old_connections')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.post(f'/api/allocation/runs/{original_run.id}/retry-unassigned/', {}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['result']['retried_student_count'], 1)
+        self.assertEqual(response.data['result']['successful_assignments'], 1)
+
+        unassigned_student.refresh_from_db()
+        self.assertIsNotNone(unassigned_student.assigned_room_id)
+        self.assertEqual(unassigned_student.assigned_room_id, new_room.id)
+
+        # Original assignment still completely untouched.
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.status, BedAssignment.Status.ACTIVE)
+        assigned_student.refresh_from_db()
+        self.assertEqual(assigned_student.assigned_room_id, room.id)
+
+    def test_retry_twice_after_success_reports_nothing_left_to_retry(self):
+        """Retrying again after everyone from the original population is
+        assigned must not error or create duplicates — it should report
+        that there is nothing left to retry."""
+        (region, boss, dorm_type, building, apartment, room, bed,
+         assigned_student, unassigned_student, original_run, assignment) = self._make_scenario()
+
+        new_room = Room.objects.create(apartment=apartment, name='B', capacity=1)
+        Bed.objects.create(room=new_room, label='1')
+
+        patcher = patch('allocation.solver.close_old_connections')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        first = client.post(f'/api/allocation/runs/{original_run.id}/retry-unassigned/', {}, format='json')
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(first.data['result']['successful_assignments'], 1)
+
+        second = client.post(f'/api/allocation/runs/{original_run.id}/retry-unassigned/', {}, format='json')
+        self.assertEqual(second.status_code, 200, second.data)
+        self.assertEqual(second.data['result']['retried_student_count'], 0)
+
+        self.assertEqual(
+            BedAssignment.objects.filter(status=BedAssignment.Status.ACTIVE).count(), 2,
+        )
+
+    def test_retry_requires_completed_run(self):
+        (region, boss, dorm_type, building, apartment, room, bed,
+         assigned_student, unassigned_student, original_run, assignment) = self._make_scenario()
+        original_run.status = AllocationRun.Status.RUNNING
+        original_run.completed_at = None
+        original_run.save()
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.post(f'/api/allocation/runs/{original_run.id}/retry-unassigned/', {}, format='json')
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(response.data['error_code'], 'RUN_NOT_COMPLETED')
+
+    def test_retry_requires_saved_original_population(self):
+        """An older run created before this feature existed has no
+        sent_to_solver_student_ids saved — retry must refuse rather than
+        silently guessing the population."""
+        region = _make_region('RetryOldRunRegion')
+        boss = _make_region_boss(region)
+        old_run = _make_run(region, boss, status_val=AllocationRun.Status.COMPLETED)
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.post(f'/api/allocation/runs/{old_run.id}/retry-unassigned/', {}, format='json')
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(response.data['error_code'], 'MISSING_ORIGINAL_POPULATION')
+
+    def test_retry_forbidden_for_employee(self):
+        (region, boss, dorm_type, building, apartment, room, bed,
+         assigned_student, unassigned_student, original_run, assignment) = self._make_scenario()
+        employee = _make_employee(region)
+
+        client = APIClient()
+        client.force_authenticate(user=employee)
+        response = client.post(f'/api/allocation/runs/{original_run.id}/retry-unassigned/', {}, format='json')
+        self.assertEqual(response.status_code, 403, response.data)
 

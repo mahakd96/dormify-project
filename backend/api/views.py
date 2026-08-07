@@ -29,9 +29,10 @@ from .models import (
 from .serializers import (
     UserSerializer, LoginSerializer, RegisterSerializer,
     RegionSerializer, DormTypeSerializer, BuildingSerializer, ApartmentSerializer,
-    RoomSerializer, StudentSerializer, StudentListSerializer, TransferSerializer,
+    RoomSerializer, BedSerializer, StudentSerializer, StudentListSerializer, TransferSerializer,
     StudentRequestSerializer,
-    AllocationRunSerializer, ImportBatchSerializer, RegionInboxSerializer
+    AllocationRunSerializer, ImportBatchSerializer, RegionInboxSerializer,
+    check_building_write_conflict, check_apartment_write_conflict, check_room_write_conflict,
 )
 
 
@@ -674,15 +675,49 @@ class DormTypeViewSet(viewsets.ModelViewSet):
 
         return queryset.filter(region_id=user.region_id)
 
+def _parse_is_active_filter(request, default='true'):
+    """
+    Shared 'Active status: all / active / inactive' query-param parsing for
+    the inventory viewsets. Returns True, False, or None (meaning: no
+    is_active filter, i.e. 'all'). Defaults to True (active-only) so
+    existing callers that never pass this param keep their current
+    behavior unchanged.
+    """
+    raw = (request.query_params.get('is_active') or default or '').strip().lower()
+    if raw in ('all', ''):
+        return None
+    if raw in ('true', '1', 'active'):
+        return True
+    if raw in ('false', '0', 'inactive'):
+        return False
+    return None
+
+
+def _inventory_create_permission_error():
+    return Response(
+        {'error': 'רק מנהל אזור או מנהל מרכזי יכולים ליצור או לערוך פריטי מלאי'},
+        status=status.HTTP_403_FORBIDDEN,
+    )
+
+
 class BuildingViewSet(viewsets.ModelViewSet):
     serializer_class = BuildingSerializer
     permission_classes = [IsAuthenticated]
+    # No PUT (full-replace semantics don't fit the partial edit-drawer UI)
+    # and no DELETE — buildings are never hard-deleted through this API,
+    # only deactivated via the availability workflow (see
+    # _reject_direct_availability_change / what_if_availability_confirm).
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
     def get_queryset(self):
-        queryset = Building.objects.filter(is_active=True).select_related(
+        queryset = Building.objects.select_related(
             'dorm_type',
             'dorm_type__region',
         )
+        is_active = _parse_is_active_filter(self.request)
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active)
+
         user = self.request.user
         region_value = self.request.query_params.get('region')
 
@@ -703,6 +738,26 @@ class BuildingViewSet(viewsets.ModelViewSet):
 
         return queryset.filter(dorm_type__region_id=user.region_id)
 
+    def create(self, request, *args, **kwargs):
+        if not request.user.is_boss:
+            return _inventory_create_permission_error()
+
+        if not request.user.is_central_admin:
+            dorm_type = DormType.objects.filter(
+                pk=request.data.get('dorm_type')
+            ).select_related('region').first()
+            if not dorm_type or dorm_type.region_id != request.user.region_id:
+                return Response(
+                    {'error': 'ניתן ליצור בניין רק בתוך סוג מעונות באזור המשויך למשתמש'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+        conflict = check_building_write_conflict(None, request.data)
+        if conflict:
+            return Response(conflict, status=status.HTTP_400_BAD_REQUEST)
+
+        return super().create(request, *args, **kwargs)
+
     def update(self, request, *args, **kwargs):
         # Editing a building (e.g. gender_restriction) is a boss-level
         # action; ordinary employees may only view. get_queryset() above
@@ -714,6 +769,11 @@ class BuildingViewSet(viewsets.ModelViewSet):
                 {'error': 'רק מנהל אזור או מנהל מרכזי יכול לערוך בניין'},
                 status=status.HTTP_403_FORBIDDEN,
             )
+
+        conflict = check_building_write_conflict(self.get_object(), request.data)
+        if conflict:
+            return Response(conflict, status=status.HTTP_400_BAD_REQUEST)
+
         return super().update(request, *args, **kwargs)
 
     @action(detail=True, methods=['get'])
@@ -756,9 +816,10 @@ class BuildingViewSet(viewsets.ModelViewSet):
 
 
 
-class ApartmentViewSet(viewsets.ReadOnlyModelViewSet):
+class ApartmentViewSet(viewsets.ModelViewSet):
     serializer_class = ApartmentSerializer
     permission_classes = [IsAuthenticated]
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
     def get_queryset(self):
         queryset = Apartment.objects.select_related(
@@ -767,9 +828,25 @@ class ApartmentViewSet(viewsets.ReadOnlyModelViewSet):
             'building__dorm_type__region'
         ).all()
 
+        is_active = _parse_is_active_filter(self.request, default='all')
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active)
+
+        building_id = self.request.query_params.get('building')
+        if building_id:
+            queryset = queryset.filter(building_id=building_id)
+
         user = self.request.user
 
-        if not user.is_central_admin and user.region_id:
+        region_value = self.request.query_params.get('region')
+        if (user.is_central_admin or user.is_boss) and region_value:
+            region = _resolve_region(region_value)
+            if not region:
+                return queryset.none()
+            queryset = queryset.filter(building__dorm_type__region=region)
+        elif not user.is_central_admin:
+            if not user.region_id:
+                return queryset.none()
             queryset = queryset.filter(
                 building__dorm_type__region=user.region
             )
@@ -779,10 +856,44 @@ class ApartmentViewSet(viewsets.ReadOnlyModelViewSet):
             'number'
         )
 
+    def create(self, request, *args, **kwargs):
+        if not request.user.is_boss:
+            return _inventory_create_permission_error()
 
-class RoomViewSet(viewsets.ReadOnlyModelViewSet):
+        if not request.user.is_central_admin:
+            building = Building.objects.filter(
+                pk=request.data.get('building')
+            ).select_related('dorm_type__region').first()
+            if not building or not building.dorm_type or building.dorm_type.region_id != request.user.region_id:
+                return Response(
+                    {'error': 'ניתן ליצור דירה רק בבניין באזור המשויך למשתמש'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+        conflict = check_apartment_write_conflict(None, request.data)
+        if conflict:
+            return Response(conflict, status=status.HTTP_400_BAD_REQUEST)
+
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        if not request.user.is_boss:
+            return Response(
+                {'error': 'רק מנהל אזור או מנהל מרכזי יכול לערוך דירה'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        conflict = check_apartment_write_conflict(self.get_object(), request.data)
+        if conflict:
+            return Response(conflict, status=status.HTTP_400_BAD_REQUEST)
+
+        return super().update(request, *args, **kwargs)
+
+
+class RoomViewSet(viewsets.ModelViewSet):
     serializer_class = RoomSerializer
     permission_classes = [IsAuthenticated]
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
     def get_queryset(self):
         queryset = Room.objects.select_related(
@@ -792,6 +903,18 @@ class RoomViewSet(viewsets.ReadOnlyModelViewSet):
             'apartment__building__dorm_type__region'
         ).all()
 
+        is_active = _parse_is_active_filter(self.request, default='all')
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active)
+
+        apartment_id = self.request.query_params.get('apartment')
+        if apartment_id:
+            queryset = queryset.filter(apartment_id=apartment_id)
+
+        building_id = self.request.query_params.get('building')
+        if building_id:
+            queryset = queryset.filter(apartment__building_id=building_id)
+
         user = self.request.user
         region_value = self.request.query_params.get('region')
 
@@ -799,11 +922,10 @@ class RoomViewSet(viewsets.ReadOnlyModelViewSet):
             region = _resolve_region(region_value)
             if not region:
                 return queryset.none()
-            return queryset.filter(
+            queryset = queryset.filter(
                 apartment__building__dorm_type__region=region
             )
-
-        if not user.is_central_admin:
+        elif not user.is_central_admin:
             if not user.region_id:
                 return queryset.none()
             queryset = queryset.filter(
@@ -815,6 +937,109 @@ class RoomViewSet(viewsets.ReadOnlyModelViewSet):
             'apartment__number',
             'name'
         )
+
+    def create(self, request, *args, **kwargs):
+        if not request.user.is_boss:
+            return _inventory_create_permission_error()
+
+        if not request.user.is_central_admin:
+            apartment = Apartment.objects.filter(
+                pk=request.data.get('apartment')
+            ).select_related('building__dorm_type__region').first()
+            region_id = (
+                apartment.building.dorm_type.region_id
+                if apartment and apartment.building and apartment.building.dorm_type
+                else None
+            )
+            if not apartment or region_id != request.user.region_id:
+                return Response(
+                    {'error': 'ניתן ליצור חדר רק בדירה באזור המשויך למשתמש'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+        conflict = check_room_write_conflict(None, request.data)
+        if conflict:
+            return Response(conflict, status=status.HTTP_400_BAD_REQUEST)
+
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        if not request.user.is_boss:
+            return Response(
+                {'error': 'רק מנהל אזור או מנהל מרכזי יכול לערוך חדר'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        conflict = check_room_write_conflict(self.get_object(), request.data)
+        if conflict:
+            return Response(conflict, status=status.HTTP_400_BAD_REQUEST)
+
+        return super().update(request, *args, **kwargs)
+
+
+class BedViewSet(viewsets.ModelViewSet):
+    """
+    Read-only browsing plus label-only editing. Individual bed
+    creation/deletion and activation/deactivation are intentionally not
+    supported: Bed rows are derived from Room.capacity and materialized
+    exclusively by the admin-only `manage.py materialize_beds` command
+    (see ensure_room_beds), so exposing free-form bed CRUD here would risk
+    silently desynchronizing bed rows from room capacity.
+    """
+    serializer_class = BedSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        queryset = Bed.objects.select_related(
+            'room',
+            'room__apartment',
+            'room__apartment__building',
+            'room__apartment__building__dorm_type',
+            'room__apartment__building__dorm_type__region',
+        ).all()
+
+        room_id = self.request.query_params.get('room')
+        if room_id:
+            queryset = queryset.filter(room_id=room_id)
+
+        apartment_id = self.request.query_params.get('apartment')
+        if apartment_id:
+            queryset = queryset.filter(room__apartment_id=apartment_id)
+
+        user = self.request.user
+        if not user.is_central_admin:
+            if not user.region_id:
+                return queryset.none()
+            queryset = queryset.filter(
+                room__apartment__building__dorm_type__region=user.region
+            )
+
+        return queryset.order_by(
+            'room__apartment__building__number',
+            'room__apartment__number',
+            'room__name',
+            'label',
+        )
+
+    def update(self, request, *args, **kwargs):
+        if not request.user.is_boss:
+            return Response(
+                {'error': 'רק מנהל אזור או מנהל מרכזי יכול לערוך תווית מיטה'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        allowed_fields = {'label'}
+        extra_fields = set(request.data.keys()) - allowed_fields
+        if extra_fields:
+            return Response(
+                {
+                    'field': next(iter(extra_fields)),
+                    'code': 'FIELD_NOT_EDITABLE',
+                    'message': 'ניתן לערוך רק את תווית המיטה — שדות אחרים אינם נתמכים לעריכה ברמת המיטה.',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().update(request, *args, **kwargs)
 
 
 class StudentViewSet(viewsets.ModelViewSet):
@@ -2658,6 +2883,111 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
 # =========================
 # Allocation
 # =========================
+
+def _run_diagnostics_payload(result):
+    """
+    Build the {"warnings": [...], "anier_building_179_diagnostics": {...}}
+    shape persisted on AllocationRun.diagnostics, from a solver result
+    dict. Shared by both the sync and async allocation entry points so
+    neither path can silently drop this data or diverge in shape.
+    """
+    if not isinstance(result, dict):
+        return {'warnings': [], 'anier_building_179_diagnostics': {}}
+    return {
+        'warnings': result.get('warnings', []),
+        'anier_building_179_diagnostics': result.get('anier_building_179_diagnostics', {}),
+    }
+
+
+def _exclude_non_solver_students(students_qs):
+    """
+    Shared solver-input population filter, used identically by both the
+    sync (run_allocation) and async (_execute_allocation_background)
+    allocation entry points so the two paths cannot silently drift apart.
+
+    Both exclusions are unconditional. category and accessibility_flag are
+    permanent fields on the Student model (not optional/dynamic ones), so
+    this must never be gated behind a field-existence check — doing so
+    would risk silently skipping the accessibility exclusion if that check
+    were ever wrong, which is unacceptable for a safety-relevant filter.
+
+      - LEAVING-category students are never sent to the solver.
+      - accessibility_flag=True students are imported and saved normally,
+        but must never reach the OR-Tools solver — the dorm office
+        allocates them manually. This is independent of is_priority (see
+        priority_fields_from_special_statuses in the Excel import code);
+        exclusion here is a read-time queryset filter only, so it never
+        clears or rewrites is_priority/priority_reason/special_status_*/
+        accessibility metadata on the Student row itself.
+    """
+    return students_qs.exclude(
+        category=Student.StudentCategory.LEAVING,
+    ).exclude(
+        accessibility_flag=True,
+    )
+
+
+def _population_summary_for_region(region, *, sent_to_solver_student_ids=None):
+    """
+    Distinct-count population breakdown explaining why the number of
+    students sent to the solver is smaller than the number imported for
+    this region — always scoped to this region's Student rows only, never
+    a global Student count, and never scoped to a different
+    region/upload.
+
+    imported_students   — every Student row accepted into a dorm type in
+                           this region (the full "received" population).
+    excluded_accessibility / excluded_leaving — counts within that same
+                           population; a student in both counts once
+                           towards excluded_overlap, so excluded_total is
+                           the DISTINCT union, not a naive sum.
+    sent_to_solver / sent_to_solver_student_ids — when the caller already
+                           knows the exact solver-input population for a
+                           specific run (the real `students` queryset),
+                           pass their ids in and this reports that exact
+                           set. Otherwise (a pre-run preview, before any
+                           AllocationRun exists) this derives the same
+                           population run_allocation/_execute_allocation_
+                           background would build by default: eligible
+                           (non-leaving, non-accessibility) and not yet
+                           assigned.
+
+    sent_to_solver_student_ids is kept in the returned dict (not just the
+    count) so it can be persisted on AllocationRun.diagnostics and later
+    used to reconstruct "which of these specific students are still
+    unassigned" for the results page and the retry-unassigned workflow —
+    without needing a new model field or migration.
+    """
+    population_qs = Student.objects.filter(accepted_dorm_type__region=region)
+    imported_students = population_qs.count()
+
+    excluded_accessibility = population_qs.filter(accessibility_flag=True).count()
+    excluded_leaving = population_qs.filter(category=Student.StudentCategory.LEAVING).count()
+    excluded_overlap = population_qs.filter(
+        accessibility_flag=True,
+        category=Student.StudentCategory.LEAVING,
+    ).count()
+    excluded_total = excluded_accessibility + excluded_leaving - excluded_overlap
+
+    if sent_to_solver_student_ids is None:
+        eligible_qs = _exclude_non_solver_students(population_qs).filter(
+            assigned_room__isnull=True,
+        )
+        sent_to_solver_student_ids = list(eligible_qs.values_list('id', flat=True))
+    else:
+        sent_to_solver_student_ids = list(sent_to_solver_student_ids)
+
+    return {
+        'imported_students': imported_students,
+        'excluded_accessibility': excluded_accessibility,
+        'excluded_leaving': excluded_leaving,
+        'excluded_overlap': excluded_overlap,
+        'excluded_total': excluded_total,
+        'sent_to_solver': len(sent_to_solver_student_ids),
+        'sent_to_solver_student_ids': sent_to_solver_student_ids,
+    }
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def run_allocation(request):
@@ -2707,7 +3037,10 @@ def run_allocation(request):
     allocation_run = None
 
     try:
-        from allocation.solver import run_improved_ortools_allocation
+        from allocation.solver import (
+            run_improved_ortools_allocation,
+            EMPTY_ANIER_BUILDING_179_DIAGNOSTICS,
+        )
 
         # Duplicate-run protection. The row lock prevents two requests from
         # creating RUNNING allocation jobs for the same region at the same time.
@@ -2747,18 +3080,7 @@ def run_allocation(request):
             'accepted_dorm_type',
             'accepted_dorm_type__region'
         )
-
-        if 'category' in student_fields:
-            students_base = students_base.exclude(
-                category=Student.StudentCategory.LEAVING
-            )
-
-        # Accessibility/disability students are imported and saved normally,
-        # but must never reach the OR-Tools solver — the dorm office
-        # allocates them manually. This is independent of is_priority (see
-        # priority_fields_from_special_statuses).
-        if 'accessibility_flag' in student_fields:
-            students_base = students_base.exclude(accessibility_flag=True)
+        students_base = _exclude_non_solver_students(students_base)
 
         students_total_in_region = students_base.count()
         students = students_base
@@ -2803,6 +3125,13 @@ def run_allocation(request):
         # active assignment in the region.
         run_student_ids = list(students.values_list('id', flat=True))
 
+        # Population summary: why students_count (sent to the solver) is
+        # smaller than the region's full imported population — scoped to
+        # this region/run only, never a global Student count.
+        population_summary = _population_summary_for_region(
+            region, sent_to_solver_student_ids=run_student_ids,
+        )
+
         print(
             ">>> ALLOCATION_INPUT "
             f"run_id={allocation_run.id} "
@@ -2823,6 +3152,11 @@ def run_allocation(request):
             allocation_run.conflicts = 0
             allocation_run.completed_at = timezone.now()
             allocation_run.error_message = ''
+            allocation_run.diagnostics = {
+                'warnings': [],
+                'anier_building_179_diagnostics': dict(EMPTY_ANIER_BUILDING_179_DIAGNOSTICS),
+                'population_summary': {**population_summary, 'assigned': 0, 'unassigned': 0},
+            }
 
             refresh_db_connection()
             allocation_run.save()
@@ -2844,6 +3178,8 @@ def run_allocation(request):
                     'wall_time': None,
                     'warnings': [],
                     'students_with_no_feasible_beds': [],
+                    'anier_building_179_diagnostics': dict(EMPTY_ANIER_BUILDING_179_DIAGNOSTICS),
+                    'population_summary': {**population_summary, 'assigned': 0, 'unassigned': 0},
                     'assignments': [],
                     'run': AllocationRunSerializer(allocation_run).data
                 }
@@ -2930,6 +3266,15 @@ def run_allocation(request):
         allocation_run.roommate_matches = roommate_matches
         allocation_run.conflicts = result.get('conflicts', 0)
         allocation_run.completed_at = timezone.now()
+        population_summary = {
+            **population_summary,
+            'assigned': result.get('successful_assignments', 0),
+            'unassigned': result.get('conflicts', 0),
+        }
+        allocation_run.diagnostics = {
+            **_run_diagnostics_payload(result),
+            'population_summary': population_summary,
+        }
 
         # After a long solver run, reuse a healthy Neon connection and
         # reconnect only if Django reports that the connection is unusable.
@@ -3023,6 +3368,8 @@ def run_allocation(request):
                 'wall_time': result.get('wall_time'),
                 'warnings': result.get('warnings', []),
                 'students_with_no_feasible_beds': result.get('students_with_no_feasible_beds', []),
+                'anier_building_179_diagnostics': result.get('anier_building_179_diagnostics', {}),
+                'population_summary': population_summary,
                 'assignments': assignment_rows,
                 'run': AllocationRunSerializer(allocation_run).data
             }
@@ -3047,6 +3394,216 @@ def run_allocation(request):
             'error': f'שגיאה בהרצת השיבוץ: {str(e)}',
             'error_type': e.__class__.__name__,
             'traceback': traceback.format_exc(),
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def retry_unassigned_allocation_run(request, run_id):
+    """
+    "נסה לשבץ שוב את הסטודנטים שלא שובצו" — a narrowly-scoped, explicit
+    retry: run the solver only for the specific students that the chosen
+    completed run sent to the solver and left unassigned, against
+    whatever inventory is currently available. This is NOT a general
+    "run allocation again" — it never touches students already
+    successfully assigned (by this run or any other), and it refuses to
+    run at all if it cannot identify the exact original population.
+
+    Required behavior (all enforced below):
+      - only students from THIS run's original solver-input population,
+        who do not currently have an active BedAssignment, are selected;
+      - every previously successful assignment (from this run or any
+        other) is left completely untouched — this view never deletes or
+        updates an existing active BedAssignment for anyone outside the
+        retried population;
+      - a new AllocationRun is created, traceable to the original via
+        diagnostics.retry_of_run_id (no schema change — reuses the
+        existing JSONField, avoiding a migration for a purely
+        supplementary link);
+      - accessibility/leaving exclusion is re-applied defensively, in
+        case a student's status changed since the original run;
+      - no duplicate active assignment can be created — the same DB-level
+        uniqueness/locking already used by run_improved_ortools_allocation
+        applies here identically, since this calls the same function.
+    """
+    if not (request.user.is_boss or request.user.is_central_admin):
+        return Response({
+            'error': 'רק מנהל אזור או מנהל מרכזי יכולים להריץ שיבוץ'
+        }, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        original_run = AllocationRun.objects.select_related('region').get(pk=run_id)
+    except AllocationRun.DoesNotExist:
+        return Response({'error': 'הרצה לא נמצאה'}, status=status.HTTP_404_NOT_FOUND)
+
+    region = original_run.region
+
+    if not request.user.is_central_admin:
+        if not request.user.region or request.user.region != region:
+            return Response({
+                'error': 'אין הרשאה להריץ שיבוץ עבור אזור זה'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+    if original_run.status != AllocationRun.Status.COMPLETED:
+        return Response({
+            'success': False,
+            'error': 'ניתן לנסות שוב רק הרצה שהושלמה',
+            'error_code': 'RUN_NOT_COMPLETED',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    original_summary = (original_run.diagnostics or {}).get('population_summary') or {}
+    original_student_ids = original_summary.get('sent_to_solver_student_ids')
+
+    if not original_student_ids:
+        return Response({
+            'success': False,
+            'error': (
+                'להרצה זו אין נתוני אוכלוסייה שמורים (הרצה ישנה מלפני תכונה זו) — '
+                'לא ניתן לנסות שוב באופן בטוח בלי לדעת בדיוק אילו סטודנטים נשלחו '
+                'לשיבוץ במקור. יש להריץ שיבוץ מלא חדש במקום.'
+            ),
+            'error_code': 'MISSING_ORIGINAL_POPULATION',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Defensive re-check: only students who are (a) still part of the
+    # original candidate set, (b) still not accessibility/leaving, and
+    # (c) still without an active assignment. Preserves every existing
+    # assignment untouched — this is purely a read-time filter.
+    retry_students_qs = _exclude_non_solver_students(
+        Student.objects.filter(id__in=original_student_ids)
+    ).filter(assigned_room__isnull=True).select_related(
+        'accepted_dorm_type', 'accepted_dorm_type__region',
+    )
+    retry_student_ids = list(retry_students_qs.values_list('id', flat=True))
+
+    if not retry_student_ids:
+        return Response({
+            'success': True,
+            'message': 'כל הסטודנטים מהרצה זו כבר משובצים — אין מה לנסות שוב',
+            'result': {
+                'retry_of_run_id': original_run.id,
+                'retried_student_count': 0,
+                'successful_assignments': 0,
+                'conflicts': 0,
+                'assignments': [],
+            },
+        }, status=status.HTTP_200_OK)
+
+    with transaction.atomic():
+        Region.objects.select_for_update().get(pk=region.pk)
+        active_run = AllocationRun.objects.filter(
+            region=region,
+            status=AllocationRun.Status.RUNNING,
+        ).order_by('-started_at').first()
+
+        if active_run is not None:
+            return Response({
+                'success': False,
+                'error': 'כבר רץ שיבוץ עבור אזור זה. נא להמתין לסיום ההרצה הקיימת.',
+                'error_code': 'ALLOCATION_ALREADY_RUNNING',
+                'region': region.id,
+                'run': AllocationRunSerializer(active_run).data,
+            }, status=status.HTTP_409_CONFLICT)
+
+        retry_run = AllocationRun.objects.create(
+            region=region,
+            run_by=request.user,
+            status=AllocationRun.Status.RUNNING,
+        )
+
+    try:
+        from allocation.solver import run_improved_ortools_allocation
+
+        rooms = Room.objects.filter(
+            apartment__building__dorm_type__region=region,
+            is_active=True,
+            apartment__is_active=True,
+            apartment__building__is_active=True,
+        ).select_related(
+            'apartment', 'apartment__building', 'apartment__building__dorm_type',
+        ).prefetch_related('beds')
+
+        constraints_config = normalize_allocation_constraints(
+            request.data.get('constraints')
+        )
+
+        result = run_improved_ortools_allocation(
+            students=retry_students_qs,
+            rooms=rooms,
+            constraints_config=constraints_config,
+            allocation_run_id=retry_run.id,
+        ) or {}
+
+        roommate_matches = result.get('roommate_matches')
+        if roommate_matches is None:
+            roommate_matches = (
+                result.get('mutual_roommate_matches', 0)
+                + result.get('one_sided_roommate_matches', 0)
+            )
+
+        population_summary = {
+            'imported_students': len(retry_student_ids),
+            'excluded_accessibility': 0,
+            'excluded_leaving': 0,
+            'excluded_overlap': 0,
+            'excluded_total': 0,
+            'sent_to_solver': len(retry_student_ids),
+            'sent_to_solver_student_ids': retry_student_ids,
+            'assigned': result.get('successful_assignments', 0),
+            'unassigned': result.get('conflicts', 0),
+        }
+
+        retry_run.status = AllocationRun.Status.COMPLETED
+        retry_run.students_processed = result.get('students_processed', len(retry_student_ids))
+        retry_run.successful_assignments = result.get('successful_assignments', 0)
+        retry_run.roommate_matches = roommate_matches
+        retry_run.conflicts = result.get('conflicts', 0)
+        retry_run.completed_at = timezone.now()
+        retry_run.diagnostics = {
+            **_run_diagnostics_payload(result),
+            'population_summary': population_summary,
+            'retry_of_run_id': original_run.id,
+        }
+        refresh_db_connection()
+        retry_run.save()
+
+        assignment_rows = _build_assignment_rows_for_run(retry_run)
+
+        return Response({
+            'success': True,
+            'message': 'ניסיון השיבוץ החוזר הושלם',
+            'result': {
+                'retry_of_run_id': original_run.id,
+                'retried_student_count': len(retry_student_ids),
+                'students_processed': result.get('students_processed', len(retry_student_ids)),
+                'successful_assignments': result.get('successful_assignments', 0),
+                'roommate_matches': roommate_matches,
+                'conflicts': result.get('conflicts', 0),
+                'solver_status': result.get('solver_status'),
+                'warnings': result.get('warnings', []),
+                'students_with_no_feasible_beds': result.get('students_with_no_feasible_beds', []),
+                'anier_building_179_diagnostics': result.get('anier_building_179_diagnostics', {}),
+                'population_summary': population_summary,
+                'assignments': assignment_rows,
+                'run': AllocationRunSerializer(retry_run).data,
+            },
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        traceback.print_exc()
+        try:
+            retry_run.status = AllocationRun.Status.FAILED
+            retry_run.error_message = str(e)
+            retry_run.completed_at = timezone.now()
+            refresh_db_connection()
+            retry_run.save()
+        except Exception:
+            traceback.print_exc()
+
+        return Response({
+            'success': False,
+            'error': f'שגיאה בניסיון השיבוץ החוזר: {str(e)}',
+            'error_type': e.__class__.__name__,
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -3185,17 +3742,7 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
             students_base = Student.objects.filter(
                 accepted_dorm_type__region=region
             ).select_related('accepted_dorm_type', 'accepted_dorm_type__region')
-
-            if 'category' in student_fields:
-                students_base = students_base.exclude(
-                    category=Student.StudentCategory.LEAVING
-                )
-
-            # Accessibility/disability students are imported and saved
-            # normally, but must never reach the OR-Tools solver — the dorm
-            # office allocates them manually (independent of is_priority).
-            if 'accessibility_flag' in student_fields:
-                students_base = students_base.exclude(accessibility_flag=True)
+            students_base = _exclude_non_solver_students(students_base)
 
             students_total_in_region = students_base.count()
             students = students_base
@@ -3225,8 +3772,28 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                 'apartment__building__dorm_type',
             ).prefetch_related('beds')
 
+            # Capture the exact solver-input population before the solver
+            # runs, so the population summary and any later retry-
+            # unassigned request can trace exactly who this run considered
+            # — not a re-derived, possibly-drifted approximation.
+            run_student_ids = list(students.values_list('id', flat=True))
+            population_summary = _population_summary_for_region(
+                region, sent_to_solver_student_ids=run_student_ids,
+            )
+
             students_count = students.count()
             rooms_count = rooms.count()
+
+            from allocation.solver import (
+                run_improved_ortools_allocation,
+                EMPTY_ANIER_BUILDING_179_DIAGNOSTICS,
+            )
+
+            empty_diagnostics = {
+                'warnings': [],
+                'anier_building_179_diagnostics': dict(EMPTY_ANIER_BUILDING_179_DIAGNOSTICS),
+                'population_summary': {**population_summary, 'assigned': 0, 'unassigned': 0},
+            }
 
             if students_count == 0:
                 AllocationRun.objects.filter(pk=allocation_run_id).update(
@@ -3236,6 +3803,7 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                     roommate_matches=0,
                     conflicts=0,
                     completed_at=timezone.now(),
+                    diagnostics=empty_diagnostics,
                 )
                 return
 
@@ -3244,10 +3812,10 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                     status=AllocationRun.Status.FAILED,
                     error_message='לא נמצאו חדרים פעילים באזור זה',
                     completed_at=timezone.now(),
+                    diagnostics=empty_diagnostics,
                 )
                 return
 
-            from allocation.solver import run_improved_ortools_allocation
             close_old_connections()
 
             result = run_improved_ortools_allocation(
@@ -3256,6 +3824,22 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                 constraints_config=constraints_config,
                 allocation_run_id=allocation_run_id,
             ) or {}
+
+            # Persisted immediately (not held in process memory) so this
+            # data survives a worker restart and is visible to any worker
+            # handling the later GET /api/allocation/runs/<id>/ request —
+            # regardless of whether the run below turns out COMPLETED or
+            # gets cancelled to STOPPED.
+            AllocationRun.objects.filter(pk=allocation_run_id).update(
+                diagnostics={
+                    **_run_diagnostics_payload(result),
+                    'population_summary': {
+                        **population_summary,
+                        'assigned': result.get('successful_assignments', 0),
+                        'unassigned': result.get('conflicts', 0),
+                    },
+                },
+            )
 
             # Check for cancellation after solver completes
             post_status = AllocationRun.objects.filter(
@@ -3432,12 +4016,32 @@ def get_allocation_run_detail(request, run_id):
         refresh_db_connection()
         assignment_rows = _build_assignment_rows_for_run(run)
 
+    # Diagnostics (warnings, Building-179/ANIR counters) are persisted on
+    # AllocationRun.diagnostics by both the sync and async allocation
+    # entry points, so this survives worker restarts and is visible
+    # across workers — unlike an in-memory store. Falls back to an
+    # empty/zeroed structure for a run that predates this field (JSONField
+    # default=dict already covers that at the DB level) or is still in
+    # progress.
+    from allocation.solver import EMPTY_ANIER_BUILDING_179_DIAGNOSTICS
+    run_diagnostics = run.diagnostics or {}
+
     return Response({
         'run': run_data,
         'assignments': assignment_rows,
         'successful_assignments': run.successful_assignments,
         'roommate_matches': run.roommate_matches,
         'conflicts': run.conflicts,
+        'warnings': run_diagnostics.get('warnings', []),
+        'anier_building_179_diagnostics': run_diagnostics.get(
+            'anier_building_179_diagnostics',
+            dict(EMPTY_ANIER_BUILDING_179_DIAGNOSTICS),
+        ),
+        # 799 processed = 782 assigned + 17 unassigned, and the
+        # imported/excluded breakdown behind it — authoritative for THIS
+        # run specifically, as persisted at solve time (see
+        # _population_summary_for_region).
+        'population_summary': run_diagnostics.get('population_summary', {}),
     }, status=status.HTTP_200_OK)
 
 
@@ -3640,6 +4244,116 @@ def allocation_history(request):
     return Response({'runs': serializer.data})
 
 
+def _build_unassigned_analysis(students):
+    """
+    Group currently-unassigned students by the characteristics that
+    actually determine bed compatibility (accepted dorm type, gender,
+    housing type) and explain, for each group, why they are blocked
+    right now — physically free beds vs. beds actually compatible with
+    them, and the first hard-constraint stage responsible.
+
+    Reuses allocation.solver.analyze_unassigned_group — the exact staged
+    predicates the solver's own candidate generation uses — so the
+    reported reason can never diverge from real solver behavior. This
+    function only handles grouping and current-inventory lookup; it
+    contains no eligibility rules of its own.
+
+    Computed against CURRENT active inventory (not a historical snapshot
+    from any particular run), so it stays correct and actionable after
+    staff convert apartments and reflects "what would happen if allocation
+    ran again right now."
+    """
+    groups = defaultdict(list)
+    for student in students:
+        dorm_type = student.accepted_dorm_type
+        key = (
+            dorm_type.id if dorm_type else None,
+            student.gender or '',
+            student.housing_type or '',
+        )
+        groups[key].append(student)
+
+    if not groups:
+        return []
+
+    from allocation.solver import analyze_unassigned_group
+
+    dorm_type_ids = {key[0] for key in groups if key[0] is not None}
+    rooms_by_dorm_type = defaultdict(list)
+    if dorm_type_ids:
+        rooms_qs = Room.objects.filter(
+            apartment__building__dorm_type_id__in=dorm_type_ids,
+            is_active=True,
+            apartment__is_active=True,
+            apartment__building__is_active=True,
+        ).select_related(
+            'apartment',
+            'apartment__building',
+            'apartment__building__dorm_type',
+        ).prefetch_related('beds')
+        for room in rooms_qs:
+            rooms_by_dorm_type[room.apartment.building.dorm_type_id].append(room)
+
+    category_labels = dict(Apartment.Category.choices)
+    apartment_type_labels = dict(Apartment.ApartmentType.choices)
+
+    analysis = []
+    for (dorm_type_id, gender, housing_type), group_students in groups.items():
+        representative = group_students[0]
+        dorm_type = representative.accepted_dorm_type
+        housing_type_display = (
+            representative.get_housing_type_display() if housing_type else ''
+        )
+
+        if dorm_type_id is None:
+            analysis.append({
+                'accepted_dorm_type_id': None,
+                'accepted_dorm_type_code': None,
+                'accepted_dorm_type_name': '',
+                'gender': gender,
+                'housing_type': housing_type,
+                'housing_type_display': housing_type_display,
+                'student_count': len(group_students),
+                'physically_free_beds_in_accepted_dorm': 0,
+                'compatible_free_beds': 0,
+                'reason_code': 'NO_ACCEPTED_DORM_TYPE',
+                'inventory_breakdown': [],
+            })
+            continue
+
+        group_rooms = rooms_by_dorm_type.get(dorm_type_id, [])
+        result = analyze_unassigned_group(representative, group_rooms)
+        inventory_breakdown = [
+            {
+                'category': item['category'],
+                'category_display': category_labels.get(item['category'], item['category'] or ''),
+                'apartment_type': item['apartment_type'],
+                'apartment_type_display': apartment_type_labels.get(
+                    item['apartment_type'], item['apartment_type'] or '',
+                ),
+                'free_beds': item['free_beds'],
+            }
+            for item in result['inventory_breakdown']
+        ]
+
+        analysis.append({
+            'accepted_dorm_type_id': dorm_type_id,
+            'accepted_dorm_type_code': getattr(dorm_type, 'code', None),
+            'accepted_dorm_type_name': dorm_type.name if dorm_type else '',
+            'gender': gender,
+            'housing_type': housing_type,
+            'housing_type_display': housing_type_display,
+            'student_count': len(group_students),
+            'physically_free_beds_in_accepted_dorm': result['physically_free_beds_in_accepted_dorm'],
+            'compatible_free_beds': result['compatible_free_beds'],
+            'reason_code': result['reason_code'],
+            'inventory_breakdown': inventory_breakdown,
+        })
+
+    analysis.sort(key=lambda row: -row['student_count'])
+    return analysis
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def allocation_results(request):
@@ -3835,9 +4549,22 @@ def allocation_results(request):
         'student_id',
     )
 
+    # Materialized once so both the per-student rows below and the grouped
+    # unassigned_analysis further down iterate the same population without
+    # a second database round trip.
+    unassigned_student_objects = list(unassigned_qs)
+
+    # Reused to give an eligible Hasmaha ANIR student a more specific
+    # unassigned reason than the generic message below, so a solver-level
+    # hard-constraint failure for this group is visibly distinguishable
+    # from an ordinary student's generic "no valid assignment" outcome.
+    # Accessibility-flagged students never reach this point at all — they
+    # are excluded from unassigned_qs above, not shown here with a reason.
+    from allocation.solver import _is_hasmaha_anier_student
+
     unassigned_students = []
 
-    for student in unassigned_qs:
+    for student in unassigned_student_objects:
         dorm_type = student.accepted_dorm_type
         student_region = dorm_type.region if dorm_type else None
 
@@ -3931,10 +4658,13 @@ def allocation_results(request):
             ),
 
             'special_statuses': special_statuses,
-
-            # At this stage we know the student was not assigned, but we do
-            # not invent a specific reason without running a diagnostic.
-            'unassigned_reason': 'לא נמצא שיבוץ חוקי בתוצאת השיבוץ הנוכחית',
+            'unassigned_reason': (
+                'סטודנט אנייר זכאי לבניין 179 (כפר הסמכה) — לא נמצאה מיטה '
+                'מתאימה בבניין 179 או בבניין אחר בכפר הסמכה בתוצאת השיבוץ '
+                'הנוכחית.'
+                if _is_hasmaha_anier_student(student)
+                else 'לא נמצא שיבוץ חוקי בתוצאת השיבוץ הנוכחית'
+            ),
         })
 
     # ============================================================
@@ -4051,6 +4781,8 @@ def allocation_results(request):
             ),
         })
 
+    unassigned_analysis = _build_unassigned_analysis(unassigned_student_objects)
+
     return Response({
         'counts': {
             'assigned': len(assignments),
@@ -4062,6 +4794,7 @@ def allocation_results(request):
         'assignments': assignments,
         'unassigned_students': unassigned_students,
         'available_beds': available_beds,
+        'unassigned_analysis': unassigned_analysis,
     }, status=status.HTTP_200_OK)
 
 
@@ -4130,6 +4863,15 @@ def allocation_summary(request):
                         'available_beds': 0,
                     },
                 },
+                'population_summary': {
+                    'imported_students': 0,
+                    'excluded_accessibility': 0,
+                    'excluded_leaving': 0,
+                    'excluded_overlap': 0,
+                    'excluded_total': 0,
+                    'sent_to_solver': 0,
+                    'sent_to_solver_student_ids': [],
+                },
                 'latest_inbox': None,
                 'latest_run': None,
             }, status=status.HTTP_200_OK)
@@ -4149,6 +4891,15 @@ def allocation_summary(request):
     all_students_qs = Student.objects.filter(
         accepted_dorm_type__region=region
     )
+
+    # Pre-run preview of the population summary shown on AllocationPage
+    # between upload and clicking "run allocation" — scoped strictly to
+    # this region, never a global Student count. sent_to_solver here is
+    # an estimate of what a default run would submit right now (eligible
+    # and not yet assigned); once a real run exists, its persisted
+    # diagnostics.population_summary (exposed via get_allocation_run_detail)
+    # is the authoritative figure for that specific run.
+    population_summary = _population_summary_for_region(region)
 
     # Keep the summary's actionable counts aligned with run_allocation:
     # students who are leaving, or who are accessibility/disability cases
@@ -4347,6 +5098,7 @@ def allocation_summary(request):
         'students_by_category': students_by_category,
         'students_by_housing_type': students_by_housing_type,
         'inventory_by_type': inventory_by_type,
+        'population_summary': population_summary,
         'latest_inbox': latest_inbox,
         'latest_run': latest_run,
     }, status=status.HTTP_200_OK)
@@ -4446,7 +5198,17 @@ def analysis_data(request):
     assigned_students = assignments_qs.values('student_id').distinct().count()
     unassigned_students = max(total_students - assigned_students, 0)
 
-    priority_students = students_qs.filter(is_priority=True).count()
+    # Priority KPIs must be scoped to the same "automatic allocation
+    # population" as the solver/allocation_summary — i.e. exclude LEAVING
+    # and accessibility-flagged students, who are never sent to the
+    # solver in the first place — so this tile cannot report a priority
+    # count larger than the population the allocation pages are actually
+    # working with.
+    allocatable_students_qs = students_qs.exclude(
+        category=Student.StudentCategory.LEAVING
+    ).exclude(accessibility_flag=True)
+
+    priority_students = allocatable_students_qs.filter(is_priority=True).count()
 
     total_capacity = sum(rooms_qs.values_list('capacity', flat=True))
     assigned_beds = assignments_qs.values('bed_id').distinct().count()
@@ -4487,7 +5249,7 @@ def analysis_data(request):
         ).distinct()
     pending_requests = requests_qs.count()
 
-    priority_unassigned_students = students_qs.filter(
+    priority_unassigned_students = allocatable_students_qs.filter(
         is_priority=True
     ).exclude(
         id__in=assignments_qs.values('student_id')
@@ -5099,8 +5861,10 @@ def what_if_building_inactivation_simulate(request):
 @permission_classes([IsAuthenticated])
 def what_if_building_inactivation_confirm(request):
     """
-    Confirm building inactivation and create pending MovementRequest rows.
-    This does not choose new rooms and does not run allocation.
+    Confirm building inactivation and create pending StudentRequest rows
+    (the model backing the Transfer Requests / בקשות מעבר page) for
+    affected active assignments. This does not choose new rooms and does
+    not run allocation.
     """
     try:
         if not request.user.is_boss:
@@ -5135,35 +5899,22 @@ def what_if_building_inactivation_confirm(request):
                 buildings.update(is_active=False)
 
             for assignment in affected_assignments:
-                existing_request = MovementRequest.objects.filter(
-                    student=assignment.student,
-                    from_assignment=assignment,
-                    status=MovementRequest.Status.PENDING,
-                ).first()
-
-                if existing_request:
-                    skipped_existing_count += 1
-                    continue
-
-                movement_request = MovementRequest(
-                    student=assignment.student,
-                    from_assignment=assignment,
-                    to_bed=None,
-                    movement_type=MovementRequest.MovementType.INTERNAL,
-                    status=MovementRequest.Status.PENDING,
+                transfer_request = _create_deactivation_transfer_request(
+                    assignment=assignment,
                     reason=reason,
                     requested_by=request.user,
                 )
 
-                movement_request.full_clean()
-                movement_request.save()
+                if transfer_request is None:
+                    skipped_existing_count += 1
+                    continue
 
                 created_count += 1
-                created_request_ids.append(movement_request.id)
+                created_request_ids.append(transfer_request.id)
 
         return Response({
             'success': True,
-            'message': 'Building inactivation confirmed and movement requests were created.',
+            'message': 'Building inactivation confirmed and transfer requests were created.',
             'inactivated_buildings': inactivate_buildings,
             'selected_building_ids': building_ids,
             'affected_students_count': len(affected_assignments),
@@ -5637,13 +6388,68 @@ def what_if_availability_simulate(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def _create_deactivation_transfer_request(assignment, reason, requested_by):
+    """
+    Ensure a pending StudentRequest exists for a student whose current
+    inventory (building/apartment/room) was just deactivated.
+
+    StudentRequest — not MovementRequest — is the model the actual
+    Transfer Requests / בקשות מעבר page (StudentRequestViewSet, /api/requests/)
+    reads. MovementRequest is only ever consumed by the legacy, UI-dead
+    Transfer/TransferViewSet pair, so a request created there is invisible
+    to staff. This reuses the same request_type/status/snapshot
+    conventions StudentRequestViewSet.perform_create already uses for
+    manually-created room/apartment transfer requests (see
+    _assignment_snapshot / _student_current_region_id above), so
+    deactivation-triggered requests render identically on the existing
+    page instead of needing special-cased UI.
+
+    Idempotent: BedAssignment enforces at most one ACTIVE assignment per
+    student, so a student who already has a pending room/apartment-type
+    request necessarily already has one covering this exact current
+    assignment - regardless of which level of the hierarchy
+    (building/apartment/room) triggered the deactivation. Returns the
+    created StudentRequest, or None when an existing pending request
+    already covers this student and nothing was created.
+    """
+    student = assignment.student
+
+    already_pending = StudentRequest.objects.filter(
+        student=student,
+        status=StudentRequest.Status.PENDING,
+        request_type__in=[
+            StudentRequest.RequestType.ROOM,
+            StudentRequest.RequestType.APARTMENT,
+        ],
+    ).exists()
+    if already_pending:
+        return None
+
+    transfer_request = StudentRequest.objects.create(
+        student=student,
+        request_type=StudentRequest.RequestType.ROOM,
+        status=StudentRequest.Status.PENDING,
+        reason=reason,
+        requested_by=requested_by,
+        transfer_scope=StudentRequest.TransferScope.SAME_REGION,
+        source_region_id=_student_current_region_id(student),
+        current_assignment_snapshot=_assignment_snapshot(student),
+    )
+    transfer_request.request_number = f"REQ-{transfer_request.id:06d}"
+    transfer_request.save(update_fields=['request_number'])
+    return transfer_request
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def what_if_availability_confirm(request):
     """
     Confirm generic availability change for buildings, apartments, or rooms.
     Inactivation affects the database by setting is_active=False.
-    It also creates pending MovementRequest rows for affected active assignments.
+    It also creates pending StudentRequest rows (the model backing the
+    Transfer Requests / בקשות מעבר page) for affected active assignments,
+    so occupants stay assigned to their current bed and become visible to
+    staff for manual resolution instead of disappearing from workflow.
     """
     try:
         if not request.user.is_boss:
@@ -5696,31 +6502,18 @@ def what_if_availability_confirm(request):
 
             if action == 'inactivate':
                 for assignment in affected_assignments:
-                    existing_request = MovementRequest.objects.filter(
-                        student=assignment.student,
-                        from_assignment=assignment,
-                        status=MovementRequest.Status.PENDING,
-                    ).first()
-
-                    if existing_request:
-                        skipped_existing_count += 1
-                        continue
-
-                    movement_request = MovementRequest(
-                        student=assignment.student,
-                        from_assignment=assignment,
-                        to_bed=None,
-                        movement_type=MovementRequest.MovementType.INTERNAL,
-                        status=MovementRequest.Status.PENDING,
+                    transfer_request = _create_deactivation_transfer_request(
+                        assignment=assignment,
                         reason=reason,
                         requested_by=request.user,
                     )
 
-                    movement_request.full_clean()
-                    movement_request.save()
+                    if transfer_request is None:
+                        skipped_existing_count += 1
+                        continue
 
                     created_count += 1
-                    created_request_ids.append(movement_request.id)
+                    created_request_ids.append(transfer_request.id)
 
         return Response({
             'success': True,
@@ -5839,11 +6632,18 @@ def statistics(request):
     if total_capacity > 0:
         occupancy_rate = round((occupied_beds / total_capacity) * 100)
 
+    # Priority KPI scoped to the same automatic-allocation population as
+    # run_allocation/allocation_summary (excludes LEAVING and
+    # accessibility-flagged students, who are never sent to the solver).
+    allocatable_students = students.exclude(
+        category=Student.StudentCategory.LEAVING
+    ).exclude(accessibility_flag=True)
+
     return Response({
         'total_students': students.count(),
         'assigned_students': assigned_students,
         'unassigned_students': unassigned_students,
-        'priority_students': students.filter(is_priority=True).count(),
+        'priority_students': allocatable_students.filter(is_priority=True).count(),
         'total_buildings': total_buildings_count,
         'active_buildings': buildings.count(),
         'inactive_buildings': inactive_buildings_count,
@@ -5941,7 +6741,11 @@ def home_dashboard(request):
 
     priority_students_pending = 0
     if is_admin:
-        priority_students_pending = Student.objects.filter(
+        # Scoped to allocatable_qs (excludes LEAVING/accessibility-flagged
+        # students) so this figure matches the same automatic-allocation
+        # population as the rest of this dashboard and analysis_data's
+        # priority_unassigned_students.
+        priority_students_pending = allocatable_qs.filter(
             is_priority=True, assigned_room__isnull=True
         ).count()
 

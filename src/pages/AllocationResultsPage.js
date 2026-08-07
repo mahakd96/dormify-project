@@ -11,11 +11,14 @@ import {
   Clock3,
   DoorOpen,
   Info,
+  Loader,
   MapPin,
+  RefreshCw,
   Sparkles,
   UserCheck,
   UserX,
   Users,
+  X,
 } from 'lucide-react';
 
 /* =========================================================
@@ -311,6 +314,7 @@ function AllocationResultsPage({ language = 'he' }) {
       assignments: [],
       unassigned_students: [],
       available_beds: [],
+      unassigned_analysis: [],
       counts: {
         assigned: 0,
         unassigned: 0,
@@ -326,6 +330,7 @@ function AllocationResultsPage({ language = 'he' }) {
     assignments: [],
     unassigned_students: [],
     available_beds: [],
+    unassigned_analysis: [],
     counts: {
       assigned: 0,
       unassigned: 0,
@@ -335,6 +340,12 @@ function AllocationResultsPage({ language = 'he' }) {
     roommate_matches: 0,
     conflicts: 0,
   };
+
+  // ── Retry-unassigned workflow state ──────────
+  const [retryConfirmOpen, setRetryConfirmOpen] = useState(false);
+  const [retryLoading, setRetryLoading] = useState(false);
+  const [retryError, setRetryError] = useState(null);
+  const [retrySuccess, setRetrySuccess] = useState(null);
 
   /* =======================================================
      Translations
@@ -376,6 +387,35 @@ function AllocationResultsPage({ language = 'he' }) {
         priority: 'עדיפות',
         specialStatuses: 'סטטוסים מיוחדים',
         reason: 'סיבה',
+
+        // Unassigned analysis (why weren't students assigned)
+        unassignedAnalysisTitle: 'למה חלק מהסטודנטים לא שובצו?',
+        studentsUnassignedLabel: 'סטודנטים לא שובצו',
+        physicallyFreeBedsLabel: 'מיטות פנויות פיזית במתחם',
+        compatibleFreeBedsLabel: 'מיטות מתאימות',
+        inventoryBreakdownLabel: 'פירוט מלאי פנוי',
+        possibleActionLabel: 'פעולה אפשרית',
+        goToBuildings: 'עבור לניהול מבנים',
+        showRelevantBeds: 'הצג מיטות פנויות רלוונטיות',
+        reasonNoAcceptedDormType: 'לסטודנטים אלו אין סוג מעונות מאושר רשום.',
+        reasonNoPhysicalFreeBeds: 'אין מיטות פנויות פיזית בסוג המעונות המאושר שלהם.',
+        reasonHousingGenderMismatch:
+          'אין מיטות פנויות בסוג הדיור והמגדר המתאימים להם. ניתן לשקול שינוי סיווג של דירות פנויות מסוג אחר, ולאחר מכן לנסות שוב לשבץ את הסטודנטים שלא שובצו.',
+        reasonBuildingGenderRestriction:
+          'המיטות הפנויות נמצאות בבניינים עם הגבלת מגדר שאינה תואמת.',
+        reasonReligionOrOccupant:
+          'המיטות הפנויות אינן תואמות מבחינת דת/דתיות עם הדיירים הקיימים, או שיש אילוץ ברמת החדר.',
+        reasonOtherHardConstraint:
+          'קיימות מיטות פנויות שנראות תואמות, אך הסטודנטים עדיין לא שובצו — ייתכן שיש אילוץ נוסף (למשל בקשת שותפים הדדית, או תחרות על אותן מיטות עם סטודנטים אחרים) שמונע שיבוץ אוטומטי. יש לבדוק ידנית.',
+        retryUnassigned: 'נסה לשבץ שוב את הסטודנטים שלא שובצו',
+        retryUnassignedConfirmTitle: 'ניסיון שיבוץ חוזר',
+        retryUnassignedConfirmBody: (count) =>
+          `הפעולה תנסה לשבץ מחדש ${count} סטודנטים שלא שובצו בהרצה הנוכחית, כנגד המלאי הפנוי הנוכחי בלבד. שיבוצים קיימים לא ישתנו. להמשיך?`,
+        retryUnassignedSuccess: (assignedNow, retried) =>
+          `הניסיון הושלם: ${assignedNow} מתוך ${retried} סטודנטים שובצו כעת.`,
+        retrying: 'מנסה לשבץ מחדש...',
+        retryError: 'שגיאה בניסיון השיבוץ החוזר',
+        noRunToRetry: 'לא נמצאה הרצת שיבוץ פעילה לניסיון חוזר',
 
         dormType: 'סוג מעונות',
         apartmentType: 'סוג דירה',
@@ -445,6 +485,35 @@ function AllocationResultsPage({ language = 'he' }) {
         priority: 'Priority',
         specialStatuses: 'Special Statuses',
         reason: 'Reason',
+
+        // Unassigned analysis (why weren't students assigned)
+        unassignedAnalysisTitle: 'Why weren’t some students assigned?',
+        studentsUnassignedLabel: 'students unassigned',
+        physicallyFreeBedsLabel: 'physically free beds in this dorm type',
+        compatibleFreeBedsLabel: 'compatible free beds',
+        inventoryBreakdownLabel: 'free inventory breakdown',
+        possibleActionLabel: 'Possible action',
+        goToBuildings: 'Go to Buildings management',
+        showRelevantBeds: 'Show relevant free beds',
+        reasonNoAcceptedDormType: 'These students have no accepted dorm type on record.',
+        reasonNoPhysicalFreeBeds: 'There are no physically free beds in their accepted dorm type.',
+        reasonHousingGenderMismatch:
+          'There are no free beds matching their housing type and gender. Consider reclassifying suitable empty apartments of another type, then retry allocation for the unassigned students.',
+        reasonBuildingGenderRestriction:
+          'The free beds are in buildings with a non-matching gender restriction.',
+        reasonReligionOrOccupant:
+          'The free beds are incompatible on religion/religious grounds with existing occupants, or a room-level constraint applies.',
+        reasonOtherHardConstraint:
+          'Compatible free beds appear to exist, yet these students are still unassigned — there may be an additional constraint (e.g. a mutual roommate request, or contention with other students for the same beds) preventing automatic placement. Manual review is recommended.',
+        retryUnassigned: 'Retry unassigned students',
+        retryUnassignedConfirmTitle: 'Retry Allocation',
+        retryUnassignedConfirmBody: (count) =>
+          `This will retry allocating the ${count} students left unassigned by the current run, against currently available inventory only. Existing assignments will not change. Continue?`,
+        retryUnassignedSuccess: (assignedNow, retried) =>
+          `Retry complete: ${assignedNow} of ${retried} students were just assigned.`,
+        retrying: 'Retrying allocation...',
+        retryError: 'Failed to retry unassigned students',
+        noRunToRetry: 'No active allocation run found to retry',
 
         dormType: 'Dorm Type',
         apartmentType: 'Apartment Type',
@@ -523,6 +592,11 @@ function AllocationResultsPage({ language = 'he' }) {
             ? data.available_beds
             : [];
 
+        const unassignedAnalysisFromDb =
+          Array.isArray(data?.unassigned_analysis)
+            ? data.unassigned_analysis
+            : [];
+
         const counts = {
           assigned:
             Number(
@@ -553,6 +627,7 @@ function AllocationResultsPage({ language = 'he' }) {
           assignments: assignmentsFromDb,
           unassigned_students: unassignedFromDb,
           available_beds: availableBedsFromDb,
+          unassigned_analysis: unassignedAnalysisFromDb,
           counts,
           successful_assignments: counts.assigned,
           roommate_matches:
@@ -613,6 +688,25 @@ function AllocationResultsPage({ language = 'he' }) {
   )
     ? result.available_beds
     : [];
+
+  const unassignedAnalysis = Array.isArray(
+    result.unassigned_analysis
+  )
+    ? result.unassigned_analysis
+    : [];
+
+  // The run this results page is showing — needed to scope the retry-
+  // unassigned action to exactly this run's original population.
+  // Available when navigated here from AllocationPage (routeResult.run);
+  // falls back to the region's latest COMPLETED run if the summary was
+  // also passed along. If neither is available (e.g. a cold direct visit
+  // to this URL), retry is simply not offered rather than guessing.
+  const currentRunId =
+    routeResult?.run?.id ||
+    (summary?.latest_run?.status === 'completed'
+      ? summary?.latest_run?.id
+      : null) ||
+    null;
 
   const counts = {
     assigned:
@@ -730,6 +824,114 @@ const formattedLastAllocationDate =
 
   const goBack = () => {
     navigate('/allocation');
+  };
+
+  /* =======================================================
+     Unassigned analysis helpers
+     ======================================================= */
+
+  const reasonText = (reasonCode) => {
+    switch (reasonCode) {
+      case 'NO_ACCEPTED_DORM_TYPE':
+        return t.reasonNoAcceptedDormType;
+      case 'NO_PHYSICAL_FREE_BEDS_IN_ACCEPTED_DORM':
+        return t.reasonNoPhysicalFreeBeds;
+      case 'HOUSING_TYPE_OR_GENDER_MISMATCH':
+        return t.reasonHousingGenderMismatch;
+      case 'BUILDING_GENDER_RESTRICTION':
+        return t.reasonBuildingGenderRestriction;
+      case 'RELIGION_OR_EXISTING_OCCUPANT_INCOMPATIBILITY':
+        return t.reasonReligionOrOccupant;
+      case 'OTHER_HARD_CONSTRAINT_CONFLICT':
+        return t.reasonOtherHardConstraint;
+      default:
+        return '';
+    }
+  };
+
+  // Navigates to Buildings management pre-scoped to this group's accepted
+  // dorm type/region where feasible (region + dorm type map directly onto
+  // existing Buildings-page filters); apartment type/category/gender are
+  // passed as informational query params only — Buildings does not
+  // auto-filter by them, since doing so reliably would require fetching
+  // every apartment up front, and this stays informational rather than
+  // implying an exact filter that isn't really applied.
+  const handleGoToBuildings = (group) => {
+    const params = new URLSearchParams();
+    if (region?.id) params.set('region', region.id);
+    // dormTypeId is the real DormType primary key — BuildingsPage filters
+    // selectedDormTypeId against dormType.id, not dormType.code, so the PK
+    // is what actually pre-selects the filter. dormTypeCode is kept only
+    // as an informational extra (e.g. for display), never for filtering.
+    if (group?.accepted_dorm_type_id !== null && group?.accepted_dorm_type_id !== undefined) {
+      params.set('dormTypeId', group.accepted_dorm_type_id);
+    }
+    if (group?.accepted_dorm_type_code !== null && group?.accepted_dorm_type_code !== undefined) {
+      params.set('dormTypeCode', group.accepted_dorm_type_code);
+    }
+    if (group?.accepted_dorm_type_name) params.set('dormTypeName', group.accepted_dorm_type_name);
+    if (group?.gender) params.set('gender', group.gender);
+    if (group?.housing_type) params.set('housingType', group.housing_type);
+    if (group?.student_count !== null && group?.student_count !== undefined) {
+      params.set('studentCount', group.student_count);
+    }
+    params.set('freeOnly', '1');
+    navigate(`/buildings?${params.toString()}`);
+  };
+
+  const handleRetryUnassigned = async () => {
+    if (!currentRunId) {
+      setRetryError(t.noRunToRetry);
+      return;
+    }
+
+    setRetryLoading(true);
+    setRetryError(null);
+    setRetrySuccess(null);
+
+    try {
+      const response = await allocationAPI.retryUnassigned(currentRunId);
+      const data = response?.data || response;
+      const retryResult = data?.result || {};
+
+      setRetrySuccess(
+        t.retryUnassignedSuccess(
+          Number(retryResult.successful_assignments) || 0,
+          Number(retryResult.retried_student_count) || 0,
+        ),
+      );
+      setRetryConfirmOpen(false);
+
+      // Refresh this page's data from the server so newly-assigned
+      // students move from the "unassigned" tab into "assigned" and the
+      // analysis reflects the new state — never a local/optimistic edit.
+      const regionId = region?.id || summary?.region?.id || summary?.region_id || null;
+      const refreshed = regionId
+        ? await allocationAPI.getResults(regionId)
+        : await allocationAPI.getResults();
+      const refreshedData = refreshed?.data || refreshed;
+
+      setServerResult((previous) => ({
+        ...previous,
+        assignments: Array.isArray(refreshedData?.assignments) ? refreshedData.assignments : previous.assignments,
+        unassigned_students: Array.isArray(refreshedData?.unassigned_students)
+          ? refreshedData.unassigned_students
+          : previous.unassigned_students,
+        available_beds: Array.isArray(refreshedData?.available_beds)
+          ? refreshedData.available_beds
+          : previous.available_beds,
+        unassigned_analysis: Array.isArray(refreshedData?.unassigned_analysis)
+          ? refreshedData.unassigned_analysis
+          : previous.unassigned_analysis,
+        counts: refreshedData?.counts || previous.counts,
+      }));
+    } catch (error) {
+      setRetryError(
+        error?.response?.data?.error || error?.message || t.retryError,
+      );
+    } finally {
+      setRetryLoading(false);
+    }
   };
 
   /* =======================================================
@@ -1308,18 +1510,150 @@ const formattedLastAllocationDate =
      Unassigned students table
      ======================================================= */
 
+  const renderUnassignedAnalysis = () => {
+    if (unassignedAnalysis.length === 0) return null;
+
+    return (
+      <div className="unassigned-analysis">
+        <div className="unassigned-analysis-header">
+          <AlertTriangle size={17} />
+          <span>{t.unassignedAnalysisTitle}</span>
+        </div>
+
+        <div className="unassigned-analysis-groups">
+          {unassignedAnalysis.map((group, index) => (
+            <div
+              className="unassigned-analysis-card"
+              key={`${group.accepted_dorm_type_code ?? 'none'}-${group.gender}-${group.housing_type}-${index}`}
+            >
+              <div className="unassigned-analysis-card-title">
+                <strong>{group.student_count}</strong> {t.studentsUnassignedLabel}
+                {' — '}
+                {group.housing_type_display || group.housing_type || '-'}
+                {group.accepted_dorm_type_name ? ` · ${group.accepted_dorm_type_name}` : ''}
+              </div>
+
+              <div className="unassigned-analysis-counts">
+                <span>{group.physically_free_beds_in_accepted_dorm} {t.physicallyFreeBedsLabel}</span>
+                <span className="unassigned-analysis-compatible">
+                  {group.compatible_free_beds} {t.compatibleFreeBedsLabel}
+                </span>
+              </div>
+
+              {group.inventory_breakdown?.length > 0 && (
+                <div className="unassigned-analysis-inventory">
+                  <span className="unassigned-analysis-inventory-label">
+                    {t.inventoryBreakdownLabel}:
+                  </span>
+                  {group.inventory_breakdown.map((item, itemIndex) => (
+                    <span className="unassigned-analysis-inventory-chip" key={itemIndex}>
+                      {item.free_beds} {item.category_display || item.category} · {item.apartment_type_display || item.apartment_type}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <div className="unassigned-analysis-reason">
+                {reasonText(group.reason_code)}
+              </div>
+
+              {group.accepted_dorm_type_code !== null && group.accepted_dorm_type_code !== undefined && (
+                <button
+                  type="button"
+                  className="unassigned-analysis-buildings-btn"
+                  onClick={() => handleGoToBuildings(group)}
+                >
+                  <Building2 size={14} />
+                  {t.showRelevantBeds}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div className="unassigned-retry-block">
+          <button
+            type="button"
+            className="unassigned-retry-btn"
+            onClick={() => setRetryConfirmOpen(true)}
+            disabled={retryLoading || !currentRunId}
+            title={!currentRunId ? t.noRunToRetry : ''}
+          >
+            {retryLoading ? (
+              <><Loader size={15} className="spin" /> {t.retrying}</>
+            ) : (
+              <><RefreshCw size={15} /> {t.retryUnassigned}</>
+            )}
+          </button>
+          {retryError && (
+            <div className="unassigned-retry-message error">
+              <AlertTriangle size={14} /> {retryError}
+            </div>
+          )}
+          {retrySuccess && (
+            <div className="unassigned-retry-message success">
+              <UserCheck size={14} /> {retrySuccess}
+            </div>
+          )}
+        </div>
+
+        {retryConfirmOpen && (
+          <div className="retry-confirm-overlay" role="dialog" aria-modal="true">
+            <div className="retry-confirm-modal">
+              <div className="retry-confirm-header">
+                <span>{t.retryUnassignedConfirmTitle}</span>
+                <button
+                  type="button"
+                  className="retry-confirm-close"
+                  onClick={() => setRetryConfirmOpen(false)}
+                  aria-label="close"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="retry-confirm-body">
+                {t.retryUnassignedConfirmBody(unassignedStudents.length)}
+              </div>
+              <div className="retry-confirm-actions">
+                <button
+                  type="button"
+                  className="retry-confirm-btn cancel"
+                  onClick={() => setRetryConfirmOpen(false)}
+                  disabled={retryLoading}
+                >
+                  {t.no}
+                </button>
+                <button
+                  type="button"
+                  className="retry-confirm-btn confirm"
+                  onClick={handleRetryUnassigned}
+                  disabled={retryLoading}
+                >
+                  {retryLoading ? <Loader size={14} className="spin" /> : null}
+                  {t.yes}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderUnassignedStudents = () => {
     if (unassignedStudents.length === 0) {
       return (
         <div className="empty-state">
           <Info size={18} />
           <span>{t.noUnassignedStudents}</span>
+          {renderUnassignedAnalysis()}
         </div>
       );
     }
 
     return (
       <div className="table-wrap">
+        {renderUnassignedAnalysis()}
         <table className="results-table unassigned-table">
           <thead>
             <tr>
@@ -2412,6 +2746,210 @@ const styles = `
     color: var(--purple);
     font-size: 10px;
     font-weight: 900;
+  }
+
+  /* ── Unassigned analysis + retry ──────────── */
+  .unassigned-analysis {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 18px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--card-bg);
+    box-shadow: var(--shadow-soft);
+  }
+  .unassigned-analysis-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 800;
+    font-size: 14.5px;
+    color: var(--text);
+  }
+  .unassigned-analysis-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .unassigned-analysis-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(217, 119, 6, 0.04);
+  }
+  .unassigned-analysis-card-title {
+    font-size: 13.5px;
+    color: var(--text);
+    font-weight: 700;
+  }
+  .unassigned-analysis-counts {
+    display: flex;
+    gap: 14px;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+  .unassigned-analysis-compatible {
+    color: var(--amber);
+    font-weight: 700;
+  }
+  .unassigned-analysis-inventory {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 12px;
+  }
+  .unassigned-analysis-inventory-label {
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .unassigned-analysis-inventory-chip {
+    display: inline-flex;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--blue-soft);
+    color: var(--blue);
+    font-weight: 700;
+    font-size: 11.5px;
+  }
+  .unassigned-analysis-reason {
+    font-size: 12.5px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .unassigned-analysis-buildings-btn {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border: 1px solid var(--blue);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--blue);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .unassigned-analysis-buildings-btn:hover {
+    background: var(--blue-soft);
+  }
+
+  .unassigned-retry-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-top: 4px;
+    border-top: 1px dashed var(--border);
+  }
+  .unassigned-retry-btn {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 14px;
+    border: none;
+    border-radius: 10px;
+    background: var(--blue);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .unassigned-retry-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  .unassigned-retry-message {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .unassigned-retry-message.error { color: var(--red); }
+  .unassigned-retry-message.success { color: var(--green); }
+
+  .retry-confirm-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  .retry-confirm-modal {
+    width: min(420px, 92vw);
+    background: var(--card-bg);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .retry-confirm-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-weight: 800;
+    font-size: 15px;
+    color: var(--text);
+  }
+  .retry-confirm-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--muted);
+    padding: 2px;
+  }
+  .retry-confirm-body {
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.55;
+  }
+  .retry-confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .retry-confirm-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    border: 1px solid var(--border);
+  }
+  .retry-confirm-btn.cancel {
+    background: #fff;
+    color: var(--text);
+  }
+  .retry-confirm-btn.confirm {
+    background: var(--blue);
+    color: #fff;
+    border-color: var(--blue);
+  }
+  .retry-confirm-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .spin {
+    animation: unassigned-spin 0.9s linear infinite;
+  }
+  @keyframes unassigned-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 `;
 
