@@ -202,6 +202,164 @@ class DormTypeSerializer(serializers.ModelSerializer):
         fields = ['id', 'code', 'name', 'region', 'region_name']
 
 
+
+# Fields that may only be changed through the availability ("what-if")
+# workflow (/api/what-if/availability/simulate/ + /confirm/), which shows an
+# impact warning and preserves existing occupants instead of silently
+# flipping is_active as a side effect of an ordinary inventory edit.
+_INVENTORY_AVAILABILITY_ONLY_FIELDS = {'is_active'}
+
+
+def _availability_only_field_conflict(instance, data):
+    """
+    Returns a flat {field, code, message} dict if `data` tries to change
+    is_active directly, or None if the change is safe. Deliberately
+    returned rather than raised: raising serializers.ValidationError from
+    inside a serializer's .validate() gets rewrapped by DRF into the
+    standard {field: [errors]} shape (via as_serializer_error), which does
+    not match the flat structured-error contract these inventory endpoints
+    are required to return. Callers (the ViewSets) check this before
+    invoking the serializer at all.
+    """
+    if instance is None:
+        return None
+    for field_name in _INVENTORY_AVAILABILITY_ONLY_FIELDS:
+        if field_name in data and data[field_name] != getattr(instance, field_name):
+            return {
+                'field': field_name,
+                'code': 'USE_AVAILABILITY_WORKFLOW',
+                'message': (
+                    'שינוי סטטוס פעיל/לא פעיל מתבצע רק דרך תהליך "שינוי זמינות" '
+                    '(/api/what-if/availability/), הכולל אזהרת השפעה על דיירים קיימים.'
+                ),
+            }
+    return None
+
+
+def check_building_write_conflict(instance, data):
+    """Flat structured-error check for Building create/update. See
+    _availability_only_field_conflict for why this returns instead of
+    raising."""
+    conflict = _availability_only_field_conflict(instance, data)
+    if conflict:
+        return conflict
+
+    new_dorm_type_id = data.get('dorm_type', getattr(instance, 'dorm_type_id', None))
+    new_number = data.get('number', getattr(instance, 'number', None))
+    if new_dorm_type_id is not None and new_number is not None:
+        duplicate_qs = Building.objects.filter(dorm_type_id=new_dorm_type_id, number=new_number)
+        if instance is not None:
+            duplicate_qs = duplicate_qs.exclude(pk=instance.pk)
+        if duplicate_qs.exists():
+            return {
+                'field': 'number',
+                'code': 'DUPLICATE_BUILDING_NUMBER',
+                'message': 'כבר קיים בניין עם מספר זה עבור סוג המעונות הנבחר.',
+            }
+
+    if instance is not None:
+        new_restriction = data.get('gender_restriction', instance.gender_restriction)
+        if new_restriction != instance.gender_restriction and new_restriction:
+            conflicting = BedAssignment.objects.filter(
+                bed__room__apartment__building=instance,
+                status=BedAssignment.Status.ACTIVE,
+            ).exclude(student__gender=new_restriction).exists()
+            if conflicting:
+                return {
+                    'field': 'gender_restriction',
+                    'code': 'ACTIVE_OCCUPANT_CONFLICT',
+                    'message': (
+                        'לא ניתן להגביל את הבניין למגדר זה — קיימים דיירים פעילים '
+                        'שאינם תואמים להגבלה החדשה.'
+                    ),
+                }
+
+    return None
+
+
+def check_apartment_write_conflict(instance, data):
+    """Flat structured-error check for Apartment create/update."""
+    conflict = _availability_only_field_conflict(instance, data)
+    if conflict:
+        return conflict
+
+    if instance is None:
+        return None
+
+    active_assignments = list(
+        BedAssignment.objects.filter(
+            bed__room__apartment=instance, status=BedAssignment.Status.ACTIVE,
+        ).select_related('student')
+    )
+
+    new_category = data.get('category', instance.category)
+    new_apartment_type = data.get('apartment_type', instance.apartment_type)
+    category_or_type_changed = (
+        new_category != instance.category or new_apartment_type != instance.apartment_type
+    )
+
+    if active_assignments and category_or_type_changed:
+        from allocation.solver import _housing_matches_apartment
+        from copy import copy
+
+        hypothetical = copy(instance)
+        hypothetical.category = new_category
+        hypothetical.apartment_type = new_apartment_type
+
+        conflicting = [
+            assignment for assignment in active_assignments
+            if not _housing_matches_apartment(assignment.student, hypothetical)
+        ]
+        if conflicting:
+            changed_field = 'category' if new_category != instance.category else 'apartment_type'
+            return {
+                'field': changed_field,
+                'code': 'ACTIVE_OCCUPANT_CONFLICT',
+                'message': (
+                    f'לא ניתן לשנות את סיווג הדירה — {len(conflicting)} דיירים פעילים '
+                    'אינם תואמים לקטגוריה/סוג הדיור החדשים. יש לפנות את הדירה תחילה.'
+                ),
+            }
+
+    new_capacity = data.get('apartment_capacity', instance.apartment_capacity)
+    occupant_count = len(active_assignments)
+    if new_capacity is not None and new_capacity < occupant_count:
+        return {
+            'field': 'apartment_capacity',
+            'code': 'CAPACITY_BELOW_OCCUPANCY',
+            'message': (
+                f'לא ניתן להגדיר קיבולת ({new_capacity}) נמוכה ממספר הדיירים '
+                f'הפעילים הנוכחי ({occupant_count}).'
+            ),
+        }
+
+    return None
+
+
+def check_room_write_conflict(instance, data):
+    """Flat structured-error check for Room create/update."""
+    conflict = _availability_only_field_conflict(instance, data)
+    if conflict:
+        return conflict
+
+    if instance is None:
+        return None
+
+    new_capacity = data.get('capacity', instance.capacity)
+    occupancy = instance.current_occupancy
+    if new_capacity < occupancy:
+        return {
+            'field': 'capacity',
+            'code': 'CAPACITY_BELOW_OCCUPANCY',
+            'message': (
+                f'לא ניתן להגדיר קיבולת ({new_capacity}) נמוכה ממספר הדיירים '
+                f'הפעילים הנוכחי ({occupancy}).'
+            ),
+        }
+
+    return None
+
+
 class BuildingSerializer(serializers.ModelSerializer):
     """Serialize building data"""
 
@@ -209,6 +367,12 @@ class BuildingSerializer(serializers.ModelSerializer):
     dorm_type_code = serializers.IntegerField(source='dorm_type.code', read_only=True)
     region = serializers.CharField(source='dorm_type.region.id', read_only=True)
     region_name = serializers.CharField(source='dorm_type.region.name', read_only=True)
+    gender_restriction_display = serializers.CharField(source='get_gender_restriction_display', read_only=True)
+    apartment_count = serializers.SerializerMethodField()
+    room_count = serializers.SerializerMethodField()
+    bed_count = serializers.SerializerMethodField()
+    occupied_beds = serializers.SerializerMethodField()
+    free_beds = serializers.SerializerMethodField()
 
     class Meta:
         model = Building
@@ -222,7 +386,30 @@ class BuildingSerializer(serializers.ModelSerializer):
             'region_name',
             'is_active',
             'gender_restriction',
+            'gender_restriction_display',
+            'apartment_count',
+            'room_count',
+            'bed_count',
+            'occupied_beds',
+            'free_beds',
         ]
+
+    def get_apartment_count(self, obj):
+        return obj.apartments.filter(is_active=True).count()
+
+    def get_room_count(self, obj):
+        return Room.objects.filter(apartment__building=obj, is_active=True, apartment__is_active=True).count()
+
+    def get_bed_count(self, obj):
+        return Bed.objects.filter(room__apartment__building=obj, room__is_active=True, room__apartment__is_active=True).count()
+
+    def get_occupied_beds(self, obj):
+        return BedAssignment.objects.filter(
+            bed__room__apartment__building=obj, status=BedAssignment.Status.ACTIVE,
+        ).values('bed_id').distinct().count()
+
+    def get_free_beds(self, obj):
+        return max(self.get_bed_count(obj) - self.get_occupied_beds(obj), 0)
 
 
 class ApartmentSerializer(serializers.ModelSerializer):
@@ -235,6 +422,10 @@ class ApartmentSerializer(serializers.ModelSerializer):
     region = serializers.CharField(source='region.id', read_only=True)
     region_name = serializers.CharField(source='region.name', read_only=True)
     dorm_type = serializers.CharField(source='dorm_type.name', read_only=True)
+    actual_room_count = serializers.SerializerMethodField()
+    bed_count = serializers.SerializerMethodField()
+    occupied_beds = serializers.SerializerMethodField()
+    free_beds = serializers.SerializerMethodField()
 
     class Meta:
         model = Apartment
@@ -248,7 +439,11 @@ class ApartmentSerializer(serializers.ModelSerializer):
             'apartment_type',
             'apartment_type_display',
             'room_count',
+            'actual_room_count',
             'apartment_capacity',
+            'bed_count',
+            'occupied_beds',
+            'free_beds',
             'is_active',
             'inactive_reason',
             'inactive_reason_display',
@@ -256,6 +451,20 @@ class ApartmentSerializer(serializers.ModelSerializer):
             'region_name',
             'dorm_type',
         ]
+
+    def get_actual_room_count(self, obj):
+        return obj.rooms.filter(is_active=True).count()
+
+    def get_bed_count(self, obj):
+        return Bed.objects.filter(room__apartment=obj, room__is_active=True).count()
+
+    def get_occupied_beds(self, obj):
+        return BedAssignment.objects.filter(
+            bed__room__apartment=obj, status=BedAssignment.Status.ACTIVE,
+        ).values('bed_id').distinct().count()
+
+    def get_free_beds(self, obj):
+        return max(self.get_bed_count(obj) - self.get_occupied_beds(obj), 0)
 
 
 class RoomSerializer(serializers.ModelSerializer):
@@ -269,6 +478,8 @@ class RoomSerializer(serializers.ModelSerializer):
     current_occupancy = serializers.IntegerField(read_only=True)
     available_beds = serializers.IntegerField(read_only=True)
     is_full = serializers.BooleanField(read_only=True)
+    bed_count = serializers.SerializerMethodField()
+    has_missing_bed_records = serializers.SerializerMethodField()
 
     class Meta:
         model = Room
@@ -282,15 +493,33 @@ class RoomSerializer(serializers.ModelSerializer):
             'name',
             'number',
             'capacity',
+            'bed_count',
             'current_occupancy',
             'available_beds',
             'is_full',
             'is_active',
+            'has_missing_bed_records',
         ]
+
+    def get_bed_count(self, obj):
+        return obj.beds.count()
+
+    def get_has_missing_bed_records(self, obj):
+        # Bed rows are only materialized by the admin-only
+        # `manage.py materialize_beds` command, never automatically on
+        # capacity edits (see ensure_room_beds in views.py) — surfaced here
+        # so staff can see the gap instead of it looking like a silent bug.
+        return obj.beds.count() < obj.capacity
 
 
 class BedSerializer(serializers.ModelSerializer):
-    """Serialize bed data"""
+    """Serialize bed data.
+
+    Beds are only editable at the label level: individual creation/deletion
+    and activation/deactivation are not supported by the current schema —
+    Bed rows are derived from Room.capacity and materialized exclusively by
+    the admin-only `manage.py materialize_beds` command.
+    """
 
     room_name = serializers.CharField(source='room.name', read_only=True)
     apartment_number = serializers.CharField(source='room.apartment.number', read_only=True)
@@ -308,6 +537,7 @@ class BedSerializer(serializers.ModelSerializer):
             'building_number',
             'is_occupied',
         ]
+        read_only_fields = ['room']
 
 
 # ===========================================

@@ -30,21 +30,68 @@ EXCLUSIVE_HOUSING_TYPES = {
 
 
 # ---------------------------------------------------------------------------
-# Hasmaha Village / building-179 exclusive-group policy
+# Building 179 / כפר הסמכה automatic-allocation preference
 #
-# Building 179 belongs specifically to כפר הסמכה, whose DormType.code is 15.
-# The rule must therefore be identified by BOTH:
-#   1. Building.number == 179
-#   2. Building.dorm_type.code == 15
+# Confirmed data mapping (business + Excel, see ANIR_PRIORITY_ACCESSIBILITY_
+# AUDIT.md section 4/9A):
+#   - DormType.code == 15 is כפר הסמכה. This is the ONLY dorm type this
+#     policy applies to.
+#   - DormType.code == 11 is עליון עמים — a real, separate dorm type. It is
+#     mentioned here only so a future reader never re-confuses the two
+#     codes again; no functional logic in this file keys off code 11.
+#   - DormType.code is a domain/map code, not a Django primary key — never
+#     compare it against accepted_dorm_type_id or dorm_type_id.
+#   - כפר הסמכה's current Excel inventory includes Buildings 176, 177, 178
+#     and 179. Only 179 gets special automatic-allocation treatment; 176-
+#     178 are ordinary DormType-15 inventory and are deliberately NOT
+#     hard-coded anywhere below — overflow works through accepted-dorm-type
+#     matching (DormType.code == 15) so any future building added to this
+#     dorm type is automatically included with no code change.
 #
-# DormType.code 15 belongs to עליון עמים and must not activate the building-179
-# Anier policy. No region-name fallback is used, because the region is broader
-# than the specific dorm type and could incorrectly include other Upper Dorm
-# Office dormitories.
+# The rule is ASYMMETRIC, not mutually exclusive:
+#   - A student who is not an eligible Hasmaha ANIR student (see
+#     _is_hasmaha_anier_student) may never automatically consume Building-
+#     179 inventory. This is a hard candidate-eligibility rule.
+#   - An eligible Hasmaha ANIR student is not restricted to Building 179 —
+#     their candidates include every otherwise-compatible apartment in
+#     DormType 15. Building 179 is only their PREFERRED destination,
+#     implemented as a soft CP-SAT objective reward (see
+#     _add_building_179_preference), so they overflow into 176/177/178 (or
+#     any future DormType-15 building) whenever 179 lacks a compatible bed,
+#     while still respecting every hard constraint (gender, religion,
+#     capacity, housing type, existing occupants, etc).
+#
+# This policy governs AUTOMATIC allocation only. Authorized staff may still
+# manually assign any student into Building 179, or move a student out of
+# it, via the ordinary manual assignment/transfer/swap endpoints — those
+# endpoints intentionally never call the helpers below (confirmed business
+# rule: manual override remains permitted).
 # ---------------------------------------------------------------------------
 BUILDING_179_NUMBER = 179
 HASMAHA_DORM_TYPE_CODE = 15
 PRIORITY_BUILDING_CLUSTER_WEIGHT = 3
+BUILDING_179_PREFERENCE_WEIGHT = 5
+
+# Shared shape for the Building-179 diagnostics dict, importable so callers
+# (e.g. api/views.py's early-return responses that never reach the solver)
+# can present a consistent, zeroed-out structure instead of duplicating
+# these keys by hand.
+EMPTY_ANIER_BUILDING_179_DIAGNOSTICS = {
+    "imported_anier_students": 0,
+    "eligible_hasmaha_anier_students": 0,
+    "reserved_building_found": False,
+    "reserved_building_available_beds": 0,
+    "eligible_anier_students_sent_to_solver": 0,
+    "assigned_to_building_179": 0,
+    "assigned_via_overflow_in_dorm_type": 0,
+    "unassigned_eligible_hasmaha_anier": 0,
+    # Defensive counter: must always be 0. An eligible Hasmaha ANIR
+    # student assigned to an apartment outside DormType 15 entirely is
+    # never valid overflow — see the post-solve diagnostics comment in
+    # run_improved_ortools_allocation for why this is tracked separately
+    # instead of being folded into assigned_via_overflow_in_dorm_type.
+    "assigned_outside_hasmaha_dorm_type": 0,
+}
 
 
 def _safe_str(value):
@@ -624,10 +671,7 @@ def _get_apartment_dorm_type(apartment):
 
 
 def _is_hasmaha_dorm_type(dorm_type):
-    """
-    Return True only for כפר הסמכה, whose confirmed DormType.code is 15.
-    DormType.code 15 is עליון עמים and must not activate this policy.
-    """
+    """Return True only for כפר הסמכה, whose confirmed DormType.code is 15."""
     if dorm_type is None:
         return False
     return getattr(dorm_type, "code", None) == HASMAHA_DORM_TYPE_CODE
@@ -638,66 +682,109 @@ def _apartment_in_hasmaha(apartment):
     return _is_hasmaha_dorm_type(_get_apartment_dorm_type(apartment))
 
 
-def _is_building_179_hasmaha(apartment):
+def _is_reserved_building_179_apartment(apartment):
     """
-    True only for building 179 inside כפר הסמכה.
-    Building number 179 in any other dorm type is treated as an ordinary building.
+    True only for Building 179 inside כפר הסמכה (DormType.code == 15).
+    A building numbered 179 in any other DormType is an ordinary building
+    and is not affected by this policy.
     """
     building = getattr(apartment, "building", None)
     return _is_building_179(building) and _apartment_in_hasmaha(apartment)
 
 
-def _is_anier_exclusive_student(student):
+def _student_accepted_dorm_type_code(student):
     """
-    Every student carrying the אנייר special-status marker belongs to the
-    building-179 exclusive group.
-
-    Priority and a separate הסמכה marker are deliberately NOT required:
-    according to the confirmed business rule, the אנייר marker itself is
-    sufficient. This check stays apartment-independent; the apartment-side
-    building-179/Upper-Dorm-Office validation is handled separately.
+    The student's own accepted_dorm_type.code. DormType.code is a domain/
+    map code (e.g. 15 == כפר הסמכה), not the Django primary key — never
+    compare accepted_dorm_type_id against it.
     """
-    return _has_anier_special_status(student)
+    dorm_type = getattr(student, "accepted_dorm_type", None)
+    if dorm_type is None:
+        return None
+    return getattr(dorm_type, "code", None)
 
 
-def _is_building_179_exclusive_student(student, apartment):
+def _is_hasmaha_accepted_student(student):
+    """True when the student's own accepted_dorm_type is כפר הסמכה (code 15)."""
+    return _student_accepted_dorm_type_code(student) == HASMAHA_DORM_TYPE_CODE
+
+
+def _is_hasmaha_anier_student(student):
     """
-    True when the student carries the אנייר marker and this apartment is
-    in building 179 of כפר הסמכה (DormType.code == 15).
+    The population eligible for the Building-179 automatic-allocation
+    preference: carries the אנייר marker AND is accepted into כפר הסמכה
+    (accepted_dorm_type.code == 15). Both conditions are required —
+    confirmed business rule B1: the אנייר marker alone is not sufficient.
+
+    Deliberately does NOT consult: region, allocation_group free text, a
+    Django primary key, accessibility status, the separate הסמכה special-
+    status marker, or generic is_priority.
     """
-    return _is_anier_exclusive_student(student) and _is_building_179_hasmaha(apartment)
+    return _has_anier_special_status(student) and _is_hasmaha_accepted_student(student)
 
 
-def _may_enter_building_179(student, apartment):
+def _may_use_building_179_automatically(student, apartment):
     """
-    Building 179 in כפר הסמכה is exclusive to students carrying the אנייר marker:
+    Hard automatic-allocation gate for Building 179 — asymmetric, not
+    mutually exclusive:
 
-      • Anier students may be assigned only to building 179 in כפר הסמכה.
-      • Non-Anier students may never be assigned to that building.
-      • A building numbered 179 in any other DormType is ordinary and is not
-        affected by this rule.
+      • A student who is NOT an eligible Hasmaha ANIR student (ordinary
+        students, generic-priority students, and ANIR students accepted
+        into a different dorm type) may never automatically consume
+        Building-179 inventory.
+      • An eligible Hasmaha ANIR student MAY use Building 179, but this
+        function does not restrict them to it — their preference for 179
+        over the rest of DormType 15 is a soft objective reward (see
+        _add_building_179_preference), not a hard requirement, so overflow
+        to 176/177/178 (or any future DormType-15 building) via ordinary
+        accepted-dorm-type matching remains possible.
+      • A building numbered 179 in any other DormType is ordinary and
+        unaffected by this rule.
+
+    This gate applies to AUTOMATIC allocation only. Manual assignment,
+    transfer, and swap endpoints intentionally never call this function —
+    authorized staff may override this rule by hand.
     """
-    is_reserved_destination = _is_building_179_hasmaha(apartment)
-    is_anier_student = _is_anier_exclusive_student(student)
-
-    if is_anier_student:
-        return is_reserved_destination
-    return not is_reserved_destination
+    if not _is_reserved_building_179_apartment(apartment):
+        return True
+    return _is_hasmaha_anier_student(student)
 
 
 def _should_enforce_accepted_dorm_type(student):
     """
     Ordinary non-priority students must respect the imported
-    accepted_dorm_type restriction.
+    accepted_dorm_type restriction. Generic priority students (who do NOT
+    carry the אנייר marker) keep the pre-existing bypass — that behavior
+    predates, and is unrelated to, the Building-179 policy and is
+    intentionally left unchanged here.
 
-    Priority students keep the existing bypass. Anier students also bypass
-    this check because their mandatory destination is enforced separately:
-    they may enter only building 179, and no ordinary building.
+    ANY student carrying the אנייר marker MUST always have this
+    restriction enforced, regardless of is_priority (confirmed business
+    rule — production validation of run 113 caught a regression here: the
+    ANIR import pipeline routinely also sets is_priority=True as a side
+    effect of populating special_status_*, so an ANIR student is very
+    often also a generic-priority student. If the generic-priority bypass
+    below were allowed to apply to them too, accepted_dorm_type would be
+    silently skipped and the student would receive candidates in ANY dorm
+    type, not just their own — exactly the cross-DormType leak observed
+    in production, where 22 of 142 eligible Hasmaha ANIR students were
+    placed in unrelated dorm types 6, 11, and 18).
+
+    Enforcing this unconditionally for every אנייר-marked student is still
+    correct for a Hasmaha ANIR student (accepted_dorm_type.code == 15):
+    ordinary accepted-dorm-type matching already admits every apartment in
+    that dorm type — Building 179 and any current or future overflow
+    building — so enforcing the restriction does not narrow their
+    candidates below what the confirmed overflow rule requires. An ANIR
+    student accepted into a different dorm type keeps the same
+    restriction as any other student, so they are never redirected toward
+    Building 179 or any other כפר הסמכה building merely because they
+    carry the אנייר marker, and never leak into a third, unrelated dorm
+    type either.
     """
-    return (
-        not _get_student_priority(student)
-        and not _is_anier_exclusive_student(student)
-    )
+    if _has_anier_special_status(student):
+        return True
+    return not _get_student_priority(student)
 
 
 def _accepted_dorm_matches(student, apartment):
@@ -712,23 +799,23 @@ def _accepted_dorm_matches(student, apartment):
 def _building_179_existing_occupant_warnings(apartments, existing_assignments_by_apartment):
     """
     Diagnostic only: existing active assignments are never modified. If
-    building 179 (כפר הסמכה) already has an occupant who is not
-    part of the exclusive group, surface a clear warning instead of
+    Building 179 (כפר הסמכה) already has an occupant who is not an
+    eligible Hasmaha ANIR student, surface a clear warning instead of
     silently producing a misleading allocation.
     """
     warnings = []
     for apartment in apartments:
-        if not _is_building_179_hasmaha(apartment):
+        if not _is_reserved_building_179_apartment(apartment):
             continue
 
         for assignment in existing_assignments_by_apartment.get(apartment.id, []):
             occupant = assignment.student
-            if not _is_building_179_exclusive_student(occupant, apartment):
+            if not _is_hasmaha_anier_student(occupant):
                 warnings.append(
                     "Building 179 (כפר הסמכה) apartment "
                     f"{_safe_str(apartment.number)} already has an existing "
                     f"occupant (student_id={_get_student_identifier(occupant)}) "
-                    "who does not belong to the exclusive group; the existing "
+                    "who is not an eligible Hasmaha ANIR student; the existing "
                     "assignment was preserved unchanged."
                 )
     return warnings
@@ -736,55 +823,66 @@ def _building_179_existing_occupant_warnings(apartments, existing_assignments_by
 
 def _anier_building_179_diagnostics(students, apartments, student_candidates, free_capacity_by_apartment):
     """
-    Diagnostic counters for the building-179 / כפר הסמכה Anir
-    (אנייר) policy, computed on every solver run so a broken upload
-    mapping or a missing/misconfigured reserved building shows up
-    immediately instead of silently producing zero Anir assignments:
+    Diagnostic counters for the Building-179 (כפר הסמכה, DormType.code==15)
+    automatic-allocation preference, computed on every solver run so a
+    broken upload mapping or a missing/misconfigured building shows up
+    immediately instead of silently producing zero Hasmaha-ANIR
+    assignments to their preferred building:
 
-      imported_anier_students             — students in this run carrying
-                                             the אנייר special status.
-      eligible_anier_students              — every imported student carrying
-                                             the אנייר marker; no separate
-                                             priority or הסמכה marker is
-                                             required.
-      reserved_building_found              — whether an apartment matching
-                                             building 179 in the Upper Dorm
-                                             Office actually exists in this
-                                             run's room inventory.
-      reserved_building_available_beds     — free beds in that building.
-      eligible_anier_students_sent_to_solver — eligible students who
-                                             actually have that building
-                                             as a CP-SAT candidate (i.e.
-                                             both the upload mapping AND
-                                             the building/region match
-                                             connected end-to-end).
+      imported_anier_students          — every student in this run carrying
+                                          the אנייר marker, regardless of
+                                          accepted dorm type.
+      eligible_hasmaha_anier_students  — the subset of the above whose
+                                          accepted_dorm_type.code == 15 —
+                                          the actual population eligible
+                                          for the Building-179 preference
+                                          (the marker alone is not enough).
+      reserved_building_found          — whether an apartment matching
+                                          Building 179 in כפר הסמכה exists
+                                          in this run's room inventory.
+      reserved_building_available_beds — free beds in that building before
+                                          solving.
+      eligible_anier_students_sent_to_solver — eligible Hasmaha ANIR
+                                          students who reached candidate
+                                          generation with at least one
+                                          feasible DormType-15 apartment
+                                          (Building 179 or an overflow
+                                          apartment).
+
+    Four further keys — assigned_to_building_179,
+    assigned_via_overflow_in_dorm_type, unassigned_eligible_hasmaha_anier,
+    assigned_outside_hasmaha_dorm_type — are filled in after solving (see
+    run_improved_ortools_allocation) once the actual outcome is known.
     """
     imported_anier_students = [
         student for student in students if _has_anier_special_status(student)
     ]
-    eligible_anier_students = list(imported_anier_students)
+    eligible_hasmaha_anier_students = [
+        student for student in imported_anier_students
+        if _is_hasmaha_accepted_student(student)
+    ]
 
     reserved_building_179_apartment_ids = {
         apartment.id
         for apartment in apartments
-        if _is_building_179_hasmaha(apartment)
+        if _is_reserved_building_179_apartment(apartment)
     }
     reserved_building_available_beds = sum(
         free_capacity_by_apartment.get(apartment_id, 0)
         for apartment_id in reserved_building_179_apartment_ids
     )
 
-    eligible_anier_sent_to_solver = [
-        student for student in eligible_anier_students
-        if reserved_building_179_apartment_ids & set(student_candidates.get(student.id, []))
+    eligible_sent_to_solver = [
+        student for student in eligible_hasmaha_anier_students
+        if student_candidates.get(student.id)
     ]
 
     return {
         "imported_anier_students": len(imported_anier_students),
-        "eligible_anier_students": len(eligible_anier_students),
+        "eligible_hasmaha_anier_students": len(eligible_hasmaha_anier_students),
         "reserved_building_found": bool(reserved_building_179_apartment_ids),
         "reserved_building_available_beds": reserved_building_available_beds,
-        "eligible_anier_students_sent_to_solver": len(eligible_anier_sent_to_solver),
+        "eligible_anier_students_sent_to_solver": len(eligible_sent_to_solver),
     }
 
 
@@ -859,15 +957,18 @@ def _apartment_is_available_for_student(
     if not bool(getattr(apartment, "is_active", True)):
         return False
     if getattr(apartment, "inactive_reason", "") == Apartment.InactiveReason.RESERVED:
-        # Reserved apartments normally require priority status. Building-179
-        # Anier students are an explicit exception: the confirmed business
-        # rule makes the אנייר marker itself sufficient for entry.
+        # Reserved apartments (a generic mechanism, not specific to Building
+        # 179) normally require priority status. Any student carrying the
+        # אנייר marker is an explicit, pre-existing exception here — this
+        # generic reserved-apartment bypass is independent of the dedicated
+        # Building-179 accepted-dorm-type eligibility below, so it
+        # intentionally still checks the marker alone.
         if not (
             _get_student_priority(student)
-            or _is_anier_exclusive_student(student)
+            or _has_anier_special_status(student)
         ):
             return False
-    if not _may_enter_building_179(student, apartment):
+    if not _may_use_building_179_automatically(student, apartment):
         return False
     if apartment.building_id in frozen_gender_conflict_building_ids:
         # An existing occupant already conflicts with this building's
@@ -1170,6 +1271,141 @@ def _prepare_inventory(rooms):
     }
 
 
+def _summarize_free_inventory(apartments, free_capacity_by_apartment):
+    """
+    Free-bed counts grouped by (category, apartment_type) — the "here is
+    what IS available, even though it doesn't match" breakdown shown
+    alongside an unassigned-reason explanation (e.g. "41 male-single beds,
+    24 mixed-couple beds" when the blocked group needs female-single).
+    """
+    buckets = defaultdict(int)
+    for apartment in apartments:
+        free_count = free_capacity_by_apartment.get(apartment.id, 0)
+        if free_count <= 0:
+            continue
+        category = _effective_apartment_category(apartment)
+        apartment_type = getattr(apartment, "apartment_type", None)
+        buckets[(category, apartment_type)] += free_count
+
+    return [
+        {
+            "category": category,
+            "apartment_type": apartment_type,
+            "free_beds": free_beds,
+        }
+        for (category, apartment_type), free_beds in sorted(
+            buckets.items(), key=lambda item: -item[1],
+        )
+    ]
+
+
+def analyze_unassigned_group(student, rooms, hard_religious_together=True):
+    """
+    Staged hard-constraint breakdown for one representative student against
+    an active Room queryset/list already scoped to their accepted dorm
+    type (region-independent — accepted_dorm_type is the actual hard
+    constraint, not region).
+
+    Reuses the exact predicates the solver's own candidate-generation
+    pipeline uses (_housing_matches_apartment,
+    _may_enter_building_due_to_gender_restriction,
+    _apartment_is_available_for_student) so the reported reason can never
+    diverge from real solver behavior — this function is intentionally a
+    thin staged wrapper around those, not a reimplementation of their
+    rules.
+
+    Stages, in order — the first stage where the surviving free-bed count
+    reaches zero determines reason_code:
+      1. physically free beds anywhere in the accepted dorm type
+      2. ...also matching housing type AND gender/category together
+         (_housing_matches_apartment checks both as one atomic rule, so
+         they are reported as one combined reason rather than an
+         artificial split that could misrepresent the real check)
+      3. ...also allowed by any BUILDING-level gender restriction
+         (a separate, structurally independent check from apartment
+         category)
+      4. ...also passing every remaining hard constraint via the real
+         per-apartment eligibility function: religion/existing-occupant
+         compatibility, room-level rules, accepted-dorm-type, Building
+         179, and reserved-apartment rules.
+
+    A student who survives stage 4 with compatible free beds but was
+    still not assigned by the solver was blocked by a constraint this
+    single-student staged view cannot see — chiefly the mutual-roommate
+    hard constraint or contention with other students for the same beds
+    at solve time. Reported as OTHER_HARD_CONSTRAINT_CONFLICT; the caller
+    must not present this as a confirmed roommate conflict without
+    further evidence.
+    """
+    rooms = _normalize_rooms_input(rooms)
+    inventory = _prepare_inventory(rooms)
+    apartments = sorted(
+        inventory["apartments_by_id"].values(), key=lambda apartment: apartment.id,
+    )
+
+    free_capacity_by_apartment = {
+        apartment.id: len(inventory["free_beds_by_apartment"].get(apartment.id, []))
+        for apartment in apartments
+    }
+    inventory_breakdown = _summarize_free_inventory(apartments, free_capacity_by_apartment)
+    physically_free_beds = sum(free_capacity_by_apartment.values())
+
+    all_apartments_by_id = {room.apartment_id: room.apartment for room in rooms}
+    frozen_gender_conflict_building_ids = _building_gender_conflict_ids(
+        all_apartments_by_id.values(), inventory["existing_assignments_by_apartment"],
+    )
+
+    def _result(reason_code, compatible_free_beds=0):
+        return {
+            "reason_code": reason_code,
+            "physically_free_beds_in_accepted_dorm": physically_free_beds,
+            "compatible_free_beds": compatible_free_beds,
+            "inventory_breakdown": inventory_breakdown,
+        }
+
+    stage1 = [a for a in apartments if free_capacity_by_apartment.get(a.id, 0) > 0]
+    if not stage1:
+        return _result("NO_PHYSICAL_FREE_BEDS_IN_ACCEPTED_DORM")
+
+    stage2 = [a for a in stage1 if _housing_matches_apartment(student, a)]
+    if not stage2:
+        return _result("HOUSING_TYPE_OR_GENDER_MISMATCH")
+
+    stage3 = [
+        a for a in stage2
+        if a.building_id not in frozen_gender_conflict_building_ids
+        and _may_enter_building_due_to_gender_restriction(student, a)
+    ]
+    if not stage3:
+        return _result("BUILDING_GENDER_RESTRICTION")
+
+    final_matches = [
+        a for a in stage3
+        if _apartment_is_available_for_student(
+            student, a,
+            inventory["existing_assignments_by_apartment"].get(a.id, []),
+            inventory["existing_exclusive_by_apartment"].get(a.id, False),
+            hard_religious_together,
+            existing_rj=a.id in inventory["existing_rj_apartments"],
+            existing_non_rj=a.id in inventory["existing_non_rj_apartments"],
+            existing_restricted_religions=inventory["existing_restricted_religion_by_apartment"].get(
+                a.id, frozenset(),
+            ),
+            existing_religion_set=inventory["existing_religion_set_by_apartment"].get(
+                a.id, frozenset(),
+            ),
+            frozen_gender_conflict_building_ids=frozen_gender_conflict_building_ids,
+        )
+    ]
+    compatible_free_beds = sum(
+        free_capacity_by_apartment.get(a.id, 0) for a in final_matches
+    )
+    if not final_matches or compatible_free_beds == 0:
+        return _result("RELIGION_OR_EXISTING_OCCUPANT_INCOMPATIBILITY")
+
+    return _result("OTHER_HARD_CONSTRAINT_CONFLICT", compatible_free_beds=compatible_free_beds)
+
+
 def _build_candidate_apartments(
     students,
     apartments,
@@ -1417,10 +1653,10 @@ def _add_priority_building_clustering(
     weight,
 ):
     """
-    Soft rule: prefer clustering non-exclusive priority students (priority
-    students who are NOT part of the building-179 exclusive group) into as
-    few distinct buildings as reasonably possible. Grouping is decided by
-    building_id, not dorm type or apartment id.
+    Soft rule: prefer clustering priority students who are NOT eligible
+    Hasmaha ANIR students into as few distinct buildings as reasonably
+    possible. Grouping is decided by building_id, not dorm type or
+    apartment id.
 
     One boolean "building used by this group" variable is created per
     building actually reachable by an eligible student — O(number of
@@ -1447,10 +1683,12 @@ def _add_priority_building_clustering(
             if apartment is None:
                 continue
 
-            if _is_building_179_exclusive_student(student, apartment):
-                # Exclusive-group students are governed entirely by the
-                # building-179 hard rule; they never participate in the
-                # "spread across as few buildings as possible" preference.
+            if _is_hasmaha_anier_student(student):
+                # Eligible Hasmaha ANIR students have their own dedicated
+                # Building-179 preference (_add_building_179_preference)
+                # spanning all of DormType 15; they never participate in
+                # this generic "spread across as few buildings as
+                # possible" preference.
                 continue
 
             variable = assignment_vars.get((student.id, apartment_id))
@@ -1463,6 +1701,57 @@ def _add_priority_building_clustering(
         _link_group_used_var(model, used_var, member_vars)
         objective_terms.append(used_var * (-weight * WEIGHT_UNIT))
         created += 1
+
+    return created
+
+
+def _add_building_179_preference(
+    model,
+    objective_terms,
+    students,
+    apartments,
+    assignment_vars,
+    student_candidates,
+    weight,
+):
+    """
+    Soft rule: for eligible Hasmaha ANIR students, reward an assignment
+    specifically to Building 179 over any other DormType-15 apartment
+    (176/177/178/any future building). This is what makes Building 179 the
+    PREFERRED/first-choice destination for this group without hard-locking
+    them to it (see _may_use_building_179_automatically and
+    _should_enforce_accepted_dorm_type for the hard side of the policy).
+
+    Every (student, apartment) pair this function touches already survived
+    the full hard-eligibility pass in _apartment_is_available_for_student
+    (active status, capacity, gender, religion, housing type, accepted
+    dorm type, existing occupants, room-level rules, etc), so this reward
+    can never override a hard constraint — it only ever adds a bonus on
+    top of an already-feasible candidate. Being assigned anywhere (which
+    earns assignment_score, or priority_score under priorityFirst) always
+    dominates this reward's maximum possible contribution — see soft_range
+    / assignment_score sizing in run_improved_ortools_allocation — so this
+    preference can never cause a student to go unassigned merely because
+    the Building-179 bonus could not be earned while a compatible
+    DormType-15 bed exists elsewhere.
+    """
+    if weight <= 0:
+        return 0
+
+    apartment_by_id = {apartment.id: apartment for apartment in apartments}
+    created = 0
+
+    for student in students:
+        if not _is_hasmaha_anier_student(student):
+            continue
+        for apartment_id in student_candidates.get(student.id, []):
+            apartment = apartment_by_id.get(apartment_id)
+            if apartment is None or not _is_reserved_building_179_apartment(apartment):
+                continue
+            variable = assignment_vars.get((student.id, apartment_id))
+            if variable is not None:
+                objective_terms.append(variable * (weight * WEIGHT_UNIT))
+                created += 1
 
     return created
 
@@ -1687,13 +1976,7 @@ def run_improved_ortools_allocation(
         "assignments": [],
         "warnings": [],
         "students_with_no_feasible_beds": [],
-        "anier_building_179_diagnostics": {
-            "imported_anier_students": 0,
-            "eligible_anier_students": 0,
-            "reserved_building_found": False,
-            "reserved_building_available_beds": 0,
-            "eligible_anier_students_sent_to_solver": 0,
-        },
+        "anier_building_179_diagnostics": dict(EMPTY_ANIER_BUILDING_179_DIAGNOSTICS),
     }
 
     if not students:
@@ -2197,6 +2480,7 @@ def run_improved_ortools_allocation(
             )
 
     priority_cluster_vars = 0
+    building_179_preference_vars = 0
     if use_priority_first:
         priority_cluster_vars = _add_priority_building_clustering(
             model,
@@ -2207,6 +2491,24 @@ def run_improved_ortools_allocation(
             student_candidates,
             PRIORITY_BUILDING_CLUSTER_WEIGHT,
         )
+        # Gated behind the same priorityFirst toggle as the clustering
+        # preference above — the two are part of the same "priority
+        # placement" feature bundle, and the frontend's priorityFirst
+        # description is exactly what documents this Building-179
+        # preference to users. In production this is always active:
+        # normalize_allocation_constraints() forces priorityFirst on for
+        # every real allocation run. The hard, asymmetric Building-179
+        # eligibility rule itself (_may_use_building_179_automatically)
+        # is NOT gated by this flag — it always applies.
+        building_179_preference_vars = _add_building_179_preference(
+            model,
+            soft_terms,
+            students,
+            apartments,
+            assignment_vars,
+            student_candidates,
+            BUILDING_179_PREFERENCE_WEIGHT,
+        )
 
     soft_range = roommate_positive_upper_bound
     soft_range += religion_group_vars * religion_weight * WEIGHT_UNIT
@@ -2214,13 +2516,16 @@ def run_improved_ortools_allocation(
     soft_range += year_mix_vars * year_weight * WEIGHT_UNIT
     soft_range += atudai_hasmaha_mix_vars * atudai_hasmaha_weight * WEIGHT_UNIT
     soft_range += priority_cluster_vars * PRIORITY_BUILDING_CLUSTER_WEIGHT * WEIGHT_UNIT
+    soft_range += building_179_preference_vars * BUILDING_179_PREFERENCE_WEIGHT * WEIGHT_UNIT
 
     # Objective hierarchy safety: assignment_score strictly dominates the
     # entire soft_range (roommate/religion/sector/year/atudai-hasmaha/
-    # priority-clustering combined), and priority_score in turn dominates
-    # len(students) assignment_score terms plus soft_range. Total
-    # assignment count and priority assignment count therefore always
-    # outweigh the building-clustering preference.
+    # priority-clustering/building-179-preference combined), and
+    # priority_score in turn dominates len(students) assignment_score
+    # terms plus soft_range. Total assignment count and priority
+    # assignment count therefore always outweigh the building-179
+    # preference — a student is never left unassigned merely because the
+    # Building-179 bonus could not be earned.
     assignment_score = max(BASE_ASSIGNMENT_SCORE, soft_range + 1)
     priority_score = 0
 
@@ -2402,6 +2707,64 @@ def run_improved_ortools_allocation(
     results["assignments"] = proposed_assignments
     results["successful_assignments"] = len(proposed_assignments)
     results["conflicts"] = len(students) - len(proposed_assignments)
+
+    # Post-solve Building-179 diagnostics: now that the actual outcome is
+    # known, record how many eligible Hasmaha ANIR students landed in
+    # their preferred building vs. overflowed elsewhere in DormType 15 vs.
+    # could not be placed at all — this is what lets an operator tell
+    # "179 was full so this student overflowed to 177" apart from "this
+    # student was genuinely infeasible" (see also unassigned_reason
+    # generation upstream in views.py).
+    #
+    # A destination outside DormType 15 entirely is NEVER valid overflow —
+    # it must be counted and warned about separately
+    # (assigned_outside_hasmaha_dorm_type), never folded into
+    # assigned_via_overflow_in_dorm_type. Production validation of run 113
+    # caught exactly this: a pre-fix accepted-dorm-type bug let 22 eligible
+    # Hasmaha ANIR students leak into unrelated dorm types 6/11/18, and the
+    # diagnostics at the time silently counted all 22 as "overflow"
+    # alongside the 8 genuinely valid same-DormType-15 placements.
+    hasmaha_anier_students = [
+        student for student in students if _is_hasmaha_anier_student(student)
+    ]
+    assigned_to_179 = 0
+    assigned_via_overflow = 0
+    assigned_outside_dorm_type = 0
+    unassigned_eligible = 0
+    for student in hasmaha_anier_students:
+        apartment_id = selected_apartment_by_student.get(student.id)
+        if apartment_id is None:
+            unassigned_eligible += 1
+            continue
+        apartment = all_apartments_by_id.get(apartment_id)
+        if apartment is not None and _is_reserved_building_179_apartment(apartment):
+            assigned_to_179 += 1
+        elif apartment is not None and _apartment_in_hasmaha(apartment):
+            assigned_via_overflow += 1
+        else:
+            assigned_outside_dorm_type += 1
+
+    results["anier_building_179_diagnostics"]["eligible_hasmaha_anier_students"] = (
+        len(hasmaha_anier_students)
+    )
+    results["anier_building_179_diagnostics"]["assigned_to_building_179"] = assigned_to_179
+    results["anier_building_179_diagnostics"]["assigned_via_overflow_in_dorm_type"] = (
+        assigned_via_overflow
+    )
+    results["anier_building_179_diagnostics"]["unassigned_eligible_hasmaha_anier"] = (
+        unassigned_eligible
+    )
+    results["anier_building_179_diagnostics"]["assigned_outside_hasmaha_dorm_type"] = (
+        assigned_outside_dorm_type
+    )
+    if assigned_outside_dorm_type:
+        results["warnings"].append(
+            "Data integrity: "
+            f"{assigned_outside_dorm_type} eligible Hasmaha ANIR student(s) "
+            "were assigned outside DormType 15 (כפר הסמכה) entirely — this "
+            "should never happen and indicates accepted-dorm-type "
+            "enforcement did not apply to them."
+        )
 
     should_persist = solve_mode == "best-effort" or results["optimality_proven"]
     if status == cp_model.FEASIBLE and persist_feasible_on_timeout:
