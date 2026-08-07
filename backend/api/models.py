@@ -905,6 +905,18 @@ class AllocationRun(models.Model):
 
     error_message = models.TextField(blank=True)
 
+    # Solver-produced diagnostics that do not fit any of the counter
+    # fields above: warnings (e.g. an existing Building-179 occupant who
+    # is not an eligible Hasmaha ANIR student) and the Building-179/ANIR
+    # counters (imported/eligible ANIR counts, whether the reserved
+    # building was found, its available beds, and the post-solve
+    # preferred/overflow/unassigned outcome counts). Persisted here so
+    # both the synchronous and background-thread allocation paths survive
+    # a process restart and are visible across workers — an in-memory
+    # store would silently lose this data outside a single process.
+    # Shape: {"warnings": [...], "anier_building_179_diagnostics": {...}}.
+    diagnostics = models.JSONField(default=dict, blank=True)
+
     class Meta:
         verbose_name = _('הרצת שיבוץ')
         verbose_name_plural = _('הרצות שיבוץ')
