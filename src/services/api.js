@@ -892,6 +892,20 @@ export const dormInventoryAPI = {
       throwApiError(err, "Failed to update building");
     }
   },
+  // Building Setup Wizard: transactionally create many Apartments (each
+  // with its own Rooms and materialized Beds) under one Building in a
+  // single call. See BuildingViewSet.bulk_create_inventory on the backend.
+  bulkCreateInventory: async (buildingId, payload) => {
+    try {
+      const { data } = await api.post(
+        `/api/buildings/${buildingId}/bulk-create-inventory/`,
+        payload
+      );
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to create building inventory");
+    }
+  },
 
   getApartments: async (params = {}) => {
     try {

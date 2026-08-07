@@ -812,3 +812,221 @@ class DeactivationTransferRequestTest(TestCase):
 
         room.refresh_from_db()
         self.assertIsNone(get_free_bed(room))
+
+
+# ---------------------------------------------------------------------------
+# 13. Building Setup Wizard backend: bulk apartment/room/bed creation under
+#     one Building in a single transactional call.
+# ---------------------------------------------------------------------------
+class BulkInventoryCreationTest(TestCase):
+
+    def _bulk_payload(self):
+        return {
+            'apartment_groups': [
+                {
+                    'category': Apartment.Category.FEMALE,
+                    'apartment_type': Apartment.ApartmentType.SINGLE,
+                    'apartment_capacity': 3,
+                    'numbers': ['101', '102', '103'],
+                    'room_groups': [{'capacity': 1, 'count': 3}],
+                },
+                {
+                    'category': Apartment.Category.MIXED,
+                    'apartment_type': Apartment.ApartmentType.COUPLE,
+                    'apartment_capacity': 4,
+                    'numbers': ['201', '202'],
+                    'room_groups': [{'capacity': 2, 'count': 1}, {'capacity': 2, 'count': 1}],
+                },
+            ]
+        }
+
+    def test_bulk_create_happy_path_creates_full_hierarchy(self):
+        region = _make_region('BulkHappyRegion')
+        boss = _make_region_boss(region)
+        dorm_type = DormType.objects.create(name='BulkHappyDorm', region=region)
+        building = Building.objects.create(number=300, dorm_type=dorm_type)
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.post(
+            f'/api/buildings/{building.id}/bulk-create-inventory/', self._bulk_payload(), format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['created_apartments'], 5)
+        # Group A: 3 apartments x 3 rooms (capacity 1) = 9 rooms, 9 beds.
+        # Group B: 2 apartments x 2 rooms (capacity 2) = 4 rooms, 8 beds.
+        self.assertEqual(response.data['created_rooms'], 3 * 3 + 2 * 2)
+        self.assertEqual(response.data['created_beds'], 3 * 3 * 1 + 2 * 2 * 2)
+
+        self.assertEqual(Apartment.objects.filter(building=building).count(), 5)
+        self.assertEqual(
+            set(Apartment.objects.filter(building=building).values_list('number', flat=True)),
+            {'101', '102', '103', '201', '202'},
+        )
+
+        apt_101 = Apartment.objects.get(building=building, number='101')
+        self.assertEqual(apt_101.category, Apartment.Category.FEMALE)
+        self.assertEqual(apt_101.room_count, 3)
+        rooms_101 = list(apt_101.rooms.order_by('name'))
+        self.assertEqual([r.name for r in rooms_101], ['1', '2', '3'])
+        for room in rooms_101:
+            self.assertEqual(room.capacity, 1)
+            self.assertEqual(list(room.beds.values_list('label', flat=True)), ['Bed 1'])
+
+        apt_201 = Apartment.objects.get(building=building, number='201')
+        rooms_201 = list(apt_201.rooms.order_by('name'))
+        self.assertEqual([r.name for r in rooms_201], ['1', '2'])
+        for room in rooms_201:
+            self.assertEqual(room.capacity, 2)
+            self.assertEqual(
+                list(room.beds.order_by('label').values_list('label', flat=True)), ['Bed 1', 'Bed 2'],
+            )
+
+    def test_employee_cannot_bulk_create(self):
+        region = _make_region('BulkEmpRegion')
+        employee = _make_employee(region)
+        dorm_type = DormType.objects.create(name='BulkEmpDorm', region=region)
+        building = Building.objects.create(number=301, dorm_type=dorm_type)
+
+        client = APIClient()
+        client.force_authenticate(user=employee)
+        response = client.post(
+            f'/api/buildings/{building.id}/bulk-create-inventory/', self._bulk_payload(), format='json',
+        )
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assertEqual(Apartment.objects.filter(building=building).count(), 0)
+
+    def test_region_boss_cannot_bulk_create_in_other_region(self):
+        """
+        BuildingViewSet.get_queryset() already scopes a region boss's
+        buildings to their own region (see BuildingViewSet.update()'s own
+        docstring for the same documented pattern), so self.get_object()
+        inside this action 404s before the explicit region-ownership check
+        below it is ever reached - consistent with every other
+        cross-region access attempt in this ViewSet, not a gap.
+        """
+        region_a = _make_region('BulkRegionA')
+        region_b = _make_region('BulkRegionB')
+        boss_a = _make_region_boss(region_a, email='boss_a@inv.test')
+        dorm_type_b = DormType.objects.create(name='BulkDormB', region=region_b)
+        building_b = Building.objects.create(number=302, dorm_type=dorm_type_b)
+
+        client = APIClient()
+        client.force_authenticate(user=boss_a)
+        response = client.post(
+            f'/api/buildings/{building_b.id}/bulk-create-inventory/', self._bulk_payload(), format='json',
+        )
+        self.assertEqual(response.status_code, 404, response.data)
+        self.assertEqual(Apartment.objects.filter(building=building_b).count(), 0)
+
+    def test_duplicate_numbers_within_payload_rejected_and_nothing_created(self):
+        region = _make_region('BulkDupPayloadRegion')
+        boss = _make_region_boss(region)
+        dorm_type = DormType.objects.create(name='BulkDupPayloadDorm', region=region)
+        building = Building.objects.create(number=303, dorm_type=dorm_type)
+
+        payload = {
+            'apartment_groups': [
+                {
+                    'category': Apartment.Category.FEMALE,
+                    'apartment_type': Apartment.ApartmentType.SINGLE,
+                    'apartment_capacity': 1,
+                    'numbers': ['101', '101'],
+                    'room_groups': [{'capacity': 1, 'count': 1}],
+                },
+            ]
+        }
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.post(
+            f'/api/buildings/{building.id}/bulk-create-inventory/', payload, format='json',
+        )
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(response.data.get('code'), 'DUPLICATE_APARTMENT_NUMBER')
+        self.assertEqual(Apartment.objects.filter(building=building).count(), 0)
+
+    def test_duplicate_number_against_existing_apartment_rejected(self):
+        region = _make_region('BulkDupExistingRegion')
+        boss = _make_region_boss(region)
+        dorm_type = DormType.objects.create(name='BulkDupExistingDorm', region=region)
+        building = Building.objects.create(number=304, dorm_type=dorm_type)
+        Apartment.objects.create(
+            building=building, number='101', category=Apartment.Category.FEMALE,
+            apartment_type=Apartment.ApartmentType.SINGLE, room_count=1, apartment_capacity=1,
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.post(
+            f'/api/buildings/{building.id}/bulk-create-inventory/', self._bulk_payload(), format='json',
+        )
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(response.data.get('code'), 'DUPLICATE_APARTMENT_NUMBER')
+        self.assertEqual(response.data.get('conflicting_numbers'), ['101'])
+        # Only the pre-existing apartment - nothing from the rejected batch.
+        self.assertEqual(Apartment.objects.filter(building=building).count(), 1)
+
+    def test_invalid_category_rolls_back_entire_batch(self):
+        """A validation failure partway through the batch (invalid category
+        on the second group) must roll back apartments/rooms/beds already
+        created earlier in the same request - no partial inventory."""
+        region = _make_region('BulkRollbackRegion')
+        boss = _make_region_boss(region)
+        dorm_type = DormType.objects.create(name='BulkRollbackDorm', region=region)
+        building = Building.objects.create(number=305, dorm_type=dorm_type)
+
+        payload = {
+            'apartment_groups': [
+                {
+                    'category': Apartment.Category.FEMALE,
+                    'apartment_type': Apartment.ApartmentType.SINGLE,
+                    'apartment_capacity': 1,
+                    'numbers': ['101'],
+                    'room_groups': [{'capacity': 1, 'count': 1}],
+                },
+                {
+                    'category': 'not_a_real_category',
+                    'apartment_type': Apartment.ApartmentType.SINGLE,
+                    'apartment_capacity': 1,
+                    'numbers': ['201'],
+                    'room_groups': [{'capacity': 1, 'count': 1}],
+                },
+            ]
+        }
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.post(
+            f'/api/buildings/{building.id}/bulk-create-inventory/', payload, format='json',
+        )
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(Apartment.objects.filter(building=building).count(), 0)
+        self.assertEqual(Room.objects.filter(apartment__building=building).count(), 0)
+        self.assertEqual(Bed.objects.filter(room__apartment__building=building).count(), 0)
+
+    def test_malformed_room_groups_rejected(self):
+        region = _make_region('BulkMalformedRegion')
+        boss = _make_region_boss(region)
+        dorm_type = DormType.objects.create(name='BulkMalformedDorm', region=region)
+        building = Building.objects.create(number=306, dorm_type=dorm_type)
+
+        payload = {
+            'apartment_groups': [
+                {
+                    'category': Apartment.Category.FEMALE,
+                    'apartment_type': Apartment.ApartmentType.SINGLE,
+                    'apartment_capacity': 1,
+                    'numbers': ['101'],
+                    'room_groups': [],
+                },
+            ]
+        }
+
+        client = APIClient()
+        client.force_authenticate(user=boss)
+        response = client.post(
+            f'/api/buildings/{building.id}/bulk-create-inventory/', payload, format='json',
+        )
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(Apartment.objects.filter(building=building).count(), 0)
