@@ -1,50 +1,90 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useSearchParams } from 'react-router-dom';
 import {
-  ArrowRightLeft,
+  AlertTriangle,
   Bed,
   Building2,
-  ChevronDown,
-  ChevronUp,
+  ChevronLeft,
+  ChevronRight,
+  DoorOpen,
   Home,
+  Info,
   Loader2,
   Pencil,
   Plus,
+  Power,
+  PowerOff,
+  RefreshCw,
   Search,
   Shield,
-  Users,
+  Trash2,
   X,
 } from 'lucide-react';
 
-import { api } from '../services/api';
+import { api, dormInventoryAPI, whatIfAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 
 /**
- * BuildingsPage.jsx
+ * BuildingsPage.jsx — "ניהול מבנים ומלאי מעונות" / "Buildings & Dormitory Inventory"
  *
- * Real connected version:
- * - No mockData.
- * - Region -> Dorm Type selector.
- * - Fetches buildings, apartments, rooms, students from Django API.
- * - Shows assigned students by matching Student.assigned_room / assigned_room_id to Room.id.
- * - Uses backend manual assignment endpoints:
- *   POST /api/room-assignments/assign/
- *   POST /api/room-assignments/move/
- *   POST /api/room-assignments/unassign/
- *   POST /api/room-assignments/swap/
+ * Manages ONLY the physical dormitory hierarchy and its allocation-relevant
+ * configuration:
+ *   Region -> Dorm type -> Building -> Apartment -> Room -> Bed
+ *
+ * This page contains NO student data and NO student-management behavior:
+ * no student fetch, no assign/move/swap/unassign, no drag-and-drop, no
+ * BedAssignment mutation, no allocation-results recommendation banners.
+ * That responsibility belongs entirely to StudentsPage / AllocationResultsPage.
  */
 
-const ENDPOINTS = {
-  regions: '/api/regions/',
-  dormTypes: '/api/dorm-types/',
-  buildings: '/api/buildings/',
-  students: '/api/students/',
-  apartmentsForBuilding: (buildingId) => `/api/buildings/${buildingId}/apartments/`,
-  roomsForBuilding: (buildingId) => `/api/buildings/${buildingId}/rooms/`,
-  assign: '/api/room-assignments/assign/',
-  move: '/api/room-assignments/move/',
-  unassign: '/api/room-assignments/unassign/',
-  swap: '/api/room-assignments/swap/',
+// ---------------------------------------------------------------------------
+// Label maps
+// ---------------------------------------------------------------------------
+
+const CATEGORY_LABELS = {
+  he: { male: 'זכר', female: 'נקבה', mixed: 'מעורב / לא רלוונטי' },
+  en: { male: 'Male', female: 'Female', mixed: 'Mixed / N/A' },
 };
+
+const APARTMENT_TYPE_LABELS = {
+  he: { single: 'רווקים/ות', couple: 'זוגות', family: 'משפחה' },
+  en: { single: 'Single', couple: 'Couple', family: 'Family' },
+};
+
+const GENDER_RESTRICTION_LABELS = {
+  he: { male: 'בנים בלבד', female: 'בנות בלבד', '': 'ללא הגבלה' },
+  en: { male: 'Male only', female: 'Female only', '': 'No restriction' },
+};
+
+const DEACTIVATION_REASONS = {
+  he: [
+    { value: 'maintenance', label: 'תחזוקה' },
+    { value: 'renovation', label: 'שיפוץ' },
+    { value: 'temporary_reservation', label: 'שריון זמני' },
+    { value: 'safety_issue', label: 'בטיחות / תקלה' },
+    { value: 'administrative_decision', label: 'החלטה מנהלתית' },
+    { value: 'other', label: 'אחר' },
+  ],
+  en: [
+    { value: 'maintenance', label: 'Maintenance' },
+    { value: 'renovation', label: 'Renovation' },
+    { value: 'temporary_reservation', label: 'Temporary reservation' },
+    { value: 'safety_issue', label: 'Safety / issue' },
+    { value: 'administrative_decision', label: 'Administrative decision' },
+    { value: 'other', label: 'Other' },
+  ],
+};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function idOf(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'object') return String(value.id ?? value.pk ?? '');
+  return String(value);
+}
 
 function asArray(payload, key) {
   if (Array.isArray(payload)) return payload;
@@ -53,610 +93,1151 @@ function asArray(payload, key) {
   return [];
 }
 
-function idOf(value) {
-  if (value === null || value === undefined) return '';
-  if (typeof value === 'object') return String(value.id ?? value.pk ?? '');
-  return String(value);
-}
-
-function getStudentAssignedRoomId(student) {
-  return idOf(student.assigned_room_id ?? student.assigned_room);
-}
-
-function getStudentLabel(student) {
-  return (
-    student.full_name ||
-    [student.first_name, student.last_name].filter(Boolean).join(' ') ||
-    student.student_id ||
-    `#${student.id}`
-  );
-}
-
-function getBuildingLabel(building, t) {
-  return building.name || `${t.building} ${building.number ?? building.id}`;
-}
-
-function getDormTypeIdFromBuilding(building) {
-  return idOf(building.dorm_type_id ?? building.dorm_type);
-}
-
-function getRegionIdFromBuilding(building) {
-  return idOf(building.region_id ?? building.region);
-}
-
-function getRegionIdFromDormType(dormType) {
-  return idOf(dormType.region_id ?? dormType.region);
-}
-
-function getApartmentIdFromRoom(room) {
-  return idOf(room.apartment_id ?? room.apartment);
-}
-
-function getBuildingIdFromRoom(room) {
-  return idOf(room.building_id ?? room.building);
-}
-
-function getRoomCapacity(room) {
-  return Number(room.capacity ?? 0) || 0;
-}
-
 function normalizeText(value) {
   return String(value ?? '').toLowerCase().trim();
 }
 
-
-
-function buildDormTypesFromBuildings(buildings) {
-  const map = new Map();
-
-  buildings.forEach((building) => {
-    const id = getDormTypeIdFromBuilding(building);
-    if (!id || map.has(id)) return;
-
-    map.set(id, {
-      id,
-      code: building.dorm_type_code ?? '',
-      name: building.dorm_type_name || `Dorm type ${id}`,
-      region: getRegionIdFromBuilding(building),
-      region_name: building.region_name || '',
-      _fallback: true,
-    });
-  });
-
-  return Array.from(map.values());
+function getRegionIdFromDormType(dormType) {
+  return idOf(dormType?.region_id ?? dormType?.region);
 }
 
+function composeReason(reason, note) {
+  return [reason, note].filter(Boolean).join(' — ');
+}
+
+// ---------------------------------------------------------------------------
+// Small reusable presentational components
+// ---------------------------------------------------------------------------
+
+function Spinner({ size = 16 }) {
+  return <Loader2 className="inv-spin" size={size} />;
+}
+
+function IconButton({ icon: Icon, onClick, title, tone, disabled }) {
+  return (
+    <button
+      type="button"
+      className={`inv-iconBtn ${tone ? `inv-iconBtn-${tone}` : ''}`}
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+    >
+      <Icon size={14} />
+    </button>
+  );
+}
+
+function StatusBadge({ active, activeText, inactiveText }) {
+  return (
+    <span className={`inv-statusBadge ${active ? 'is-active' : 'is-inactive'}`}>
+      <span className="inv-statusDot" />
+      {active ? activeText : inactiveText}
+    </span>
+  );
+}
+
+function OccupancyBadge({ occupied, total, label }) {
+  const full = total > 0 && occupied >= total;
+  return (
+    <span className={`inv-occupancyBadge ${full ? 'is-full' : ''}`}>
+      {occupied} / {total}
+      {label ? ` ${label}` : ''}
+    </span>
+  );
+}
+
+function MiniMetric({ icon: Icon, value, label }) {
+  return (
+    <div className="inv-miniMetric">
+      <Icon size={15} />
+      <div>
+        <div className="inv-miniMetricValue">{value}</div>
+        <div className="inv-miniMetricLabel">{label}</div>
+      </div>
+    </div>
+  );
+}
+
+function SectionHeader({ title, count, action }) {
+  return (
+    <div className="inv-sectionHeader">
+      <h3>
+        {title}
+        {count !== undefined && count !== null ? ` (${count})` : ''}
+      </h3>
+      {action}
+    </div>
+  );
+}
+
+function EmptyPanel({ icon: Icon, title, hint }) {
+  return (
+    <div className="inv-emptyPanel">
+      {Icon && <Icon size={26} />}
+      <div className="inv-emptyPanelTitle">{title}</div>
+      {hint && <p>{hint}</p>}
+    </div>
+  );
+}
+
+function DetailRow({ label, value }) {
+  return (
+    <div className="inv-detailRow">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function FormField({ label, htmlFor, hint, children }) {
+  return (
+    <div className="inv-formField">
+      <label htmlFor={htmlFor}>{label}</label>
+      {children}
+      {hint && <small>{hint}</small>}
+    </div>
+  );
+}
+
+function ReadOnlyField({ label, value }) {
+  return (
+    <div className="inv-readonlyField">
+      <label>{label}</label>
+      <div className="inv-readonlyValue">{value ?? '—'}</div>
+    </div>
+  );
+}
+
+function ModalSection({ title, children }) {
+  return (
+    <div className="inv-modalSection">
+      <h4>{title}</h4>
+      {children}
+    </div>
+  );
+}
+
+function PageAlert({ tone = 'danger', children, onClose }) {
+  return (
+    <div className={`inv-alert inv-alert-${tone}`}>
+      <span>{children}</span>
+      {onClose && (
+        <button type="button" onClick={onClose} aria-label="close">
+          <X size={13} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main page
+// ---------------------------------------------------------------------------
+
 export default function BuildingsPage({ language = 'he' }) {
-  const auth = useAuth();
+  const { isCentralAdmin, isRegionBoss, getUserRegion } = useAuth();
+  const [searchParams] = useSearchParams();
 
-  const currentUser = auth?.user || auth?.currentUser || {};
-  const isCentralAdmin =
-    typeof auth?.isCentralAdmin === 'function'
-      ? auth.isCentralAdmin
-      : () => Boolean(currentUser.is_central_admin || currentUser.role === 'central_admin');
-
-  const isRegionBoss =
-    typeof auth?.isRegionBoss === 'function'
-      ? auth.isRegionBoss
-      : () => Boolean(currentUser.is_boss || currentUser.role === 'boss' || currentUser.role === 'region_boss');
-
-  const isEmployee =
-    typeof auth?.isEmployee === 'function'
-      ? auth.isEmployee
-      : () => Boolean(currentUser.role === 'employee');
-
-  const getUserRegion =
-    typeof auth?.getUserRegion === 'function'
-      ? auth.getUserRegion
-      : () => currentUser.region || currentUser.region_id || null;
-
-  const canEditRegion =
-    typeof auth?.canEditRegion === 'function'
-      ? auth.canEditRegion
-      : (regionId) => isCentralAdmin() || idOf(regionId) === idOf(getUserRegion());
-
-  const userRegionId = idOf(getUserRegion());
-  const canViewAllRegions = isCentralAdmin() || isRegionBoss();
   const isHe = language === 'he';
+  const canManageInventory = isCentralAdmin() || isRegionBoss();
+  const viewOnly = !canManageInventory;
+  const userRegionId = idOf(getUserRegion());
+
+  const canCreateBed = canManageInventory && typeof dormInventoryAPI.createBed === 'function';
+  const canDeleteBed = canManageInventory && typeof dormInventoryAPI.deleteBed === 'function';
+  const canSetBedAvailability = canManageInventory && typeof dormInventoryAPI.setBedAvailability === 'function';
 
   const t = isHe
     ? {
-        title: 'בניינים וחדרים',
-        subtitle: 'ניהול חדרים ושיוך סטודנטים לפי הרשאות',
-        chooseRegion: 'בחר אזור',
-        chooseDormType: 'בחר סוג מעונות',
-        allDormTypes: 'כל סוגי המעונות באזור',
-        search: 'חיפוש בניין / דירה / חדר...',
-        building: 'בניין',
-        buildings: 'בניינים',
-        apartment: 'דירה',
-        apartments: 'דירות',
-        room: 'חדר',
-        rooms: 'חדרים',
-        students: 'סטודנטים',
-        capacity: 'קיבולת',
-        assigned: 'משויכים',
-        unassigned: 'לא משויכים',
-        occupied: 'תפוס',
-        free: 'פנוי',
-        active: 'פעיל',
-        inactive: 'לא פעיל',
-        loading: 'טוען...',
-        loadingRooms: 'טוען חדרים...',
-        noData: 'אין נתונים להצגה',
-        noRooms: 'אין חדרים בדירה הזו',
-        noStudents: 'אין סטודנטים בחדר',
-        noAvailableStudents: 'אין סטודנטים פנויים לשיוך',
-        selectApartment: 'בחרי דירה לצפייה',
-        selectApartmentHelp: 'בחרי בניין ואז דירה כדי לראות חדרים ושיוכים.',
-        addStudent: 'הוסף סטודנט/ית',
-        pickStudent: 'בחר סטודנט/ית לשיוך',
-        moveStudent: 'העברה / עדכון חדר',
-        moveTo: 'העבר אל',
-        remove: 'הסר',
-        swap: 'החלפה',
-        swapHint: 'בחרי סטודנט/ית נוסף/ת כדי לבצע החלפה',
+        title: 'ניהול מבנים ומלאי מעונות',
+        subtitle: 'ניהול היררכיית המבנים, כללי השיבוץ, הקיבולת וזמינות המלאי',
+        viewOnlyIndicator: 'צפייה בלבד',
+        refresh: 'רענן',
+        addBuilding: 'הוסף בניין',
+        breadcrumbRoot: 'מלאי מעונות',
+        allDormTypes: 'כל סוגי המעונות',
+        chooseRegion: 'אזור',
+        chooseDormType: 'סוג מעונות',
+        status: 'סטטוס',
+        statusActive: 'פעיל',
+        statusInactive: 'לא פעיל',
+        statusAll: 'הכל',
+        search: 'חיפוש בניין, דירה או חדר...',
+        metricBuildings: 'בניינים',
+        metricApartments: 'דירות',
+        metricRooms: 'חדרים',
+        metricBeds: 'מיטות',
+        metricOccupied: 'מיטות תפוסות',
+        metricFree: 'מיטות פנויות',
+        navigatorTitle: 'בניינים',
+        noBuildings: 'לא נמצאו בניינים',
+        apartmentsCount: 'דירות',
+        roomsCount: 'חדרים',
+        bedsCount: 'מיטות',
+        occupiedShort: 'תפוסות',
+        selectBuildingTitle: 'בחרו בניין',
+        selectBuildingHint: 'הדירות, החדרים והמיטות שלו יוצגו לאחר הבחירה.',
+        apartmentsTable: 'דירות',
+        roomsTable: 'חדרים',
+        bedsTable: 'מיטות',
+        addApartment: 'הוסף דירה',
+        addRoom: 'הוסף חדר',
+        addBed: 'הוסף מיטה',
+        colApartment: 'דירה',
+        colCategory: 'קטגוריה',
+        colHousingType: 'סוג דיור',
+        colRooms: 'חדרים',
+        colOccupancy: 'תפוסה',
+        colStatus: 'סטטוס',
+        colActions: 'פעולות',
+        colRoom: 'חדר',
+        colCapacity: 'קיבולת',
+        colBeds: 'מיטות',
+        colBed: 'מיטה',
+        colAvailability: 'זמינות',
+        available: 'פנויה',
+        occupied: 'תפוסה',
+        selectApartmentHint: 'בחרו דירה כדי לראות את חדריה.',
+        selectRoomHint: 'בחרו חדר כדי לראות את מיטותיו.',
+        noApartments: 'אין דירות בבניין זה',
+        noRooms: 'אין חדרים בדירה זו',
+        noBeds: 'אין מיטות בחדר זה',
+        bedRecordsMismatch: 'קיימת אי־התאמה בין קיבולת החדר לרשומות המיטה במסד הנתונים',
+        bedNoActionsSupported: 'אין תמיכה בהוספה, מחיקה או השבתת מיטה בודדת בגרסה הנוכחית — ניתן לערוך רק את תווית המיטה.',
+        inspectorTitle: 'פרטי הפריט הנבחר',
+        inspectorEmpty: 'בחרו בניין, דירה, חדר או מיטה כדי לראות פרטים',
+        sectionDetails: 'פרטים',
+        sectionConfig: 'תצורה וכללים',
+        sectionCapacity: 'קיבולת ומלאי',
+        edit: 'עריכה',
+        activate: 'הפעל',
+        deactivate: 'השבת',
+        deleteAction: 'מחק',
+        buildingNumberLabel: 'מספר בניין',
+        dormTypeLabel: 'סוג מעונות',
+        regionLabel: 'אזור',
+        genderRestrictionLabel: 'הגבלת מגדר',
+        activeStatusLabel: 'סטטוס',
+        apartmentCountLabel: 'מספר דירות',
+        roomCountLabel: 'מספר חדרים',
+        bedCountLabel: 'מספר מיטות',
+        occupiedBedsLabel: 'מיטות תפוסות',
+        freeBedsLabel: 'מיטות פנויות',
+        parentBuildingLabel: 'בניין',
+        apartmentNumberLabel: 'מספר דירה',
+        genderCategoryLabel: 'קטגוריה (מגדר)',
+        housingTypeLabel: 'סוג דיור',
+        inactiveReasonLabel: 'סיבת אי-פעילות',
+        plannedRoomCountLabel: 'חדרים מתוכננים',
+        actualRoomCountLabel: 'חדרים בפועל',
+        apartmentCapacityLabel: 'קיבולת דירה',
+        totalBedsLabel: 'סך מיטות',
+        parentApartmentLabel: 'דירה',
+        roomNameLabel: 'שם/מספר חדר',
+        capacityLabel: 'קיבולת',
+        occupancyLabel: 'תפוסה',
+        availableBedsLabel: 'מיטות פנויות',
+        configWarningLabel: 'אזהרת תצורה',
+        bedLabelField: 'תווית מיטה',
+        parentRoomLabel: 'חדר',
+        availabilityLabel: 'זמינות',
+        none: 'ללא',
+        // Drawer
+        drawerCreateBuilding: 'בניין חדש',
+        drawerEditBuilding: 'עריכת בניין',
+        drawerCreateApartment: 'דירה חדשה',
+        drawerEditApartment: 'עריכת דירה',
+        drawerCreateRoom: 'חדר חדש',
+        drawerEditRoom: 'עריכת חדר',
+        drawerEditBed: 'עריכת מיטה',
         cancel: 'ביטול',
-        confirm: 'אישור',
-        close: 'סגור',
-        roomFull: 'החדר מלא',
-        viewOnly: 'צפייה בלבד — אין הרשאה לערוך באזור זה',
-        centralOrBoss: 'צפייה לפי אזור וסוג מעונות',
-        employeeScope: 'מוצג רק האזור המשויך למשתמש',
-        error: 'שגיאה בטעינת הנתונים',
+        save: 'שמור',
+        create: 'צור',
+        noRestriction: 'ללא הגבלה',
+        genderRestrictionHint: 'לבניינים עם שירותים משותפים בלבד — ריק = ללא הגבלה.',
+        isActiveEditHint: 'שינוי סטטוס פעיל/לא פעיל מתבצע רק דרך תהליך "שינוי זמינות".',
+        // Editor modal sections
+        sectionGeneralInfo: 'מידע כללי',
+        sectionAllocationConfig: 'תצורת שיבוץ',
+        sectionApartmentClassification: 'סיווג דירה',
+        sectionCapacityConfig: 'תצורת קיבולת',
+        sectionAvailabilityInfo: 'מידע זמינות',
+        sectionStatus: 'סטטוס',
+        availabilityManagedSeparately: 'זמינות מנוהלת בנפרד דרך פעולת ההפעלה / ההשבתה.',
+        // Editor validation
+        validationBuildingNumberRequired: 'יש להזין מספר בניין',
+        validationDormTypeRequired: 'יש לבחור סוג מעונות',
+        validationApartmentNumberRequired: 'יש להזין מספר דירה',
+        validationRoomCountInvalid: 'יש להזין מספר חדרים תקין',
+        validationCapacityInvalid: 'יש להזין קיבולת תקינה',
+        validationRoomNameRequired: 'יש להזין שם/מספר חדר',
+        validationRoomCapacityInvalid: 'יש להזין קיבולת חיובית תקינה',
+        validationBedLabelRequired: 'יש להזין תווית מיטה',
+        // Availability dialog
+        deactivateTitle: (label) => `השבתת ${label}`,
+        activateTitle: (label) => `הפעלת ${label}`,
+        impactTitle: 'השפעת ההשבתה',
+        loadingImpact: 'בודק השפעה...',
+        impactApartments: 'דירות מושפעות',
+        impactRooms: 'חדרים מושפעים',
+        impactBeds: 'מיטות מושפעות',
+        impactAssignments: 'סטודנטים בעלי שיוך פעיל',
+        impactNote:
+          'השיבוץ האוטומטי יפסיק להשתמש במלאי זה. דיירים קיימים יישארו משויכים — לא יוסרו ולא יועברו אוטומטית; תיפתח עבורם בקשת העברה ממתינה לטיפול ידני.',
+        impactNoAssignments: 'אין כרגע סטודנטים עם שיוך פעיל בטווח זה.',
+        reasonLabel: 'סיבה',
+        chooseReason: 'בחר סיבה',
+        noteLabel: 'הערה נוספת (לא חובה)',
+        confirmProceed: 'אשר והמשך',
+        confirmActivateShort: 'להפעיל מחדש?',
+        reasonRequired: 'יש לבחור סיבה',
+        // Bed delete
+        deleteBedTitle: (label) => `מחיקת מיטה ${label}`,
+        deleteBedOccupiedWarning: 'לא ניתן למחוק מיטה תפוסה.',
+        confirmDelete: 'מחק',
+        // Errors
+        loadError: 'שגיאה בטעינת הנתונים',
         actionError: 'הפעולה נכשלה',
-        searchStudent: 'חיפוש סטודנט/ית...',
-        searchRoom: 'חיפוש חדר / דירה / בניין...',
-        clear: 'נקה',
       }
     : {
-        title: 'Buildings & Rooms',
-        subtitle: 'Manage room assignments according to permissions',
-        chooseRegion: 'Choose region',
-        chooseDormType: 'Choose dorm type',
-        allDormTypes: 'All dorm types in this region',
-        search: 'Search building / apartment / room...',
-        building: 'Building',
-        buildings: 'Buildings',
-        apartment: 'Apartment',
-        apartments: 'Apartments',
-        room: 'Room',
-        rooms: 'Rooms',
-        students: 'Students',
-        capacity: 'Capacity',
-        assigned: 'Assigned',
-        unassigned: 'Unassigned',
+        title: 'Buildings & Dormitory Inventory',
+        subtitle: 'Manage hierarchy, allocation rules, capacity, and inventory availability',
+        viewOnlyIndicator: 'View-only',
+        refresh: 'Refresh',
+        addBuilding: 'Add building',
+        breadcrumbRoot: 'Dormitory inventory',
+        allDormTypes: 'All dorm types',
+        chooseRegion: 'Region',
+        chooseDormType: 'Dorm type',
+        status: 'Status',
+        statusActive: 'Active',
+        statusInactive: 'Inactive',
+        statusAll: 'All',
+        search: 'Search building, apartment, or room...',
+        metricBuildings: 'Buildings',
+        metricApartments: 'Apartments',
+        metricRooms: 'Rooms',
+        metricBeds: 'Beds',
+        metricOccupied: 'Occupied beds',
+        metricFree: 'Free beds',
+        navigatorTitle: 'Buildings',
+        noBuildings: 'No buildings found',
+        apartmentsCount: 'apartments',
+        roomsCount: 'rooms',
+        bedsCount: 'beds',
+        occupiedShort: 'occupied',
+        selectBuildingTitle: 'Select a building',
+        selectBuildingHint: 'Its apartments, rooms, and beds will appear after selection.',
+        apartmentsTable: 'Apartments',
+        roomsTable: 'Rooms',
+        bedsTable: 'Beds',
+        addApartment: 'Add apartment',
+        addRoom: 'Add room',
+        addBed: 'Add bed',
+        colApartment: 'Apartment',
+        colCategory: 'Category',
+        colHousingType: 'Housing type',
+        colRooms: 'Rooms',
+        colOccupancy: 'Occupancy',
+        colStatus: 'Status',
+        colActions: 'Actions',
+        colRoom: 'Room',
+        colCapacity: 'Capacity',
+        colBeds: 'Beds',
+        colBed: 'Bed',
+        colAvailability: 'Availability',
+        available: 'Available',
         occupied: 'Occupied',
-        free: 'Free',
-        active: 'Active',
-        inactive: 'Inactive',
-        loading: 'Loading...',
-        loadingRooms: 'Loading rooms...',
-        noData: 'No data to display',
+        selectApartmentHint: 'Select an apartment to see its rooms.',
+        selectRoomHint: 'Select a room to see its beds.',
+        noApartments: 'No apartments in this building',
         noRooms: 'No rooms in this apartment',
-        noStudents: 'No students in this room',
-        noAvailableStudents: 'No available students',
-        selectApartment: 'Select an apartment',
-        selectApartmentHelp: 'Pick a building and then an apartment to see rooms and assignments.',
-        addStudent: 'Add student',
-        pickStudent: 'Pick a student',
-        moveStudent: 'Move / update room',
-        moveTo: 'Move to',
-        remove: 'Remove',
-        swap: 'Swap',
-        swapHint: 'Pick another student to swap',
+        noBeds: 'No beds in this room',
+        bedRecordsMismatch: 'There is a mismatch between room capacity and bed records in the database',
+        bedNoActionsSupported: 'Adding, deleting, or deactivating an individual bed is not supported in the current version — only the bed label can be edited.',
+        inspectorTitle: 'Selected item details',
+        inspectorEmpty: 'Select a building, apartment, room, or bed to see details',
+        sectionDetails: 'Details',
+        sectionConfig: 'Configuration and rules',
+        sectionCapacity: 'Capacity and inventory',
+        edit: 'Edit',
+        activate: 'Activate',
+        deactivate: 'Deactivate',
+        deleteAction: 'Delete',
+        buildingNumberLabel: 'Building number',
+        dormTypeLabel: 'Dorm type',
+        regionLabel: 'Region',
+        genderRestrictionLabel: 'Gender restriction',
+        activeStatusLabel: 'Status',
+        apartmentCountLabel: 'Apartment count',
+        roomCountLabel: 'Room count',
+        bedCountLabel: 'Bed count',
+        occupiedBedsLabel: 'Occupied beds',
+        freeBedsLabel: 'Free beds',
+        parentBuildingLabel: 'Building',
+        apartmentNumberLabel: 'Apartment number',
+        genderCategoryLabel: 'Category (gender)',
+        housingTypeLabel: 'Housing type',
+        inactiveReasonLabel: 'Inactive reason',
+        plannedRoomCountLabel: 'Planned rooms',
+        actualRoomCountLabel: 'Actual rooms',
+        apartmentCapacityLabel: 'Apartment capacity',
+        totalBedsLabel: 'Total beds',
+        parentApartmentLabel: 'Apartment',
+        roomNameLabel: 'Room name/number',
+        capacityLabel: 'Capacity',
+        occupancyLabel: 'Occupancy',
+        availableBedsLabel: 'Available beds',
+        configWarningLabel: 'Configuration warning',
+        bedLabelField: 'Bed label',
+        parentRoomLabel: 'Room',
+        availabilityLabel: 'Availability',
+        none: 'None',
+        drawerCreateBuilding: 'New building',
+        drawerEditBuilding: 'Edit building',
+        drawerCreateApartment: 'New apartment',
+        drawerEditApartment: 'Edit apartment',
+        drawerCreateRoom: 'New room',
+        drawerEditRoom: 'Edit room',
+        drawerEditBed: 'Edit bed',
         cancel: 'Cancel',
-        confirm: 'Confirm',
-        close: 'Close',
-        roomFull: 'Room is full',
-        viewOnly: 'View-only — no edit permission for this region',
-        centralOrBoss: 'Viewing by region and dorm type',
-        employeeScope: 'Showing only your assigned region',
-        error: 'Error loading data',
+        save: 'Save',
+        create: 'Create',
+        noRestriction: 'No restriction',
+        genderRestrictionHint: 'For shared-facility buildings only — empty = no restriction.',
+        isActiveEditHint: 'Active/inactive status can only be changed via the availability workflow.',
+        // Editor modal sections
+        sectionGeneralInfo: 'General information',
+        sectionAllocationConfig: 'Allocation configuration',
+        sectionApartmentClassification: 'Apartment classification',
+        sectionCapacityConfig: 'Capacity configuration',
+        sectionAvailabilityInfo: 'Availability information',
+        sectionStatus: 'Status',
+        availabilityManagedSeparately: 'Availability is managed separately through the Activate / Deactivate action.',
+        // Editor validation
+        validationBuildingNumberRequired: 'Building number is required',
+        validationDormTypeRequired: 'Dormitory type is required',
+        validationApartmentNumberRequired: 'Apartment number is required',
+        validationRoomCountInvalid: 'Enter a valid room count',
+        validationCapacityInvalid: 'Enter a valid capacity',
+        validationRoomNameRequired: 'Room name/number is required',
+        validationRoomCapacityInvalid: 'Enter a valid positive capacity',
+        validationBedLabelRequired: 'Bed label is required',
+        deactivateTitle: (label) => `Deactivate ${label}`,
+        activateTitle: (label) => `Activate ${label}`,
+        impactTitle: 'Deactivation impact',
+        loadingImpact: 'Checking impact...',
+        impactApartments: 'Affected apartments',
+        impactRooms: 'Affected rooms',
+        impactBeds: 'Affected beds',
+        impactAssignments: 'Students with an active assignment',
+        impactNote:
+          'Automatic allocation will stop using this inventory. Existing occupants stay assigned — never auto-removed or moved; a pending movement request is created for manual staff follow-up.',
+        impactNoAssignments: 'No students currently have an active assignment in this scope.',
+        reasonLabel: 'Reason',
+        chooseReason: 'Choose a reason',
+        noteLabel: 'Additional note (optional)',
+        confirmProceed: 'Confirm and proceed',
+        confirmActivateShort: 'Reactivate?',
+        reasonRequired: 'A reason is required',
+        deleteBedTitle: (label) => `Delete bed ${label}`,
+        deleteBedOccupiedWarning: 'An occupied bed cannot be deleted.',
+        confirmDelete: 'Delete',
+        loadError: 'Error loading data',
         actionError: 'Action failed',
-        searchStudent: 'Search student...',
-        searchRoom: 'Search room / apartment / building...',
-        clear: 'Clear',
       };
 
+  const reasonOptions = DEACTIVATION_REASONS[isHe ? 'he' : 'en'];
+  const categoryLabels = CATEGORY_LABELS[isHe ? 'he' : 'en'];
+  const apartmentTypeLabels = APARTMENT_TYPE_LABELS[isHe ? 'he' : 'en'];
+  const genderRestrictionLabels = GENDER_RESTRICTION_LABELS[isHe ? 'he' : 'en'];
+  const BreadcrumbChevron = isHe ? ChevronLeft : ChevronRight;
+
+  // -------------------------------------------------------------------
+  // State (section 15)
+  // -------------------------------------------------------------------
   const [regions, setRegions] = useState([]);
   const [dormTypes, setDormTypes] = useState([]);
   const [buildings, setBuildings] = useState([]);
-  const [students, setStudents] = useState([]);
 
   const [selectedRegionId, setSelectedRegionId] = useState('');
   const [selectedDormTypeId, setSelectedDormTypeId] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('active');
   const [searchQuery, setSearchQuery] = useState('');
 
-  const [expandedBuildingId, setExpandedBuildingId] = useState(null);
-  const [selectedApartmentId, setSelectedApartmentId] = useState(null);
-  const [apartments, setApartments] = useState([]);
+  const [selectedBuildingId, setSelectedBuildingId] = useState('');
+  const [selectedApartmentId, setSelectedApartmentId] = useState('');
+  const [selectedRoomId, setSelectedRoomId] = useState('');
+  const [selectedBedId, setSelectedBedId] = useState('');
+
+  const [buildingApartments, setBuildingApartments] = useState([]);
   const [buildingRooms, setBuildingRooms] = useState([]);
+  const [roomBeds, setRoomBeds] = useState([]);
 
   const [loading, setLoading] = useState(true);
-  const [loadingBuilding, setLoadingBuilding] = useState(false);
-  const [error, setError] = useState('');
+  const [loadingStructure, setLoadingStructure] = useState(false);
+  const [loadingBeds, setLoadingBeds] = useState(false);
+
+  const [pageError, setPageError] = useState('');
   const [actionError, setActionError] = useState('');
 
-  const [draggingStudentId, setDraggingStudentId] = useState(null);
+  const [editor, setEditor] = useState(null);
+  const [availabilityDialog, setAvailabilityDialog] = useState(null);
+  const [deleteDialog, setDeleteDialog] = useState(null);
 
-  const [addModal, setAddModal] = useState({
-    open: false,
-    roomId: null,
-    query: '',
-  });
-
-  const [moveModal, setMoveModal] = useState({
-    open: false,
-    studentId: null,
-    query: '',
-    toRoomId: '',
-  });
-
-  const [swapMode, setSwapMode] = useState({
-    active: false,
-    studentId: null,
-  });
-
-  const selectedRegion = useMemo(
-    () => regions.find((region) => idOf(region.id) === idOf(selectedRegionId)) || null,
-    [regions, selectedRegionId]
-  );
-
+  // -------------------------------------------------------------------
+  // Derived data (section 16)
+  // -------------------------------------------------------------------
   const dormTypesInRegion = useMemo(() => {
     if (!selectedRegionId) return dormTypes;
-    return dormTypes.filter((dormType) => getRegionIdFromDormType(dormType) === idOf(selectedRegionId));
+    return dormTypes.filter((dt) => getRegionIdFromDormType(dt) === idOf(selectedRegionId));
   }, [dormTypes, selectedRegionId]);
 
-  const scopeBuildings = useMemo(() => {
+  const filteredBuildings = useMemo(() => {
     let list = buildings;
 
-    if (selectedRegionId) {
-      list = list.filter((building) => getRegionIdFromBuilding(building) === idOf(selectedRegionId));
+    if (selectedDormTypeId !== 'all') {
+      list = list.filter((b) => idOf(b.dorm_type) === idOf(selectedDormTypeId));
     }
-
-    if (selectedDormTypeId && selectedDormTypeId !== 'all') {
-      list = list.filter((building) => getDormTypeIdFromBuilding(building) === idOf(selectedDormTypeId));
+    if (statusFilter !== 'all') {
+      const wantActive = statusFilter === 'active';
+      list = list.filter((b) => Boolean(b.is_active) === wantActive);
     }
-
-    return list;
-  }, [buildings, selectedRegionId, selectedDormTypeId]);
-
-  const filteredBuildings = useMemo(() => {
     const q = normalizeText(searchQuery);
-    if (!q) return scopeBuildings;
+    if (q) {
+      list = list.filter((b) => [b.number, b.dorm_type_name, b.region_name].join(' ').toLowerCase().includes(q));
+    }
+    return [...list].sort((a, b) => (a.number ?? 0) - (b.number ?? 0));
+  }, [buildings, selectedDormTypeId, statusFilter, searchQuery]);
 
-    return scopeBuildings.filter((building) => {
-      const haystack = [
-        building.id,
-        building.number,
-        building.name,
-        building.dorm_type_name,
-        building.region_name,
-      ]
-        .join(' ')
-        .toLowerCase();
-
-      return haystack.includes(q);
-    });
-  }, [scopeBuildings, searchQuery]);
-
-  const selectedBuilding = useMemo(
-    () => buildings.find((building) => idOf(building.id) === idOf(expandedBuildingId)) || null,
-    [buildings, expandedBuildingId]
+  const selectedRegion = useMemo(() => regions.find((r) => idOf(r.id) === idOf(selectedRegionId)) || null, [regions, selectedRegionId]);
+  const selectedDormType = useMemo(
+    () => (selectedDormTypeId === 'all' ? null : dormTypesInRegion.find((dt) => idOf(dt.id) === idOf(selectedDormTypeId)) || null),
+    [dormTypesInRegion, selectedDormTypeId]
   );
+  const selectedBuilding = useMemo(() => buildings.find((b) => idOf(b.id) === idOf(selectedBuildingId)) || null, [buildings, selectedBuildingId]);
+
+  const apartmentsForSelectedBuilding = useMemo(() => {
+    const q = normalizeText(searchQuery);
+    if (!q) return buildingApartments;
+    return buildingApartments.filter((a) => String(a.number ?? '').toLowerCase().includes(q));
+  }, [buildingApartments, searchQuery]);
 
   const selectedApartment = useMemo(
-    () => apartments.find((apt) => idOf(apt.id) === idOf(selectedApartmentId)) || null,
-    [apartments, selectedApartmentId]
+    () => buildingApartments.find((a) => idOf(a.id) === idOf(selectedApartmentId)) || null,
+    [buildingApartments, selectedApartmentId]
   );
 
-  const selectedApartmentRooms = useMemo(() => {
-    if (!selectedApartmentId) return [];
+  const roomsForSelectedApartment = useMemo(() => {
+    let list = buildingRooms.filter((r) => idOf(r.apartment) === idOf(selectedApartmentId));
+    const q = normalizeText(searchQuery);
+    if (q) list = list.filter((r) => String(r.name ?? '').toLowerCase().includes(q));
+    return list;
+  }, [buildingRooms, selectedApartmentId, searchQuery]);
 
-    return buildingRooms
-      .filter((room) => getApartmentIdFromRoom(room) === idOf(selectedApartmentId))
-      .sort((a, b) => String(a.name ?? a.number ?? a.id).localeCompare(String(b.name ?? b.number ?? b.id)));
-  }, [buildingRooms, selectedApartmentId]);
+  const selectedRoom = useMemo(() => buildingRooms.find((r) => idOf(r.id) === idOf(selectedRoomId)) || null, [buildingRooms, selectedRoomId]);
+  const selectedBed = useMemo(() => roomBeds.find((b) => idOf(b.id) === idOf(selectedBedId)) || null, [roomBeds, selectedBedId]);
 
-  const assignedCount = useMemo(
-    () => students.filter((student) => Boolean(getStudentAssignedRoomId(student))).length,
-    [students]
-  );
+  const selectedEntityType = selectedBed ? 'bed' : selectedRoom ? 'room' : selectedApartment ? 'apartment' : selectedBuilding ? 'building' : null;
+  const selectedEntity = selectedBed || selectedRoom || selectedApartment || selectedBuilding || null;
 
-  const unassignedStudents = useMemo(
-    () => students.filter((student) => !getStudentAssignedRoomId(student)),
-    [students]
-  );
+  // Summary strip is scoped to region + selected dorm type, independent of
+  // the active/inactive list filter (active-only for the 5 capacity
+  // metrics, since inactive inventory is out of solver scope; total
+  // building count includes both so the numbers stay internally consistent
+  // with what staff see in the navigator when status = "all").
+  const summaryMetrics = useMemo(() => {
+    const scoped = selectedDormTypeId === 'all' ? buildings : buildings.filter((b) => idOf(b.dorm_type) === idOf(selectedDormTypeId));
+    const active = scoped.filter((b) => b.is_active);
+    const sum = (field) => active.reduce((acc, b) => acc + (Number(b[field]) || 0), 0);
+    return {
+      buildings: scoped.length,
+      apartments: sum('apartment_count'),
+      rooms: sum('room_count'),
+      beds: sum('bed_count'),
+      occupied: sum('occupied_beds'),
+      free: sum('free_beds'),
+    };
+  }, [buildings, selectedDormTypeId]);
 
-  const canEditSelectedRegion = useMemo(() => {
-    if (!selectedRegionId) return false;
-    return Boolean(canEditRegion(selectedRegionId));
-  }, [canEditRegion, selectedRegionId]);
-
-  const viewOnly = !canEditSelectedRegion;
-
-  const getRoomStudents = useCallback(
-    (roomId) => {
-      const rid = idOf(roomId);
-      return students
-        .filter((student) => getStudentAssignedRoomId(student) === rid)
-        .sort((a, b) => getStudentLabel(a).localeCompare(getStudentLabel(b)));
-    },
-    [students]
-  );
-
-  const refreshStudents = useCallback(async () => {
-    const res = await api.get(ENDPOINTS.students);
-    setStudents(asArray(res.data));
+  // -------------------------------------------------------------------
+  // Data loading
+  // -------------------------------------------------------------------
+  const loadRegionsAndDormTypes = useCallback(async () => {
+    const [regionsRes, dormTypesRes] = await Promise.all([api.get('/api/regions/'), api.get('/api/dorm-types/')]);
+    setRegions(asArray(regionsRes.data));
+    setDormTypes(asArray(dormTypesRes.data));
+    return { regionsList: asArray(regionsRes.data), dormTypesList: asArray(dormTypesRes.data) };
   }, []);
 
-  const resetBuildingSelection = useCallback(() => {
-    setExpandedBuildingId(null);
-    setSelectedApartmentId(null);
-    setApartments([]);
-    setBuildingRooms([]);
-    setAddModal({ open: false, roomId: null, query: '' });
-    setMoveModal({ open: false, studentId: null, query: '', toRoomId: '' });
-    setSwapMode({ active: false, studentId: null });
-    setDraggingStudentId(null);
-    setActionError('');
+  const loadBuildings = useCallback(async (regionId) => {
+    if (!regionId) {
+      setBuildings([]);
+      return;
+    }
+    const data = await dormInventoryAPI.getBuildings({ region: regionId, is_active: 'all' });
+    setBuildings(asArray(data));
   }, []);
 
-  const fetchBuildingData = useCallback(async (buildingId) => {
-    setLoadingBuilding(true);
-    setActionError('');
-    setSelectedApartmentId(null);
-    setApartments([]);
+  const resetSelectionBelowBuilding = () => {
+    setSelectedApartmentId('');
+    setSelectedRoomId('');
+    setSelectedBedId('');
+    setBuildingApartments([]);
     setBuildingRooms([]);
+    setRoomBeds([]);
+  };
 
+  const selectRegion = async (regionId) => {
+    setSelectedRegionId(regionId);
+    setSelectedDormTypeId('all');
+    setSelectedBuildingId('');
+    resetSelectionBelowBuilding();
+    setLoading(true);
     try {
-      const [apartmentsRes, roomsRes] = await Promise.all([
-        api.get(ENDPOINTS.apartmentsForBuilding(buildingId)),
-        api.get(ENDPOINTS.roomsForBuilding(buildingId)),
-      ]);
-
-      setApartments(asArray(apartmentsRes.data, 'apartments'));
-      setBuildingRooms(asArray(roomsRes.data, 'rooms'));
+      await loadBuildings(regionId);
     } catch (err) {
-      console.error('ERROR LOADING BUILDING DATA:', err);
-      setActionError(err?.response?.data?.error || t.error);
-      setApartments([]);
-      setBuildingRooms([]);
+      setPageError(err?.message || t.loadError);
     } finally {
-      setLoadingBuilding(false);
+      setLoading(false);
     }
-  }, [t.error]);
+  };
 
-  const refreshOpenBuilding = useCallback(async () => {
-    await refreshStudents();
-    if (expandedBuildingId) {
-      await fetchBuildingData(expandedBuildingId);
+  const selectBuilding = async (buildingId) => {
+    if (idOf(selectedBuildingId) === idOf(buildingId)) {
+      setSelectedBuildingId('');
+      resetSelectionBelowBuilding();
+      return;
     }
-  }, [expandedBuildingId, fetchBuildingData, refreshStudents]);
+    setSelectedBuildingId(buildingId);
+    resetSelectionBelowBuilding();
+    setLoadingStructure(true);
+    try {
+      const [apartmentsData, roomsData] = await Promise.all([
+        dormInventoryAPI.getApartments({ building: buildingId, is_active: 'all' }),
+        dormInventoryAPI.getRooms({ building: buildingId, is_active: 'all' }),
+      ]);
+      setBuildingApartments(asArray(apartmentsData));
+      setBuildingRooms(asArray(roomsData));
+    } catch (err) {
+      setActionError(err?.message || t.loadError);
+    } finally {
+      setLoadingStructure(false);
+    }
+  };
+
+  function selectApartment(id) {
+    setSelectedApartmentId((prev) => (idOf(prev) === idOf(id) ? '' : id));
+    setSelectedRoomId('');
+    setSelectedBedId('');
+    setRoomBeds([]);
+  }
+
+  const selectRoom = async (id) => {
+    if (idOf(selectedRoomId) === idOf(id)) {
+      setSelectedRoomId('');
+      setSelectedBedId('');
+      setRoomBeds([]);
+      return;
+    }
+    setSelectedRoomId(id);
+    setSelectedBedId('');
+    setLoadingBeds(true);
+    try {
+      const data = await dormInventoryAPI.getBeds({ room: id });
+      setRoomBeds(asArray(data));
+    } catch (err) {
+      setActionError(err?.message || t.loadError);
+    } finally {
+      setLoadingBeds(false);
+    }
+  };
+
+  function selectBed(id) {
+    setSelectedBedId((prev) => (idOf(prev) === idOf(id) ? '' : id));
+  }
+
+  const refreshCurrentScope = useCallback(async () => {
+    if (selectedRegionId) await loadBuildings(selectedRegionId);
+    if (selectedBuildingId) {
+      const [apartmentsData, roomsData] = await Promise.all([
+        dormInventoryAPI.getApartments({ building: selectedBuildingId, is_active: 'all' }),
+        dormInventoryAPI.getRooms({ building: selectedBuildingId, is_active: 'all' }),
+      ]);
+      setBuildingApartments(asArray(apartmentsData));
+      setBuildingRooms(asArray(roomsData));
+    }
+    if (selectedRoomId) {
+      const data = await dormInventoryAPI.getBeds({ room: selectedRoomId });
+      setRoomBeds(asArray(data));
+    }
+  }, [selectedRegionId, selectedBuildingId, selectedRoomId, loadBuildings]);
 
   useEffect(() => {
-    const fetchInitialData = async () => {
+    const init = async () => {
       setLoading(true);
-      setError('');
-
+      setPageError('');
       try {
-        const [regionsRes, buildingsRes, studentsRes, dormTypesRes] = await Promise.all([
-          api.get(ENDPOINTS.regions),
-          api.get(ENDPOINTS.buildings),
-          api.get(ENDPOINTS.students),
-          api.get(ENDPOINTS.dormTypes).catch((err) => {
-            console.warn('Dorm types endpoint failed. Falling back to buildings-derived dorm types.', err);
-            return null;
-          }),
-        ]);
+        const { regionsList } = await loadRegionsAndDormTypes();
 
-        const nextRegions = asArray(regionsRes.data);
-        const nextBuildings = asArray(buildingsRes.data);
-        const nextStudents = asArray(studentsRes.data);
-        const nextDormTypes = dormTypesRes ? asArray(dormTypesRes.data) : buildDormTypesFromBuildings(nextBuildings);
+        const urlRegionRaw = searchParams.get('region');
+        const urlDormTypeIdRaw = searchParams.get('dormTypeId');
+        const canViewAllRegions = isCentralAdmin() || isRegionBoss();
 
-        setRegions(nextRegions);
-        setBuildings(nextBuildings);
-        setStudents(nextStudents);
-        setDormTypes(nextDormTypes);
+        let resolvedRegionId = idOf(userRegionId || regionsList[0]?.id);
+        if (urlRegionRaw) {
+          const exists = regionsList.some((r) => idOf(r.id) === idOf(urlRegionRaw)) && (canViewAllRegions || idOf(urlRegionRaw) === idOf(userRegionId));
+          if (exists) resolvedRegionId = idOf(urlRegionRaw);
+        }
+        setSelectedRegionId(resolvedRegionId);
 
-        const initialRegionId = canViewAllRegions
-          ? idOf(userRegionId || nextRegions[0]?.id)
-          : idOf(userRegionId || nextRegions[0]?.id);
+        if (urlDormTypeIdRaw) setSelectedDormTypeId(idOf(urlDormTypeIdRaw));
 
-        setSelectedRegionId(initialRegionId);
-        setSelectedDormTypeId('all');
+        if (resolvedRegionId) await loadBuildings(resolvedRegionId);
       } catch (err) {
         console.error('ERROR LOADING BUILDINGS PAGE:', err);
-        setError(err?.response?.data?.detail || err?.response?.data?.error || t.error);
+        setPageError(err?.message || t.loadError);
       } finally {
         setLoading(false);
       }
     };
-
-    fetchInitialData();
+    init();
+    // eslint-disable-next-line
   }, [language]);
 
   useEffect(() => {
-    if (!selectedRegionId) return;
-
-    const hasSelectedDormInRegion =
-      selectedDormTypeId === 'all' ||
-      dormTypesInRegion.some((dormType) => idOf(dormType.id) === idOf(selectedDormTypeId));
-
-    if (!hasSelectedDormInRegion) {
-      setSelectedDormTypeId('all');
-    }
+    if (!selectedRegionId || selectedDormTypeId === 'all') return;
+    const stillValid = dormTypesInRegion.some((dt) => idOf(dt.id) === idOf(selectedDormTypeId));
+    if (!stillValid) setSelectedDormTypeId('all');
   }, [selectedRegionId, selectedDormTypeId, dormTypesInRegion]);
 
-  useEffect(() => {
-    resetBuildingSelection();
-  }, [selectedRegionId, selectedDormTypeId, resetBuildingSelection]);
-
-
-  const handleRegionChange = (nextRegionId) => {
-    setSelectedRegionId(nextRegionId);
-    setSelectedDormTypeId('all');
-    setSearchQuery('');
+  const handleRefresh = async () => {
+    setLoading(true);
+    setPageError('');
+    try {
+      await refreshCurrentScope();
+    } catch (err) {
+      setPageError(err?.message || t.loadError);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const toggleBuilding = async (buildingId) => {
-    if (idOf(expandedBuildingId) === idOf(buildingId)) {
-      resetBuildingSelection();
+  // -------------------------------------------------------------------
+  // Editor (create/edit drawer)
+  // -------------------------------------------------------------------
+  const openCreateBuilding = () =>
+    setEditor({
+      type: 'building',
+      mode: 'create',
+      id: null,
+      parentId: null,
+      data: { number: '', dorm_type: selectedDormTypeId !== 'all' ? selectedDormTypeId : '', gender_restriction: '' },
+      saving: false,
+      error: '',
+    });
+
+  const openEditBuilding = (building) =>
+    setEditor({
+      type: 'building',
+      mode: 'edit',
+      id: building.id,
+      parentId: null,
+      data: { number: building.number ?? '', dorm_type: building.dorm_type ?? '', gender_restriction: building.gender_restriction ?? '' },
+      saving: false,
+      error: '',
+    });
+
+  const openCreateApartment = (buildingId) =>
+    setEditor({
+      type: 'apartment',
+      mode: 'create',
+      id: null,
+      parentId: buildingId,
+      data: { number: '', category: 'mixed', apartment_type: 'single', room_count: 1, apartment_capacity: '', inactive_reason: '' },
+      saving: false,
+      error: '',
+    });
+
+  const openEditApartment = (apartment) =>
+    setEditor({
+      type: 'apartment',
+      mode: 'edit',
+      id: apartment.id,
+      parentId: apartment.building,
+      data: {
+        number: apartment.number ?? '',
+        category: apartment.category ?? 'mixed',
+        apartment_type: apartment.apartment_type ?? 'single',
+        room_count: apartment.room_count ?? 1,
+        apartment_capacity: apartment.apartment_capacity ?? '',
+        inactive_reason: apartment.inactive_reason ?? '',
+      },
+      saving: false,
+      error: '',
+    });
+
+  const openCreateRoom = (apartmentId) =>
+    setEditor({ type: 'room', mode: 'create', id: null, parentId: apartmentId, data: { name: '', capacity: 1 }, saving: false, error: '' });
+
+  const openEditRoom = (room) =>
+    setEditor({
+      type: 'room',
+      mode: 'edit',
+      id: room.id,
+      parentId: room.apartment,
+      data: { name: room.name ?? '', capacity: room.capacity ?? 1 },
+      saving: false,
+      error: '',
+    });
+
+  const openEditBed = (bed) =>
+    setEditor({ type: 'bed', mode: 'edit', id: bed.id, parentId: bed.room, data: { label: bed.label ?? '' }, saving: false, error: '' });
+
+  const closeEditor = () => setEditor(null);
+
+  const validateEditor = () => {
+    if (!editor) return '';
+    if (editor.type === 'building') {
+      if (editor.data.number === '' || editor.data.number === null || Number.isNaN(Number(editor.data.number))) {
+        return t.validationBuildingNumberRequired;
+      }
+      if (!editor.data.dorm_type) return t.validationDormTypeRequired;
+    } else if (editor.type === 'apartment') {
+      if (!String(editor.data.number ?? '').trim()) return t.validationApartmentNumberRequired;
+      if (editor.data.room_count === '' || Number.isNaN(Number(editor.data.room_count)) || Number(editor.data.room_count) < 0) {
+        return t.validationRoomCountInvalid;
+      }
+      if (editor.data.apartment_capacity !== '' && editor.data.apartment_capacity !== null) {
+        if (Number.isNaN(Number(editor.data.apartment_capacity)) || Number(editor.data.apartment_capacity) < 0) {
+          return t.validationCapacityInvalid;
+        }
+      }
+    } else if (editor.type === 'room') {
+      if (!String(editor.data.name ?? '').trim()) return t.validationRoomNameRequired;
+      if (editor.data.capacity === '' || Number.isNaN(Number(editor.data.capacity)) || Number(editor.data.capacity) <= 0) {
+        return t.validationRoomCapacityInvalid;
+      }
+    } else if (editor.type === 'bed') {
+      if (!String(editor.data.label ?? '').trim()) return t.validationBedLabelRequired;
+    }
+    return '';
+  };
+
+  const saveEditor = async () => {
+    if (!editor) return;
+    const validationError = validateEditor();
+    if (validationError) {
+      setEditor((prev) => (prev ? { ...prev, error: validationError } : prev));
+      return;
+    }
+    setEditor((prev) => ({ ...prev, saving: true, error: '' }));
+    try {
+      if (editor.type === 'building') {
+        const payload = {
+          number: Number(editor.data.number),
+          dorm_type: editor.data.dorm_type || null,
+          gender_restriction: editor.data.gender_restriction || '',
+        };
+        if (editor.mode === 'create') await dormInventoryAPI.createBuilding(payload);
+        else await dormInventoryAPI.updateBuilding(editor.id, payload);
+        closeEditor();
+        await refreshCurrentScope();
+      } else if (editor.type === 'apartment') {
+        const payload = {
+          number: editor.data.number,
+          category: editor.data.category,
+          apartment_type: editor.data.apartment_type,
+          room_count: Number(editor.data.room_count) || 0,
+          apartment_capacity: editor.data.apartment_capacity === '' ? null : Number(editor.data.apartment_capacity),
+          inactive_reason: editor.data.inactive_reason || '',
+        };
+        if (editor.mode === 'create') {
+          payload.building = editor.parentId;
+          await dormInventoryAPI.createApartment(payload);
+        } else {
+          await dormInventoryAPI.updateApartment(editor.id, payload);
+        }
+        closeEditor();
+        await selectBuilding(selectedBuildingId || editor.parentId);
+        await refreshCurrentScope();
+      } else if (editor.type === 'room') {
+        const payload = { name: editor.data.name, capacity: Number(editor.data.capacity) || 0 };
+        if (editor.mode === 'create') {
+          payload.apartment = editor.parentId;
+          await dormInventoryAPI.createRoom(payload);
+        } else {
+          await dormInventoryAPI.updateRoom(editor.id, payload);
+        }
+        closeEditor();
+        await refreshCurrentScope();
+      } else if (editor.type === 'bed') {
+        await dormInventoryAPI.updateBed(editor.id, { label: editor.data.label });
+        closeEditor();
+        await refreshCurrentScope();
+      }
+    } catch (err) {
+      setEditor((prev) => (prev ? { ...prev, saving: false, error: err?.fieldErrors?.message || err?.message || t.actionError } : prev));
+    }
+  };
+
+  // -------------------------------------------------------------------
+  // Availability workflow (activate/deactivate) — reuses whatIfAPI, never
+  // patches is_active directly.
+  // -------------------------------------------------------------------
+  const entityLabel = (targetType, target) => {
+    if (targetType === 'building') return `${t.buildingNumberLabel} ${target.number}`;
+    if (targetType === 'apartment') return `${t.apartmentNumberLabel} ${target.number}`;
+    return `${t.roomNameLabel} ${target.name}`;
+  };
+
+  const openAvailabilityDialog = async (targetType, target, action) => {
+    setAvailabilityDialog({
+      targetType,
+      targetId: target.id,
+      label: entityLabel(targetType, target),
+      action,
+      impact: null,
+      loadingImpact: action === 'inactivate',
+      reason: '',
+      note: '',
+      saving: false,
+      error: '',
+    });
+
+    if (action !== 'inactivate') return;
+
+    try {
+      const data = await whatIfAPI.simulateAvailabilityChange({ targetType, targetIds: [target.id], action });
+      setAvailabilityDialog((prev) => (prev ? { ...prev, impact: data.summary, loadingImpact: false } : prev));
+    } catch (err) {
+      setAvailabilityDialog((prev) => (prev ? { ...prev, loadingImpact: false, error: err?.message || t.actionError } : prev));
+    }
+  };
+
+  const confirmAvailabilityChange = async () => {
+    if (!availabilityDialog) return;
+
+    if (availabilityDialog.action === 'inactivate' && !availabilityDialog.reason) {
+      setAvailabilityDialog((prev) => ({ ...prev, error: t.reasonRequired }));
       return;
     }
 
-    setExpandedBuildingId(buildingId);
-    await fetchBuildingData(buildingId);
-  };
-
-  const filteredUnassignedStudents = useMemo(() => {
-    const q = normalizeText(addModal.query);
-    if (!q) return unassignedStudents;
-
-    return unassignedStudents.filter((student) => {
-      const haystack = [
-        getStudentLabel(student),
-        student.student_id,
-        student.business_partner_id,
-        student.email,
-      ]
-        .join(' ')
-        .toLowerCase();
-
-      return haystack.includes(q);
-    });
-  }, [addModal.query, unassignedStudents]);
-const filteredMoveRooms = useMemo(() => {
-  const q = normalizeText(moveModal.query);
-  const rooms = buildingRooms;
-
-  if (!q) return rooms;
-
-  return rooms.filter((room) => {
-    const building = buildings.find((b) => idOf(b.id) === getBuildingIdFromRoom(room));
-    const aptNumber = room.apartment_number || room.apartmentNumber || '';
-    const haystack = [
-      room.id,
-      room.name,
-      room.number,
-      aptNumber,
-      building?.number,
-      building?.name,
-    ]
-      .join(' ')
-      .toLowerCase();
-
-    return haystack.includes(q);
-  });
-}, [moveModal.query, buildingRooms, buildings]);
-
-
-  const callAction = async (callback) => {
-    if (viewOnly) return;
-
-    setActionError('');
-
+    setAvailabilityDialog((prev) => ({ ...prev, saving: true, error: '' }));
     try {
-      await callback();
-      await refreshOpenBuilding();
-      setAddModal({ open: false, roomId: null, query: '' });
-      setMoveModal({ open: false, studentId: null, query: '', toRoomId: '' });
-      setSwapMode({ active: false, studentId: null });
-      setDraggingStudentId(null);
+      const reasonText =
+        availabilityDialog.action === 'inactivate'
+          ? composeReason(reasonOptions.find((r) => r.value === availabilityDialog.reason)?.label || availabilityDialog.reason, availabilityDialog.note)
+          : isHe
+          ? 'הפעלה מחדש דרך ניהול מבנים'
+          : 'Reactivated via inventory management';
+
+      await whatIfAPI.confirmAvailabilityChange({
+        targetType: availabilityDialog.targetType,
+        targetIds: [availabilityDialog.targetId],
+        action: availabilityDialog.action,
+        reason: reasonText,
+      });
+      setAvailabilityDialog(null);
+      await refreshCurrentScope();
     } catch (err) {
-      console.error('BUILDINGS PAGE ACTION ERROR:', err);
-      setActionError(err?.response?.data?.error || err?.response?.data?.detail || t.actionError);
+      setAvailabilityDialog((prev) => ({ ...prev, saving: false, error: err?.message || t.actionError }));
     }
   };
 
-  const assignStudentToRoom = (studentId, roomId) =>
-    callAction(async () => {
-      await api.post(ENDPOINTS.assign, {
-        student_id: studentId,
-        room_id: roomId,
-      });
-    });
+  // -------------------------------------------------------------------
+  // Bed deletion (only wired if the backend capability truly exists)
+  // -------------------------------------------------------------------
+  const openDeleteBedDialog = (bed) => setDeleteDialog({ id: bed.id, label: bed.label, occupied: bed.is_occupied, saving: false, error: '' });
 
-  const moveStudentToRoom = (studentId, roomId) =>
-    callAction(async () => {
-      await api.post(ENDPOINTS.move, {
-        student_id: studentId,
-        room_id: roomId,
-      });
-    });
+  const confirmDeleteBed = async () => {
+    if (!deleteDialog || deleteDialog.occupied || !canDeleteBed) return;
+    setDeleteDialog((prev) => ({ ...prev, saving: true, error: '' }));
+    try {
+      await dormInventoryAPI.deleteBed(deleteDialog.id);
+      setDeleteDialog(null);
+      if (selectedRoomId) {
+        const data = await dormInventoryAPI.getBeds({ room: selectedRoomId });
+        setRoomBeds(asArray(data));
+      }
+    } catch (err) {
+      setDeleteDialog((prev) => ({ ...prev, saving: false, error: err?.message || t.actionError }));
+    }
+  };
 
-  const unassignStudent = (studentId) =>
-    callAction(async () => {
-      await api.post(ENDPOINTS.unassign, {
-        student_id: studentId,
-      });
-    });
-
-  const swapStudents = (studentAId, studentBId) =>
-    callAction(async () => {
-      await api.post(ENDPOINTS.swap, {
-        student_a_id: studentAId,
-        student_b_id: studentBId,
-      });
-    });
-
-  const StatCard = ({ icon: Icon, label, value }) => (
-    <div className="bp-stat">
-      <div className="bp-statIcon">
-        <Icon size={20} />
-      </div>
-      <div>
-        <div className="bp-statValue">{value}</div>
-        <div className="bp-statLabel">{label}</div>
-      </div>
-    </div>
-  );
-
+  // -------------------------------------------------------------------
+  // Render
+  // -------------------------------------------------------------------
   if (loading) {
     return (
-      <div className="bp-page bp-center" dir={isHe ? 'rtl' : 'ltr'}>
-        <Loader2 className="bp-spin" size={28} />
-        <span>{t.loading}</span>
+      <div className="inv-page inv-centerFull" dir={isHe ? 'rtl' : 'ltr'}>
+        <Spinner size={26} />
       </div>
     );
   }
 
-  if (error) {
-    return (
-      <div className="bp-page bp-center" dir={isHe ? 'rtl' : 'ltr'}>
-        <div className="bp-errorBox">{error}</div>
-      </div>
-    );
+  const dormTypeLabelText = (dt) => (dt ? `${dt.name}${dt.code ? ` (${dt.code})` : ''}` : '');
+
+  // -------------------------------------------------------------------
+  // Editor modal context — resolves the full hierarchy (building/apartment/
+  // room) around whatever the editor currently targets, so the modal header
+  // and read-only fields work whether it was opened from the inspector or
+  // from a nested table row rather than only from the current selection.
+  // -------------------------------------------------------------------
+  const editorBuildingCtx =
+    editor?.type === 'building' ? buildings.find((b) => idOf(b.id) === idOf(editor.id)) || selectedBuilding : null;
+
+  const editorApartmentBuildingCtx =
+    editor?.type === 'apartment' ? buildings.find((b) => idOf(b.id) === idOf(editor.parentId)) || selectedBuilding : null;
+  const editorApartmentRecord =
+    editor?.type === 'apartment' && editor.mode === 'edit'
+      ? buildingApartments.find((a) => idOf(a.id) === idOf(editor.id)) || selectedApartment
+      : null;
+
+  const editorRoomApartmentCtx =
+    editor?.type === 'room' ? buildingApartments.find((a) => idOf(a.id) === idOf(editor.parentId)) || selectedApartment : null;
+  const editorRoomBuildingCtx = editorRoomApartmentCtx
+    ? buildings.find((b) => idOf(b.id) === idOf(editorRoomApartmentCtx.building)) || selectedBuilding
+    : null;
+  const editorRoomRecord =
+    editor?.type === 'room' && editor.mode === 'edit' ? buildingRooms.find((r) => idOf(r.id) === idOf(editor.id)) || selectedRoom : null;
+
+  const editorBedRoomCtx = editor?.type === 'bed' ? buildingRooms.find((r) => idOf(r.id) === idOf(editor.parentId)) || selectedRoom : null;
+  const editorBedApartmentCtx = editorBedRoomCtx
+    ? buildingApartments.find((a) => idOf(a.id) === idOf(editorBedRoomCtx.apartment)) || selectedApartment
+    : null;
+  const editorBedBuildingCtx = editorBedApartmentCtx
+    ? buildings.find((b) => idOf(b.id) === idOf(editorBedApartmentCtx.building)) || selectedBuilding
+    : null;
+  const editorBedRecord = editor?.type === 'bed' ? roomBeds.find((bd) => idOf(bd.id) === idOf(editor.id)) || selectedBed : null;
+
+  const EditorIcon =
+    editor?.type === 'building' ? Building2 : editor?.type === 'apartment' ? Home : editor?.type === 'room' ? DoorOpen : Bed;
+
+  const editorTitle = editor
+    ? editor.type === 'building'
+      ? editor.mode === 'create'
+        ? t.drawerCreateBuilding
+        : t.drawerEditBuilding
+      : editor.type === 'apartment'
+      ? editor.mode === 'create'
+        ? t.drawerCreateApartment
+        : t.drawerEditApartment
+      : editor.type === 'room'
+      ? editor.mode === 'create'
+        ? t.drawerCreateRoom
+        : t.drawerEditRoom
+      : t.drawerEditBed
+    : '';
+
+  let editorContextLine = '';
+  if (editor?.type === 'building') {
+    if (editor.mode === 'edit' && editorBuildingCtx) {
+      editorContextLine = [editorBuildingCtx.dorm_type_name, editorBuildingCtx.region_name].filter(Boolean).join(' • ');
+    } else if (editor.mode === 'create') {
+      editorContextLine = [selectedDormType?.name, selectedRegion?.name].filter(Boolean).join(' • ');
+    }
+  } else if (editor?.type === 'apartment') {
+    const buildingLabel = editorApartmentBuildingCtx ? `${t.buildingNumberLabel} ${editorApartmentBuildingCtx.number}` : '';
+    editorContextLine =
+      editor.mode === 'edit' ? [`${t.apartmentNumberLabel} ${editor.data.number}`, buildingLabel].filter(Boolean).join(' • ') : buildingLabel;
+  } else if (editor?.type === 'room') {
+    const apartmentLabel = editorRoomApartmentCtx ? `${t.apartmentNumberLabel} ${editorRoomApartmentCtx.number}` : '';
+    const buildingLabel = editorRoomBuildingCtx ? `${t.buildingNumberLabel} ${editorRoomBuildingCtx.number}` : '';
+    editorContextLine = [apartmentLabel, buildingLabel].filter(Boolean).join(' • ');
+  } else if (editor?.type === 'bed') {
+    const roomLabel = editorBedRoomCtx ? `${t.parentRoomLabel} ${editorBedRoomCtx.name}` : '';
+    const apartmentLabel = editorBedApartmentCtx ? `${t.apartmentNumberLabel} ${editorBedApartmentCtx.number}` : '';
+    const buildingLabel = editorBedBuildingCtx ? `${t.buildingNumberLabel} ${editorBedBuildingCtx.number}` : '';
+    editorContextLine = [roomLabel, apartmentLabel, buildingLabel].filter(Boolean).join(' • ');
   }
 
   return (
-    <div className="bp-page" dir={isHe ? 'rtl' : 'ltr'}>
-      <div className="bp-header">
-        <div>
-          <h1>{t.title}</h1>
-          <p>
-            {t.subtitle}
-            {' · '}
-            {canViewAllRegions ? t.centralOrBoss : t.employeeScope}
-          </p>
+    <div className="inv-page" dir={isHe ? 'rtl' : 'ltr'}>
+      {/* Header */}
+      <div className="inv-pageHeader">
+        <div className="inv-pageHeaderLeft">
+          <div className="inv-pageHeaderIcon">
+            <Building2 size={22} />
+          </div>
+          <div>
+            <h1>{t.title}</h1>
+            <p>{t.subtitle}</p>
+          </div>
         </div>
-
-        <div className={`bp-permission ${viewOnly ? 'readonly' : ''}`}>
-          <Shield size={16} />
-          {viewOnly ? t.viewOnly : canViewAllRegions ? t.centralOrBoss : t.employeeScope}
+        <div className="inv-pageHeaderRight">
+          {viewOnly && (
+            <span className="inv-viewOnlyIndicator">
+              <Shield size={13} /> {t.viewOnlyIndicator}
+            </span>
+          )}
+          <IconButton icon={RefreshCw} onClick={handleRefresh} title={t.refresh} />
+          {canManageInventory && (
+            <button type="button" className="inv-primaryBtn" onClick={openCreateBuilding} disabled={!selectedRegionId}>
+              <Plus size={15} /> {t.addBuilding}
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="bp-toolbar">
-        <div className="bp-field">
+      {/* Breadcrumb */}
+      <div className="inv-breadcrumb">
+        <span>{t.breadcrumbRoot}</span>
+        {selectedRegion && (
+          <>
+            <BreadcrumbChevron size={13} />
+            <span>{selectedRegion.name}</span>
+          </>
+        )}
+        {(selectedDormType || selectedBuilding) && (
+          <>
+            <BreadcrumbChevron size={13} />
+            <span>{selectedBuilding ? selectedBuilding.dorm_type_name : selectedDormType?.name}</span>
+          </>
+        )}
+        {selectedBuilding && (
+          <>
+            <BreadcrumbChevron size={13} />
+            <span className="inv-breadcrumbActive">
+              {t.buildingNumberLabel} {selectedBuilding.number}
+            </span>
+          </>
+        )}
+        {selectedApartment && (
+          <>
+            <BreadcrumbChevron size={13} />
+            <span className="inv-breadcrumbActive">
+              {t.apartmentNumberLabel} {selectedApartment.number}
+            </span>
+          </>
+        )}
+        {selectedRoom && (
+          <>
+            <BreadcrumbChevron size={13} />
+            <span className="inv-breadcrumbActive">
+              {t.colRoom} {selectedRoom.name}
+            </span>
+          </>
+        )}
+        {selectedBed && (
+          <>
+            <BreadcrumbChevron size={13} />
+            <span className="inv-breadcrumbActive">
+              {t.colBed} {selectedBed.label}
+            </span>
+          </>
+        )}
+      </div>
+
+      {pageError && <PageAlert onClose={() => setPageError('')}>{pageError}</PageAlert>}
+      {actionError && <PageAlert onClose={() => setActionError('')}>{actionError}</PageAlert>}
+
+      {/* Filter toolbar */}
+      <div className="inv-filterBar">
+        <div className="inv-filterField">
           <label>{t.chooseRegion}</label>
-          <select
-            value={selectedRegionId}
-            disabled={!canViewAllRegions}
-            onChange={(e) => handleRegionChange(e.target.value)}
-          >
+          <select value={selectedRegionId} disabled={!(isCentralAdmin() || isRegionBoss())} onChange={(e) => selectRegion(e.target.value)}>
             {regions.map((region) => (
               <option key={region.id} value={region.id}>
                 {region.name}
@@ -664,481 +1245,849 @@ const filteredMoveRooms = useMemo(() => {
             ))}
           </select>
         </div>
-
-        <div className="bp-field">
+        <div className="inv-filterField">
           <label>{t.chooseDormType}</label>
-          <select
-            value={selectedDormTypeId}
-            disabled={!canViewAllRegions && isEmployee()}
-            onChange={(e) => setSelectedDormTypeId(e.target.value)}
-          >
+          <select value={selectedDormTypeId} onChange={(e) => setSelectedDormTypeId(e.target.value)}>
             <option value="all">{t.allDormTypes}</option>
-            {dormTypesInRegion.map((dormType) => (
-              <option key={dormType.id} value={dormType.id}>
-                {dormType.name}
-                {dormType.code ? ` (${dormType.code})` : ''}
+            {dormTypesInRegion.map((dt) => (
+              <option key={dt.id} value={dt.id}>
+                {dormTypeLabelText(dt)}
               </option>
             ))}
           </select>
         </div>
-
-        <div className="bp-search">
-          <Search size={18} />
-          <input
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder={t.search}
-          />
+        <div className="inv-filterField">
+          <label>{t.status}</label>
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+            <option value="active">{t.statusActive}</option>
+            <option value="inactive">{t.statusInactive}</option>
+            <option value="all">{t.statusAll}</option>
+          </select>
+        </div>
+        <div className="inv-filterSearch">
+          <Search size={15} />
+          <input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder={t.search} />
           {searchQuery && (
-            <button type="button" onClick={() => setSearchQuery('')} title={t.clear}>
-              <X size={16} />
+            <button type="button" onClick={() => setSearchQuery('')} aria-label="clear">
+              <X size={14} />
             </button>
           )}
         </div>
       </div>
 
-      {actionError && (
-        <div className="bp-errorBox small">
-          {actionError}
-          <button type="button" onClick={() => setActionError('')}>
-            <X size={14} />
-          </button>
-        </div>
-      )}
-
-      <div className="bp-statsGrid">
-        <StatCard icon={Building2} label={t.buildings} value={filteredBuildings.length} />
-        <StatCard icon={Home} label={t.apartments} value={apartments.length || '—'} />
-        <StatCard icon={Bed} label={t.rooms} value={buildingRooms.length || '—'} />
-        <StatCard icon={Users} label={t.assigned} value={assignedCount} />
-        <StatCard icon={Users} label={t.unassigned} value={unassignedStudents.length} />
+      {/* Summary strip */}
+      <div className="inv-summaryStrip">
+        <MiniMetric icon={Building2} value={summaryMetrics.buildings} label={t.metricBuildings} />
+        <MiniMetric icon={Home} value={summaryMetrics.apartments} label={t.metricApartments} />
+        <MiniMetric icon={DoorOpen} value={summaryMetrics.rooms} label={t.metricRooms} />
+        <MiniMetric icon={Bed} value={summaryMetrics.beds} label={t.metricBeds} />
+        <MiniMetric icon={Bed} value={summaryMetrics.occupied} label={t.metricOccupied} />
+        <MiniMetric icon={Bed} value={summaryMetrics.free} label={t.metricFree} />
       </div>
 
-      <div className="bp-layout">
-        <section className="bp-panel bp-listPanel">
-          <div className="bp-panelHead">
-            <div>
-              <Building2 size={18} />
-              <strong>{t.buildings}</strong>
-            </div>
-            <span>{filteredBuildings.length}</span>
-          </div>
-
-          <div className="bp-list">
+      {/* Three-column workspace */}
+      <div className="inv-workspace">
+        {/* Navigator */}
+        <div className="inv-panel inv-navigatorPanel">
+          <SectionHeader
+            title={t.navigatorTitle}
+            count={filteredBuildings.length}
+            action={
+              canManageInventory && (
+                <IconButton icon={Plus} onClick={openCreateBuilding} title={t.addBuilding} disabled={!selectedRegionId} />
+              )
+            }
+          />
+          <div className="inv-buildingList">
             {filteredBuildings.length === 0 ? (
-              <div className="bp-emptyMini">{t.noData}</div>
+              <EmptyPanel icon={Building2} title={t.noBuildings} />
             ) : (
-              filteredBuildings.map((building) => {
-                const expanded = idOf(expandedBuildingId) === idOf(building.id);
-                const buildingApartments = expanded ? apartments : [];
-
-                return (
-                  <div className="bp-buildingCard" key={building.id}>
-                    <button
-                      type="button"
-                      className={`bp-buildingButton ${expanded ? 'selected' : ''}`}
-                      onClick={() => toggleBuilding(building.id)}
-                      style={{
-                        width: '100%',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '12px',
-                        padding: '12px',
-                        border: '1px solid',
-                        borderColor: expanded ? '#93c5fd' : '#e2e8f0',
-                        borderRadius: '12px',
-                        background: expanded ? '#eff6ff' : 'white',
-                        cursor: 'pointer',
-                        textAlign: isHe ? 'right' : 'left',
-                      }}
-                    >
-                      <div className="bp-iconBubble">
-                        <Building2 size={18} />
-                      </div>
-
-                      <div className="bp-buildingInfo">
-                        <strong>{getBuildingLabel(building, t)}</strong>
-                        <span>
-                          {building.dorm_type_name || '—'}
-                          {' · '}
-                          {building.region_name || selectedRegion?.name || '—'}
-                        </span>
-                      </div>
-
-                      <span className={`bp-status ${building.is_active ? 'ok' : 'bad'}`}>
-                        {building.is_active ? t.active : t.inactive}
-                      </span>
-
-                      {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                    </button>
-
-                    {expanded && (
-                      <div className="bp-apartmentList">
-                        {loadingBuilding ? (
-                          <div className="bp-loadingLine">
-                            <Loader2 className="bp-spin" size={15} />
-                            {t.loading}
-                          </div>
-                        ) : buildingApartments.length === 0 ? (
-                          <div className="bp-emptyMini">{t.noData}</div>
-                        ) : (
-                          buildingApartments.map((apt) => {
-                            const selected = idOf(selectedApartmentId) === idOf(apt.id);
-                            const aptRoomsCount = buildingRooms.filter((room) => getApartmentIdFromRoom(room) === idOf(apt.id)).length;
-
-                            return (
-                              <button
-                                key={apt.id}
-                                type="button"
-                                className={`bp-apartmentButton ${selected ? 'selected' : ''}`}
-                                onClick={() => setSelectedApartmentId(selected ? null : apt.id)}
-                              >
-                                <Home size={15} />
-                                <div>
-                                  <strong>
-                                    {t.apartment} {apt.number}
-                                  </strong>
-                                  <span>
-                                    {apt.category_display || apt.category || '—'} ·{' '}
-                                    {apt.apartment_type_display || apt.apartment_type || '—'} ·{' '}
-                                    {apt.apartment_capacity ?? apt.capacity ?? '—'} {t.capacity} ·{' '}
-                                    {aptRoomsCount || apt.room_count || 0} {t.rooms}
-                                  </span>
-                                </div>
-                              </button>
-                            );
-                          })
-                        )}
-                      </div>
+              filteredBuildings.map((building) => (
+                <button
+                  key={building.id}
+                  type="button"
+                  className={`inv-buildingItem ${idOf(selectedBuildingId) === idOf(building.id) ? 'is-selected' : ''} ${
+                    !building.is_active ? 'is-inactive' : ''
+                  }`}
+                  onClick={() => selectBuilding(building.id)}
+                >
+                  <div className="inv-buildingItemTop">
+                    <span className="inv-buildingItemNumber">
+                      {t.buildingNumberLabel} {building.number}
+                    </span>
+                    <StatusBadge active={building.is_active} activeText={t.statusActive} inactiveText={t.statusInactive} />
+                  </div>
+                  <div className="inv-buildingItemMeta">{building.dorm_type_name}</div>
+                  <div className="inv-buildingItemCounts">
+                    {building.apartment_count} {t.apartmentsCount} · {building.room_count} {t.roomsCount} · {building.bed_count} {t.bedsCount}
+                  </div>
+                  <div className="inv-buildingItemBottom">
+                    <OccupancyBadge occupied={building.occupied_beds} total={building.bed_count} label={t.occupiedShort} />
+                    {building.gender_restriction && (
+                      <span className="inv-genderTag">{genderRestrictionLabels[building.gender_restriction]}</span>
                     )}
                   </div>
-                );
-              })
+                </button>
+              ))
             )}
           </div>
-        </section>
+        </div>
 
-        <section className="bp-panel bp-workPanel">
-          {!selectedApartmentId ? (
-            <div className="bp-emptyState">
-              <div className="bp-bigIcon">
-                <Home size={38} />
-              </div>
-              <strong>{t.selectApartment}</strong>
-              <span>{t.selectApartmentHelp}</span>
+        {/* Structure workspace */}
+        <div className="inv-panel inv-structurePanel">
+          {!selectedBuilding ? (
+            <EmptyPanel icon={Building2} title={t.selectBuildingTitle} hint={t.selectBuildingHint} />
+          ) : loadingStructure ? (
+            <div className="inv-centerInline">
+              <Spinner size={20} />
             </div>
           ) : (
             <>
-              <div className="bp-workHead">
-                <div>
-                  <span className="bp-breadcrumb">
-                    {selectedBuilding ? getBuildingLabel(selectedBuilding, t) : t.building}
-                    {' / '}
-                    {t.apartment} {selectedApartment?.number ?? selectedApartmentId}
-                  </span>
-                  <h2>
-                    {t.apartment} {selectedApartment?.number ?? selectedApartmentId}
-                  </h2>
+              <SectionHeader
+                title={t.apartmentsTable}
+                count={apartmentsForSelectedBuilding.length}
+                action={
+                  canManageInventory && (
+                    <button type="button" className="inv-secondaryBtn" onClick={() => openCreateApartment(selectedBuildingId)}>
+                      <Plus size={13} /> {t.addApartment}
+                    </button>
+                  )
+                }
+              />
+              <div className="inv-tableWrap">
+                {apartmentsForSelectedBuilding.length === 0 ? (
+                  <EmptyPanel title={t.noApartments} />
+                ) : (
+                  <table className="inv-table">
+                    <thead>
+                      <tr>
+                        <th>{t.colApartment}</th>
+                        <th>{t.colCategory}</th>
+                        <th>{t.colHousingType}</th>
+                        <th>{t.colRooms}</th>
+                        <th>{t.colOccupancy}</th>
+                        <th>{t.colStatus}</th>
+                        <th>{t.colActions}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {apartmentsForSelectedBuilding.map((apt) => (
+                        <tr
+                          key={apt.id}
+                          className={`${idOf(selectedApartmentId) === idOf(apt.id) ? 'is-selected' : ''} ${!apt.is_active ? 'is-inactive' : ''}`}
+                          onClick={() => selectApartment(apt.id)}
+                        >
+                          <td>{apt.number}</td>
+                          <td>{categoryLabels[apt.category] || apt.category}</td>
+                          <td>{apartmentTypeLabels[apt.apartment_type] || apt.apartment_type}</td>
+                          <td>{apt.actual_room_count}</td>
+                          <td>
+                            <OccupancyBadge occupied={apt.occupied_beds} total={apt.bed_count} />
+                          </td>
+                          <td>
+                            <StatusBadge active={apt.is_active} activeText={t.statusActive} inactiveText={t.statusInactive} />
+                          </td>
+                          <td onClick={(e) => e.stopPropagation()}>
+                            {canManageInventory && <IconButton icon={Pencil} onClick={() => openEditApartment(apt)} title={t.edit} />}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              {selectedApartment && (
+                <>
+                  <SectionHeader
+                    title={t.roomsTable}
+                    count={roomsForSelectedApartment.length}
+                    action={
+                      canManageInventory && (
+                        <button type="button" className="inv-secondaryBtn" onClick={() => openCreateRoom(selectedApartmentId)}>
+                          <Plus size={13} /> {t.addRoom}
+                        </button>
+                      )
+                    }
+                  />
+                  <div className="inv-tableWrap">
+                    {roomsForSelectedApartment.length === 0 ? (
+                      <EmptyPanel title={t.noRooms} />
+                    ) : (
+                      <table className="inv-table">
+                        <thead>
+                          <tr>
+                            <th>{t.colRoom}</th>
+                            <th>{t.colCapacity}</th>
+                            <th>{t.colOccupancy}</th>
+                            <th>{t.colBeds}</th>
+                            <th>{t.colStatus}</th>
+                            <th>{t.colActions}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {roomsForSelectedApartment.map((room) => (
+                            <tr
+                              key={room.id}
+                              className={`${idOf(selectedRoomId) === idOf(room.id) ? 'is-selected' : ''} ${!room.is_active ? 'is-inactive' : ''}`}
+                              onClick={() => selectRoom(room.id)}
+                            >
+                              <td>
+                                {room.name}
+                                {room.has_missing_bed_records && (
+                                  <span className="inv-warnIcon" title={t.bedRecordsMismatch}>
+                                    <AlertTriangle size={12} />
+                                  </span>
+                                )}
+                              </td>
+                              <td>{room.capacity}</td>
+                              <td>
+                                <OccupancyBadge occupied={room.current_occupancy} total={room.capacity} />
+                              </td>
+                              <td>{room.bed_count}</td>
+                              <td>
+                                <StatusBadge active={room.is_active} activeText={t.statusActive} inactiveText={t.statusInactive} />
+                              </td>
+                              <td onClick={(e) => e.stopPropagation()}>
+                                {canManageInventory && <IconButton icon={Pencil} onClick={() => openEditRoom(room)} title={t.edit} />}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+
+                  {selectedRoom && (
+                    <>
+                      <SectionHeader
+                        title={t.bedsTable}
+                        count={roomBeds.length}
+                        action={
+                          canCreateBed && (
+                            <button type="button" className="inv-secondaryBtn">
+                              <Plus size={13} /> {t.addBed}
+                            </button>
+                          )
+                        }
+                      />
+                      <div className="inv-tableWrap">
+                        {loadingBeds ? (
+                          <div className="inv-centerInline">
+                            <Spinner size={18} />
+                          </div>
+                        ) : roomBeds.length === 0 ? (
+                          <EmptyPanel title={t.noBeds} />
+                        ) : (
+                          <table className="inv-table">
+                            <thead>
+                              <tr>
+                                <th>{t.colBed}</th>
+                                <th>{t.colAvailability}</th>
+                                <th>{t.colActions}</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {roomBeds.map((bed) => (
+                                <tr
+                                  key={bed.id}
+                                  className={idOf(selectedBedId) === idOf(bed.id) ? 'is-selected' : ''}
+                                  onClick={() => selectBed(bed.id)}
+                                >
+                                  <td>{bed.label}</td>
+                                  <td>
+                                    <span className={`inv-availabilityTag ${bed.is_occupied ? 'is-occupied' : 'is-available'}`}>
+                                      {bed.is_occupied ? t.occupied : t.available}
+                                    </span>
+                                  </td>
+                                  <td onClick={(e) => e.stopPropagation()}>
+                                    {canManageInventory && <IconButton icon={Pencil} onClick={() => openEditBed(bed)} title={t.edit} />}
+                                    {canDeleteBed && (
+                                      <IconButton
+                                        icon={Trash2}
+                                        tone="danger"
+                                        onClick={() => openDeleteBedDialog(bed)}
+                                        title={t.deleteAction}
+                                        disabled={bed.is_occupied}
+                                      />
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                        <p className="inv-bedCapabilityNote">{t.bedNoActionsSupported}</p>
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Inspector */}
+        <div className="inv-panel inv-inspectorPanel">
+          <SectionHeader title={t.inspectorTitle} />
+          {!selectedEntity ? (
+            <EmptyPanel title={t.inspectorEmpty} />
+          ) : (
+            <div className="inv-inspectorBody">
+              <div className="inv-inspectorHeader">
+                {selectedEntityType === 'building' && <Building2 size={18} />}
+                {selectedEntityType === 'apartment' && <Home size={18} />}
+                {selectedEntityType === 'room' && <DoorOpen size={18} />}
+                {selectedEntityType === 'bed' && <Bed size={18} />}
+                <div className="inv-inspectorHeaderText">
+                  <div className="inv-inspectorType">
+                    {selectedEntityType === 'building' && t.buildingNumberLabel}
+                    {selectedEntityType === 'apartment' && t.apartmentNumberLabel}
+                    {selectedEntityType === 'room' && t.roomNameLabel}
+                    {selectedEntityType === 'bed' && t.bedLabelField}
+                  </div>
+                  <div className="inv-inspectorLabel">
+                    {selectedEntityType === 'building' && selectedBuilding.number}
+                    {selectedEntityType === 'apartment' && selectedApartment.number}
+                    {selectedEntityType === 'room' && selectedRoom.name}
+                    {selectedEntityType === 'bed' && selectedBed.label}
+                  </div>
                 </div>
               </div>
 
-              <div style={{ padding: '20px' }}>
-                <h3
-                  style={{
-                    fontSize: '14px',
-                    fontWeight: '700',
-                    color: '#1e293b',
-                    marginBottom: '14px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                  }}
-                >
-                  <Bed size={16} color="#3b82f6" /> {t.rooms}
-                </h3>
+              {canManageInventory && (
+                <div className="inv-inspectorActions">
+                  {selectedEntityType === 'building' && (
+                    <>
+                      <button type="button" className="inv-secondaryBtn" onClick={() => openEditBuilding(selectedBuilding)}>
+                        <Pencil size={13} /> {t.edit}
+                      </button>
+                      {selectedBuilding.is_active ? (
+                        <button type="button" className="inv-dangerBtn" onClick={() => openAvailabilityDialog('building', selectedBuilding, 'inactivate')}>
+                          <PowerOff size={13} /> {t.deactivate}
+                        </button>
+                      ) : (
+                        <button type="button" className="inv-successBtn" onClick={() => openAvailabilityDialog('building', selectedBuilding, 'reactivate')}>
+                          <Power size={13} /> {t.activate}
+                        </button>
+                      )}
+                    </>
+                  )}
+                  {selectedEntityType === 'apartment' && (
+                    <>
+                      <button type="button" className="inv-secondaryBtn" onClick={() => openEditApartment(selectedApartment)}>
+                        <Pencil size={13} /> {t.edit}
+                      </button>
+                      {selectedApartment.is_active ? (
+                        <button type="button" className="inv-dangerBtn" onClick={() => openAvailabilityDialog('apartment', selectedApartment, 'inactivate')}>
+                          <PowerOff size={13} /> {t.deactivate}
+                        </button>
+                      ) : (
+                        <button type="button" className="inv-successBtn" onClick={() => openAvailabilityDialog('apartment', selectedApartment, 'reactivate')}>
+                          <Power size={13} /> {t.activate}
+                        </button>
+                      )}
+                    </>
+                  )}
+                  {selectedEntityType === 'room' && (
+                    <>
+                      <button type="button" className="inv-secondaryBtn" onClick={() => openEditRoom(selectedRoom)}>
+                        <Pencil size={13} /> {t.edit}
+                      </button>
+                      {selectedRoom.is_active ? (
+                        <button type="button" className="inv-dangerBtn" onClick={() => openAvailabilityDialog('room', selectedRoom, 'inactivate')}>
+                          <PowerOff size={13} /> {t.deactivate}
+                        </button>
+                      ) : (
+                        <button type="button" className="inv-successBtn" onClick={() => openAvailabilityDialog('room', selectedRoom, 'reactivate')}>
+                          <Power size={13} /> {t.activate}
+                        </button>
+                      )}
+                    </>
+                  )}
+                  {selectedEntityType === 'bed' && (
+                    <>
+                      <button type="button" className="inv-secondaryBtn" onClick={() => openEditBed(selectedBed)}>
+                        <Pencil size={13} /> {t.edit}
+                      </button>
+                      {canDeleteBed && (
+                        <button
+                          type="button"
+                          className="inv-dangerBtn"
+                          onClick={() => openDeleteBedDialog(selectedBed)}
+                          disabled={selectedBed.is_occupied}
+                        >
+                          <Trash2 size={13} /> {t.deleteAction}
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
 
-                {swapMode.active && !viewOnly && (
-                  <div className="bp-swapBanner">
-                    <ArrowRightLeft size={16} />
-                    <span>{t.swapHint}</span>
-                    <button type="button" onClick={() => setSwapMode({ active: false, studentId: null })}>
-                      {t.cancel}
-                    </button>
+              {selectedEntityType === 'building' && (
+                <>
+                  <div className="inv-inspectorSection">
+                    <h4>{t.sectionDetails}</h4>
+                    <DetailRow label={t.dormTypeLabel} value={selectedBuilding.dorm_type_name} />
+                    <DetailRow label={t.regionLabel} value={selectedBuilding.region_name} />
+                    <DetailRow label={t.activeStatusLabel} value={selectedBuilding.is_active ? t.statusActive : t.statusInactive} />
                   </div>
-                )}
-              </div>
-
-              <div className="bp-roomGrid">
-                {loadingBuilding ? (
-                  <div className="bp-loadingBlock">
-                    <Loader2 className="bp-spin" size={24} />
-                    {t.loadingRooms}
+                  <div className="inv-inspectorSection">
+                    <h4>{t.sectionConfig}</h4>
+                    <DetailRow label={t.genderRestrictionLabel} value={genderRestrictionLabels[selectedBuilding.gender_restriction] || t.noRestriction} />
                   </div>
-                ) : selectedApartmentRooms.length === 0 ? (
-                  <div className="bp-emptyState small">{t.noRooms}</div>
-                ) : (
-                  selectedApartmentRooms.map((room) => {
-                    const roomStudents = getRoomStudents(room.id);
-                    const capacity = getRoomCapacity(room);
-                    const occupied = roomStudents.length || Number(room.current_occupancy ?? 0) || 0;
-                    const full = capacity > 0 && occupied >= capacity;
-                    const percent = capacity > 0 ? Math.min(100, Math.round((occupied / capacity) * 100)) : 0;
+                  <div className="inv-inspectorSection">
+                    <h4>{t.sectionCapacity}</h4>
+                    <DetailRow label={t.apartmentCountLabel} value={selectedBuilding.apartment_count} />
+                    <DetailRow label={t.roomCountLabel} value={selectedBuilding.room_count} />
+                    <DetailRow label={t.bedCountLabel} value={selectedBuilding.bed_count} />
+                    <DetailRow label={t.occupiedBedsLabel} value={selectedBuilding.occupied_beds} />
+                    <DetailRow label={t.freeBedsLabel} value={selectedBuilding.free_beds} />
+                  </div>
+                </>
+              )}
 
-                    return (
-                      <article
-                        key={room.id}
-                        className={`bp-roomCard ${full ? 'full' : ''} ${viewOnly ? 'readonly' : ''}`}
-                        onDragOver={(e) => {
-                          if (!viewOnly && !full) e.preventDefault();
-                        }}
-                        onDrop={() => {
-                          if (viewOnly || full || !draggingStudentId) return;
-                          assignStudentToRoom(draggingStudentId, room.id);
-                        }}
-                      >
-                        <div className="bp-roomTop">
-                          <div>
-                            <h3>
-                              {t.room} {room.name || room.number || room.id}
-                            </h3>
-                            <span>
-                              {t.capacity}: {occupied}/{capacity || '—'}
-                              {full ? ` · ${t.roomFull}` : ''}
-                            </span>
-                          </div>
+              {selectedEntityType === 'apartment' && (
+                <>
+                  <div className="inv-inspectorSection">
+                    <h4>{t.sectionDetails}</h4>
+                    <DetailRow label={t.parentBuildingLabel} value={selectedBuilding?.number} />
+                    <DetailRow label={t.activeStatusLabel} value={selectedApartment.is_active ? t.statusActive : t.statusInactive} />
+                    {!selectedApartment.is_active && (
+                      <DetailRow label={t.inactiveReasonLabel} value={selectedApartment.inactive_reason_display || t.none} />
+                    )}
+                  </div>
+                  <div className="inv-inspectorSection">
+                    <h4>{t.sectionConfig}</h4>
+                    <DetailRow label={t.genderCategoryLabel} value={categoryLabels[selectedApartment.category] || selectedApartment.category} />
+                    <DetailRow label={t.housingTypeLabel} value={apartmentTypeLabels[selectedApartment.apartment_type] || selectedApartment.apartment_type} />
+                  </div>
+                  <div className="inv-inspectorSection">
+                    <h4>{t.sectionCapacity}</h4>
+                    <DetailRow label={t.plannedRoomCountLabel} value={selectedApartment.room_count} />
+                    <DetailRow label={t.actualRoomCountLabel} value={selectedApartment.actual_room_count} />
+                    <DetailRow label={t.apartmentCapacityLabel} value={selectedApartment.apartment_capacity ?? '—'} />
+                    <DetailRow label={t.totalBedsLabel} value={selectedApartment.bed_count} />
+                    <DetailRow label={t.occupiedBedsLabel} value={selectedApartment.occupied_beds} />
+                    <DetailRow label={t.freeBedsLabel} value={selectedApartment.free_beds} />
+                  </div>
+                </>
+              )}
 
-                          <button
-                            type="button"
-                            className="bp-primarySmall"
-                            disabled={viewOnly || full}
-                            onClick={() => setAddModal({ open: true, roomId: room.id, query: '' })}
-                          >
-                            <Plus size={15} />
-                            {t.addStudent}
-                          </button>
-                        </div>
+              {selectedEntityType === 'room' && (
+                <>
+                  <div className="inv-inspectorSection">
+                    <h4>{t.sectionDetails}</h4>
+                    <DetailRow label={t.parentApartmentLabel} value={selectedApartment?.number} />
+                    <DetailRow label={t.activeStatusLabel} value={selectedRoom.is_active ? t.statusActive : t.statusInactive} />
+                  </div>
+                  <div className="inv-inspectorSection">
+                    <h4>{t.sectionCapacity}</h4>
+                    <DetailRow label={t.capacityLabel} value={selectedRoom.capacity} />
+                    <DetailRow label={t.occupancyLabel} value={selectedRoom.current_occupancy} />
+                    <DetailRow label={t.availableBedsLabel} value={selectedRoom.available_beds} />
+                    <DetailRow label={t.bedCountLabel} value={selectedRoom.bed_count} />
+                  </div>
+                  {selectedRoom.has_missing_bed_records && (
+                    <div className="inv-inspectorSection">
+                      <h4>{t.configWarningLabel}</h4>
+                      <p className="inv-inspectorWarning">
+                        <AlertTriangle size={13} /> {t.bedRecordsMismatch}
+                      </p>
+                    </div>
+                  )}
+                </>
+              )}
 
-                        <div className="bp-meter">
-                          <div style={{ width: `${percent}%` }} />
-                        </div>
-
-                        <div className="bp-studentList">
-                          {roomStudents.length === 0 ? (
-                            <div className="bp-emptyRoom">
-                              <Bed size={18} />
-                              <span>{t.noStudents}</span>
-                            </div>
-                          ) : (
-                            roomStudents.map((student) => {
-                              const selectedForSwap = idOf(swapMode.studentId) === idOf(student.id);
-
-                              return (
-                                <div
-                                  key={student.id}
-                                  className={`bp-studentRow ${selectedForSwap ? 'swapSelected' : ''}`}
-                                  draggable={!viewOnly}
-                                  onDragStart={() => {
-                                    if (!viewOnly) setDraggingStudentId(student.id);
-                                  }}
-                                  onDragEnd={() => setDraggingStudentId(null)}
-                                  onClick={() => {
-                                    if (viewOnly || !swapMode.active) return;
-                                    if (!swapMode.studentId) {
-                                      setSwapMode({ active: true, studentId: student.id });
-                                      return;
-                                    }
-                                    if (idOf(swapMode.studentId) !== idOf(student.id)) {
-                                      swapStudents(swapMode.studentId, student.id);
-                                    }
-                                  }}
-                                >
-                                  <div className="bp-studentMain">
-                                    <div className="bp-avatar">
-                                      <Users size={14} />
-                                    </div>
-                                    <div>
-                                      <strong>{getStudentLabel(student)}</strong>
-                                      <span>{student.student_id || student.business_partner_id || ''}</span>
-                                    </div>
-                                  </div>
-
-                                  <div className="bp-actions">
-                                    <button
-                                      type="button"
-                                      disabled={viewOnly}
-                                      title={t.moveStudent}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        setMoveModal({
-                                          open: true,
-                                          studentId: student.id,
-                                          query: '',
-                                          toRoomId: '',
-                                        });
-                                      }}
-                                    >
-                                      <Pencil size={15} />
-                                    </button>
-
-                                    <button
-                                      type="button"
-                                      disabled={viewOnly}
-                                      title={t.swap}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        setSwapMode((prev) =>
-                                          prev.active && idOf(prev.studentId) === idOf(student.id)
-                                            ? { active: false, studentId: null }
-                                            : { active: true, studentId: student.id }
-                                        );
-                                      }}
-                                    >
-                                      <ArrowRightLeft size={15} />
-                                    </button>
-
-                                    <button
-                                      type="button"
-                                      disabled={viewOnly}
-                                      className="danger"
-                                      title={t.remove}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        unassignStudent(student.id);
-                                      }}
-                                    >
-                                      <X size={15} />
-                                    </button>
-                                  </div>
-                                </div>
-                              );
-                            })
-                          )}
-                        </div>
-                      </article>
-                    );
-                  })
-                )}
-              </div>
-            </>
+              {selectedEntityType === 'bed' && (
+                <div className="inv-inspectorSection">
+                  <h4>{t.sectionDetails}</h4>
+                  <DetailRow label={t.parentRoomLabel} value={selectedRoom?.name} />
+                  <DetailRow label={t.availabilityLabel} value={selectedBed.is_occupied ? t.occupied : t.available} />
+                  <p className="inv-inspectorWarning">{t.bedNoActionsSupported}</p>
+                </div>
+              )}
+            </div>
           )}
-        </section>
+        </div>
       </div>
 
-      {addModal.open && (
-        <div className="bp-modalBackdrop" onMouseDown={() => setAddModal({ open: false, roomId: null, query: '' })}>
-          <div className="bp-modal" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="bp-modalHead">
-              <strong>{t.pickStudent}</strong>
-              <button type="button" onClick={() => setAddModal({ open: false, roomId: null, query: '' })}>
-                <X size={18} />
-              </button>
+      {/* Edit / create modal — rendered via portal directly under <body> so
+          its `position: fixed` centers on the true browser viewport and its
+          stacking order is independent of the app shell (sidebar/header),
+          instead of being confined to wherever it happens to be nested. */}
+      {editor &&
+        createPortal(
+          <div className="inv-modalOverlay" onClick={() => (!editor.saving ? closeEditor() : null)}>
+            <div className="inv-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+            <div className="inv-modalHeader">
+              <div className="inv-modalHeaderIcon">
+                <EditorIcon size={18} />
+              </div>
+              <div className="inv-modalHeaderText">
+                <h3>{editorTitle}</h3>
+                {editorContextLine && <p className="inv-modalHeaderContext">{editorContextLine}</p>}
+              </div>
+              <IconButton icon={X} onClick={closeEditor} title={t.cancel} disabled={editor.saving} />
             </div>
 
-            <div className="bp-search modalSearch">
-              <Search size={16} />
-              <input
-                value={addModal.query}
-                onChange={(e) => setAddModal((prev) => ({ ...prev, query: e.target.value }))}
-                placeholder={t.searchStudent}
-                autoFocus
-              />
-            </div>
+            <div className="inv-modalBody">
+              {editor.error && <PageAlert>{editor.error}</PageAlert>}
 
-            <div className="bp-modalList">
-              {filteredUnassignedStudents.length === 0 ? (
-                <div className="bp-emptyMini">{t.noAvailableStudents}</div>
-              ) : (
-                filteredUnassignedStudents.map((student) => (
-                  <button
-                    key={student.id}
-                    type="button"
-                    className="bp-modalItem"
-                    onClick={() => assignStudentToRoom(student.id, addModal.roomId)}
-                  >
-                    <div className="bp-avatar">
-                      <Users size={14} />
+              {editor.type === 'building' && (
+                <>
+                  <ModalSection title={t.sectionGeneralInfo}>
+                    <div className="inv-modalGrid">
+                      <FormField label={t.buildingNumberLabel} htmlFor="inv-b-number">
+                        <input
+                          id="inv-b-number"
+                          type="number"
+                          value={editor.data.number}
+                          onChange={(e) => setEditor((prev) => ({ ...prev, data: { ...prev.data, number: e.target.value } }))}
+                        />
+                      </FormField>
+                      <FormField label={t.dormTypeLabel} htmlFor="inv-b-dormtype">
+                        <select
+                          id="inv-b-dormtype"
+                          value={editor.data.dorm_type}
+                          onChange={(e) => setEditor((prev) => ({ ...prev, data: { ...prev.data, dorm_type: e.target.value } }))}
+                        >
+                          <option value="">—</option>
+                          {dormTypesInRegion.map((dt) => (
+                            <option key={dt.id} value={dt.id}>
+                              {dormTypeLabelText(dt)}
+                            </option>
+                          ))}
+                        </select>
+                      </FormField>
                     </div>
-                    <div>
-                      <strong>{getStudentLabel(student)}</strong>
-                      <span>{student.student_id || student.business_partner_id || ''}</span>
+                  </ModalSection>
+
+                  <ModalSection title={t.sectionAllocationConfig}>
+                    <div className="inv-modalGrid is-single">
+                      <FormField label={t.genderRestrictionLabel} htmlFor="inv-b-restriction" hint={t.genderRestrictionHint}>
+                        <select
+                          id="inv-b-restriction"
+                          value={editor.data.gender_restriction}
+                          onChange={(e) => setEditor((prev) => ({ ...prev, data: { ...prev.data, gender_restriction: e.target.value } }))}
+                        >
+                          <option value="">{t.noRestriction}</option>
+                          <option value="male">{genderRestrictionLabels.male}</option>
+                          <option value="female">{genderRestrictionLabels.female}</option>
+                        </select>
+                      </FormField>
                     </div>
-                    <Plus size={16} />
-                  </button>
-                ))
+                  </ModalSection>
+
+                  {editor.mode === 'edit' && (
+                    <ModalSection title={t.sectionStatus}>
+                      <div className="inv-statusRow">
+                        <StatusBadge active={editorBuildingCtx?.is_active} activeText={t.statusActive} inactiveText={t.statusInactive} />
+                      </div>
+                      <div className="inv-infoCallout">
+                        <Info size={14} />
+                        <span>{t.availabilityManagedSeparately}</span>
+                      </div>
+                    </ModalSection>
+                  )}
+                </>
               )}
+
+              {editor.type === 'apartment' && (
+                <>
+                  <ModalSection title={t.sectionGeneralInfo}>
+                    <div className="inv-modalGrid">
+                      <FormField label={t.apartmentNumberLabel} htmlFor="inv-a-number">
+                        <input
+                          id="inv-a-number"
+                          value={editor.data.number}
+                          onChange={(e) => setEditor((prev) => ({ ...prev, data: { ...prev.data, number: e.target.value } }))}
+                        />
+                      </FormField>
+                      <ReadOnlyField
+                        label={t.parentBuildingLabel}
+                        value={editorApartmentBuildingCtx ? `${t.buildingNumberLabel} ${editorApartmentBuildingCtx.number}` : '—'}
+                      />
+                      <ReadOnlyField label={t.dormTypeLabel} value={editorApartmentBuildingCtx?.dorm_type_name || '—'} />
+                    </div>
+                  </ModalSection>
+
+                  <ModalSection title={t.sectionApartmentClassification}>
+                    <div className="inv-modalGrid">
+                      <FormField label={t.genderCategoryLabel} htmlFor="inv-a-category">
+                        <select
+                          id="inv-a-category"
+                          value={editor.data.category}
+                          onChange={(e) => setEditor((prev) => ({ ...prev, data: { ...prev.data, category: e.target.value } }))}
+                        >
+                          <option value="male">{categoryLabels.male}</option>
+                          <option value="female">{categoryLabels.female}</option>
+                          <option value="mixed">{categoryLabels.mixed}</option>
+                        </select>
+                      </FormField>
+                      <FormField label={t.housingTypeLabel} htmlFor="inv-a-type">
+                        <select
+                          id="inv-a-type"
+                          value={editor.data.apartment_type}
+                          onChange={(e) => setEditor((prev) => ({ ...prev, data: { ...prev.data, apartment_type: e.target.value } }))}
+                        >
+                          <option value="single">{apartmentTypeLabels.single}</option>
+                          <option value="couple">{apartmentTypeLabels.couple}</option>
+                          <option value="family">{apartmentTypeLabels.family}</option>
+                        </select>
+                      </FormField>
+                    </div>
+                  </ModalSection>
+
+                  <ModalSection title={t.sectionCapacityConfig}>
+                    <div className="inv-modalGrid">
+                      <FormField label={t.plannedRoomCountLabel} htmlFor="inv-a-roomcount">
+                        <input
+                          id="inv-a-roomcount"
+                          type="number"
+                          value={editor.data.room_count}
+                          onChange={(e) => setEditor((prev) => ({ ...prev, data: { ...prev.data, room_count: e.target.value } }))}
+                        />
+                      </FormField>
+                      <FormField label={t.apartmentCapacityLabel} htmlFor="inv-a-capacity">
+                        <input
+                          id="inv-a-capacity"
+                          type="number"
+                          value={editor.data.apartment_capacity}
+                          onChange={(e) => setEditor((prev) => ({ ...prev, data: { ...prev.data, apartment_capacity: e.target.value } }))}
+                        />
+                      </FormField>
+                    </div>
+                    {editorApartmentRecord && (
+                      <div className="inv-summaryRow">
+                        <div className="inv-summaryItem">
+                          <span>{t.actualRoomCountLabel}</span>
+                          <strong>{editorApartmentRecord.actual_room_count}</strong>
+                        </div>
+                        <div className="inv-summaryItem">
+                          <span>{t.totalBedsLabel}</span>
+                          <strong>{editorApartmentRecord.bed_count}</strong>
+                        </div>
+                        <div className="inv-summaryItem">
+                          <span>{t.occupiedBedsLabel}</span>
+                          <strong>{editorApartmentRecord.occupied_beds}</strong>
+                        </div>
+                        <div className="inv-summaryItem">
+                          <span>{t.freeBedsLabel}</span>
+                          <strong>{editorApartmentRecord.free_beds}</strong>
+                        </div>
+                      </div>
+                    )}
+                  </ModalSection>
+
+                  {editor.mode === 'edit' && (
+                    <ModalSection title={t.sectionAvailabilityInfo}>
+                      <div className="inv-statusRow">
+                        <StatusBadge active={editorApartmentRecord?.is_active} activeText={t.statusActive} inactiveText={t.statusInactive} />
+                      </div>
+                      {editorApartmentRecord && !editorApartmentRecord.is_active && (
+                        <ReadOnlyField label={t.inactiveReasonLabel} value={editorApartmentRecord.inactive_reason_display || t.none} />
+                      )}
+                      <div className="inv-infoCallout">
+                        <Info size={14} />
+                        <span>{t.availabilityManagedSeparately}</span>
+                      </div>
+                    </ModalSection>
+                  )}
+                </>
+              )}
+
+              {editor.type === 'room' && (
+                <>
+                  <ModalSection title={t.sectionGeneralInfo}>
+                    <div className="inv-modalGrid">
+                      <FormField label={t.roomNameLabel} htmlFor="inv-r-name">
+                        <input
+                          id="inv-r-name"
+                          value={editor.data.name}
+                          onChange={(e) => setEditor((prev) => ({ ...prev, data: { ...prev.data, name: e.target.value } }))}
+                        />
+                      </FormField>
+                      <FormField label={t.capacityLabel} htmlFor="inv-r-capacity">
+                        <input
+                          id="inv-r-capacity"
+                          type="number"
+                          value={editor.data.capacity}
+                          onChange={(e) => setEditor((prev) => ({ ...prev, data: { ...prev.data, capacity: e.target.value } }))}
+                        />
+                      </FormField>
+                    </div>
+                    {editorRoomRecord && (
+                      <div className="inv-summaryRow">
+                        <div className="inv-summaryItem">
+                          <span>{t.occupancyLabel}</span>
+                          <strong>{editorRoomRecord.current_occupancy}</strong>
+                        </div>
+                        <div className="inv-summaryItem">
+                          <span>{t.availableBedsLabel}</span>
+                          <strong>{editorRoomRecord.available_beds}</strong>
+                        </div>
+                        <div className="inv-summaryItem">
+                          <span>{t.bedCountLabel}</span>
+                          <strong>{editorRoomRecord.bed_count}</strong>
+                        </div>
+                      </div>
+                    )}
+                  </ModalSection>
+
+                  {editor.mode === 'edit' && (
+                    <ModalSection title={t.sectionAvailabilityInfo}>
+                      <div className="inv-statusRow">
+                        <StatusBadge active={editorRoomRecord?.is_active} activeText={t.statusActive} inactiveText={t.statusInactive} />
+                      </div>
+                      <div className="inv-infoCallout">
+                        <Info size={14} />
+                        <span>{t.availabilityManagedSeparately}</span>
+                      </div>
+                    </ModalSection>
+                  )}
+                </>
+              )}
+
+              {editor.type === 'bed' && (
+                <ModalSection title={t.sectionGeneralInfo}>
+                  <div className="inv-modalGrid is-single">
+                    <FormField label={t.bedLabelField} htmlFor="inv-bed-label">
+                      <input
+                        id="inv-bed-label"
+                        value={editor.data.label}
+                        onChange={(e) => setEditor((prev) => ({ ...prev, data: { ...prev.data, label: e.target.value } }))}
+                      />
+                    </FormField>
+                  </div>
+                  <div className="inv-modalGrid">
+                    <ReadOnlyField label={t.parentRoomLabel} value={editorBedRoomCtx?.name} />
+                    <ReadOnlyField label={t.parentApartmentLabel} value={editorBedApartmentCtx?.number} />
+                    <ReadOnlyField label={t.buildingNumberLabel} value={editorBedBuildingCtx?.number} />
+                    <ReadOnlyField label={t.availabilityLabel} value={editorBedRecord?.is_occupied ? t.occupied : t.available} />
+                  </div>
+                </ModalSection>
+              )}
+            </div>
+
+            <div className="inv-modalFooter">
+              <button type="button" className="inv-secondaryBtn" onClick={closeEditor} disabled={editor.saving}>
+                {t.cancel}
+              </button>
+              <button type="button" className="inv-primaryBtn" onClick={saveEditor} disabled={editor.saving}>
+                {editor.saving ? <Spinner size={14} /> : editor.mode === 'create' ? t.create : t.save}
+              </button>
             </div>
           </div>
-        </div>
-      )}
+        </div>,
+          document.body
+        )}
 
-      {moveModal.open && (
-        <div className="bp-modalBackdrop" onMouseDown={() => setMoveModal({ open: false, studentId: null, query: '', toRoomId: '' })}>
-          <div className="bp-modal large" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="bp-modalHead">
-              <strong>{t.moveStudent}</strong>
-              <button type="button" onClick={() => setMoveModal({ open: false, studentId: null, query: '', toRoomId: '' })}>
-                <X size={18} />
-              </button>
-            </div>
+      {/* Availability (activate/deactivate) dialog */}
+      {availabilityDialog && (
+        <div className="inv-overlay" onClick={() => (!availabilityDialog.saving ? setAvailabilityDialog(null) : null)}>
+          <div className="inv-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3>{availabilityDialog.action === 'inactivate' ? t.deactivateTitle(availabilityDialog.label) : t.activateTitle(availabilityDialog.label)}</h3>
 
-            <div className="bp-search modalSearch">
-              <Search size={16} />
-              <input
-                value={moveModal.query}
-                onChange={(e) => setMoveModal((prev) => ({ ...prev, query: e.target.value }))}
-                placeholder={t.searchRoom}
-                autoFocus
-              />
-            </div>
-
-            <div className="bp-modalList rooms">
-              {filteredMoveRooms.length === 0 ? (
-                <div className="bp-emptyMini">{t.noData}</div>
-              ) : (
-                filteredMoveRooms.map((room) => {
-                  const roomStudents = getRoomStudents(room.id);
-                  const capacity = getRoomCapacity(room);
-                  const full = capacity > 0 && roomStudents.length >= capacity;
-                  const selected = idOf(moveModal.toRoomId) === idOf(room.id);
-                  const building = buildings.find((b) => idOf(b.id) === getBuildingIdFromRoom(room));
-
-                  return (
-                    <button
-                      key={room.id}
-                      type="button"
-                      className={`bp-modalItem room ${selected ? 'selected' : ''} ${full ? 'disabled' : ''}`}
-                      disabled={full}
-                      onClick={() => setMoveModal((prev) => ({ ...prev, toRoomId: room.id }))}
-                    >
-                      <Home size={15} />
-                      <div>
-                        <strong>
-                          {building ? getBuildingLabel(building, t) : t.building} · {t.room}{' '}
-                          {room.name || room.number || room.id}
-                        </strong>
-                        <span>
-                          {t.apartment} {room.apartment_number || getApartmentIdFromRoom(room)} ·{' '}
-                          {roomStudents.length}/{capacity || '—'}
-                          {full ? ` · ${t.roomFull}` : ''}
-                        </span>
+            {availabilityDialog.action === 'inactivate' ? (
+              <>
+                <div className="inv-impactBox">
+                  <div className="inv-impactTitle">
+                    <AlertTriangle size={14} /> {t.impactTitle}
+                  </div>
+                  {availabilityDialog.loadingImpact ? (
+                    <div className="inv-centerInline">
+                      <Spinner size={16} /> {t.loadingImpact}
+                    </div>
+                  ) : availabilityDialog.impact ? (
+                    <>
+                      <div className="inv-impactGrid">
+                        <div>
+                          <span>{t.impactApartments}</span>
+                          <strong>{availabilityDialog.impact.lost_apartments}</strong>
+                        </div>
+                        <div>
+                          <span>{t.impactRooms}</span>
+                          <strong>{availabilityDialog.impact.lost_rooms}</strong>
+                        </div>
+                        <div>
+                          <span>{t.impactBeds}</span>
+                          <strong>{availabilityDialog.impact.lost_beds}</strong>
+                        </div>
+                        <div>
+                          <span>{t.impactAssignments}</span>
+                          <strong>{availabilityDialog.impact.affected_students_count}</strong>
+                        </div>
                       </div>
-                    </button>
-                  );
-                })
-              )}
-            </div>
+                      <p className="inv-impactNote">
+                        {availabilityDialog.impact.affected_students_count > 0 ? t.impactNote : t.impactNoAssignments}
+                      </p>
+                    </>
+                  ) : null}
+                </div>
 
-            <div className="bp-modalFooter">
-              <button type="button" className="bp-secondary" onClick={() => setMoveModal({ open: false, studentId: null, query: '', toRoomId: '' })}>
+                <FormField label={t.reasonLabel} htmlFor="inv-avail-reason">
+                  <select
+                    id="inv-avail-reason"
+                    value={availabilityDialog.reason}
+                    onChange={(e) => setAvailabilityDialog((prev) => ({ ...prev, reason: e.target.value, error: '' }))}
+                  >
+                    <option value="">{t.chooseReason}</option>
+                    {reasonOptions.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </FormField>
+                <FormField label={t.noteLabel} htmlFor="inv-avail-note">
+                  <textarea
+                    id="inv-avail-note"
+                    rows={2}
+                    value={availabilityDialog.note}
+                    onChange={(e) => setAvailabilityDialog((prev) => ({ ...prev, note: e.target.value }))}
+                  />
+                </FormField>
+              </>
+            ) : (
+              <p>{t.confirmActivateShort}</p>
+            )}
+
+            {availabilityDialog.error && <PageAlert>{availabilityDialog.error}</PageAlert>}
+
+            <div className="inv-drawerFooter">
+              <button type="button" className="inv-secondaryBtn" onClick={() => setAvailabilityDialog(null)} disabled={availabilityDialog.saving}>
                 {t.cancel}
               </button>
               <button
                 type="button"
-                className="bp-primary"
-                disabled={!moveModal.toRoomId}
-                onClick={() => moveStudentToRoom(moveModal.studentId, moveModal.toRoomId)}
+                className={availabilityDialog.action === 'inactivate' ? 'inv-dangerBtn' : 'inv-successBtn'}
+                onClick={confirmAvailabilityChange}
+                disabled={availabilityDialog.saving || availabilityDialog.loadingImpact}
               >
-                {t.confirm}
+                {availabilityDialog.saving ? <Spinner size={14} /> : t.confirmProceed}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bed deletion dialog (only ever opened when canDeleteBed is true) */}
+      {deleteDialog && (
+        <div className="inv-overlay" onClick={() => (!deleteDialog.saving ? setDeleteDialog(null) : null)}>
+          <div className="inv-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3>{t.deleteBedTitle(deleteDialog.label)}</h3>
+            {deleteDialog.occupied && (
+              <PageAlert tone="warning">{t.deleteBedOccupiedWarning}</PageAlert>
+            )}
+            {deleteDialog.error && <PageAlert>{deleteDialog.error}</PageAlert>}
+            <div className="inv-drawerFooter">
+              <button type="button" className="inv-secondaryBtn" onClick={() => setDeleteDialog(null)} disabled={deleteDialog.saving}>
+                {t.cancel}
+              </button>
+              <button type="button" className="inv-dangerBtn" onClick={confirmDeleteBed} disabled={deleteDialog.saving || deleteDialog.occupied}>
+                {deleteDialog.saving ? <Spinner size={14} /> : t.confirmDelete}
               </button>
             </div>
           </div>
@@ -1146,803 +2095,331 @@ const filteredMoveRooms = useMemo(() => {
       )}
 
       <style>{`
-        :root {
-          --bp-bg: #f5f8fc;
-          --bp-card: #ffffff;
-          --bp-text: #0f172a;
-          --bp-muted: #64748b;
-          --bp-border: rgba(15, 23, 42, 0.10);
-          --bp-blue: #2563eb;
-          --bp-blue-soft: #dbeafe;
-          --bp-green: #059669;
-          --bp-green-soft: #d1fae5;
-          --bp-red: #dc2626;
-          --bp-red-soft: #fee2e2;
-          --bp-orange: #f97316;
-          --bp-shadow: 0 10px 25px rgba(15, 23, 42, 0.07);
-          --bp-radius: 18px;
-        }
+        .inv-page {
+          --inv-bg: #f4f5f7;
+          --inv-panel: #ffffff;
+          --inv-panel-subtle: #f9fafb;
+          --inv-border: #e5e7eb;
+          --inv-border-strong: #d1d5db;
+          --inv-text: #111827;
+          --inv-muted: #6b7280;
+          --inv-primary: #2563eb;
+          --inv-primary-hover: #1d4ed8;
+          --inv-primary-soft: #dbeafe;
+          --inv-success: #059669;
+          --inv-success-soft: #d1fae5;
+          --inv-warning: #b45309;
+          --inv-warning-soft: #fef3c7;
+          --inv-danger: #dc2626;
+          --inv-danger-soft: #fee2e2;
+          --inv-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
 
-        .bp-page {
+          padding: 20px 22px 32px;
+          background: var(--inv-bg);
           min-height: 100vh;
-          background: var(--bp-bg);
-          padding: 24px;
-          color: var(--bp-text);
-        }
-
-        .bp-center {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 12px;
-          color: var(--bp-muted);
-          font-weight: 700;
-        }
-
-        .bp-spin {
-          animation: bp-spin 0.9s linear infinite;
-        }
-
-        @keyframes bp-spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-
-        .bp-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-end;
-          gap: 16px;
-          margin-bottom: 18px;
-        }
-
-        .bp-header h1 {
-          margin: 0;
-          font-size: 28px;
-          font-weight: 900;
-          letter-spacing: -0.03em;
-        }
-
-        .bp-header p {
-          margin: 6px 0 0;
-          color: var(--bp-muted);
-          font-size: 14px;
-          font-weight: 650;
-        }
-
-        .bp-permission {
-          display: inline-flex;
-          align-items: center;
-          gap: 8px;
-          background: var(--bp-blue-soft);
-          color: #1d4ed8;
-          border: 1px solid #bfdbfe;
-          border-radius: 999px;
-          padding: 9px 13px;
-          font-weight: 800;
+          color: var(--inv-text);
           font-size: 13px;
         }
 
-        .bp-permission.readonly {
-          color: #92400e;
-          background: #fef3c7;
-          border-color: #fde68a;
+        .inv-centerFull { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+        .inv-centerInline { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 18px; color: var(--inv-muted); }
+        .inv-spin { animation: inv-spin 0.9s linear infinite; }
+        @keyframes inv-spin { to { transform: rotate(360deg); } }
+
+        /* Header */
+        .inv-pageHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+        .inv-pageHeaderLeft { display: flex; align-items: flex-start; gap: 10px; }
+        .inv-pageHeaderIcon {
+          width: 36px; height: 36px; border-radius: 10px; background: var(--inv-primary-soft); color: var(--inv-primary);
+          display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+        }
+        .inv-pageHeader h1 { font-size: 18px; margin: 0 0 2px; font-weight: 750; }
+        .inv-pageHeader p { margin: 0; color: var(--inv-muted); font-size: 12px; }
+        .inv-pageHeaderRight { display: flex; align-items: center; gap: 8px; }
+        .inv-viewOnlyIndicator {
+          display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 650; color: var(--inv-warning);
+          background: var(--inv-warning-soft); border-radius: 8px; padding: 5px 9px;
         }
 
-        .bp-toolbar {
+        /* Breadcrumb */
+        .inv-breadcrumb {
+          display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--inv-muted);
+          margin-bottom: 12px; padding: 6px 2px;
+        }
+        .inv-breadcrumbActive { color: var(--inv-text); font-weight: 650; }
+
+        /* Alerts */
+        .inv-alert {
+          display: flex; align-items: center; justify-content: space-between; gap: 10px;
+          border-radius: 10px; padding: 9px 12px; font-size: 12px; font-weight: 600; margin-bottom: 10px;
+        }
+        .inv-alert-danger { background: var(--inv-danger-soft); color: var(--inv-danger); }
+        .inv-alert-warning { background: var(--inv-warning-soft); color: var(--inv-warning); }
+        .inv-alert button { border: none; background: transparent; cursor: pointer; display: flex; color: inherit; }
+
+        /* Filter bar */
+        .inv-filterBar {
+          display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;
+          background: var(--inv-panel); border: 1px solid var(--inv-border); border-radius: 12px; padding: 10px 12px; margin-bottom: 10px;
+          box-shadow: var(--inv-shadow);
+        }
+        .inv-filterField { display: flex; flex-direction: column; gap: 3px; min-width: 140px; }
+        .inv-filterField label { font-size: 10.5px; color: var(--inv-muted); font-weight: 650; text-transform: uppercase; letter-spacing: 0.02em; }
+        .inv-filterField select {
+          border: 1px solid var(--inv-border); border-radius: 8px; padding: 6px 8px; font-size: 12.5px; background: var(--inv-panel); color: var(--inv-text);
+        }
+        .inv-filterSearch {
+          display: flex; align-items: center; gap: 6px; border: 1px solid var(--inv-border); border-radius: 8px; padding: 6px 9px;
+          flex: 1; min-width: 200px; color: var(--inv-muted);
+        }
+        .inv-filterSearch input { border: none; outline: none; flex: 1; font-size: 12.5px; background: transparent; color: var(--inv-text); }
+        .inv-filterSearch button { border: none; background: transparent; cursor: pointer; display: flex; color: var(--inv-muted); }
+
+        /* Buttons */
+        .inv-primaryBtn, .inv-secondaryBtn, .inv-dangerBtn, .inv-successBtn {
+          display: inline-flex; align-items: center; gap: 5px; border-radius: 8px; padding: 6px 11px;
+          font-size: 12px; font-weight: 650; cursor: pointer; border: 1px solid transparent; white-space: nowrap;
+        }
+        .inv-primaryBtn { background: var(--inv-primary); color: #fff; }
+        .inv-primaryBtn:hover:not(:disabled) { background: var(--inv-primary-hover); }
+        .inv-primaryBtn:disabled { opacity: 0.55; cursor: not-allowed; }
+        .inv-secondaryBtn { background: var(--inv-panel); color: var(--inv-text); border-color: var(--inv-border-strong); }
+        .inv-dangerBtn { background: var(--inv-danger-soft); color: var(--inv-danger); }
+        .inv-dangerBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .inv-successBtn { background: var(--inv-success-soft); color: var(--inv-success); }
+        .inv-iconBtn {
+          border: 1px solid var(--inv-border-strong); background: var(--inv-panel); border-radius: 7px; padding: 5px;
+          cursor: pointer; display: inline-flex; color: var(--inv-muted);
+        }
+        .inv-iconBtn:hover:not(:disabled) { color: var(--inv-text); border-color: var(--inv-primary); }
+        .inv-iconBtn:disabled { opacity: 0.45; cursor: not-allowed; }
+        .inv-iconBtn-danger:hover:not(:disabled) { color: var(--inv-danger); border-color: var(--inv-danger); }
+
+        /* Summary strip */
+        .inv-summaryStrip {
+          display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px;
+        }
+        .inv-miniMetric {
+          display: flex; align-items: center; gap: 8px; background: var(--inv-panel); border: 1px solid var(--inv-border);
+          border-radius: 10px; padding: 8px 10px; color: var(--inv-primary); box-shadow: var(--inv-shadow);
+        }
+        .inv-miniMetricValue { font-size: 15px; font-weight: 800; color: var(--inv-text); line-height: 1.1; }
+        .inv-miniMetricLabel { font-size: 10.5px; color: var(--inv-muted); }
+
+        /* Workspace grid */
+        .inv-workspace {
           display: grid;
-          grid-template-columns: 1fr 1fr 1.5fr;
-          gap: 14px;
-          margin-bottom: 14px;
-        }
-
-        .bp-field,
-        .bp-search {
-          background: var(--bp-card);
-          border: 1px solid var(--bp-border);
-          border-radius: 15px;
-          box-shadow: 0 3px 12px rgba(15, 23, 42, 0.04);
-        }
-
-        .bp-field {
-          padding: 10px 12px;
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-        }
-
-        .bp-field label {
-          color: var(--bp-muted);
-          font-size: 12px;
-          font-weight: 800;
-        }
-
-        .bp-field select {
-          border: none;
-          background: transparent;
-          outline: none;
-          font: inherit;
-          font-weight: 750;
-          color: var(--bp-text);
-        }
-
-        .bp-search {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          padding: 0 12px;
-          min-height: 58px;
-        }
-
-        .bp-search input {
-          flex: 1;
-          border: none;
-          outline: none;
-          background: transparent;
-          font: inherit;
-          color: var(--bp-text);
-        }
-
-        .bp-search button {
-          border: none;
-          background: transparent;
-          cursor: pointer;
-          color: var(--bp-muted);
-          display: flex;
-        }
-
-        .bp-errorBox {
-          background: var(--bp-red-soft);
-          border: 1px solid #fecaca;
-          color: #991b1b;
-          border-radius: 14px;
-          padding: 12px 14px;
-          font-weight: 750;
-          margin-bottom: 14px;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-        }
-
-        .bp-errorBox.small button {
-          border: none;
-          background: transparent;
-          cursor: pointer;
-          color: #991b1b;
-          display: flex;
-        }
-
-        .bp-statsGrid {
-          display: grid;
-          grid-template-columns: repeat(5, minmax(0, 1fr));
-          gap: 14px;
-          margin-bottom: 16px;
-        }
-
-        .bp-stat {
-          background: var(--bp-card);
-          border: 1px solid var(--bp-border);
-          border-radius: var(--bp-radius);
-          box-shadow: var(--bp-shadow);
-          padding: 15px;
-          display: flex;
-          align-items: center;
-          gap: 14px;
-        }
-
-        .bp-statIcon {
-          width: 44px;
-          height: 44px;
-          border-radius: 15px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: var(--bp-blue-soft);
-          color: var(--bp-blue);
-          flex: 0 0 auto;
-        }
-
-        .bp-statValue {
-          font-size: 24px;
-          font-weight: 950;
-          line-height: 1;
-        }
-
-        .bp-statLabel {
-          margin-top: 5px;
-          color: var(--bp-muted);
-          font-size: 12px;
-          font-weight: 750;
-        }
-
-        .bp-layout {
-          display: grid;
-          grid-template-columns: minmax(360px, 42%) 1fr;
-          gap: 16px;
+          grid-template-columns: minmax(250px, 285px) minmax(520px, 1fr) minmax(285px, 330px);
+          gap: 12px;
           align-items: start;
         }
-
-        .bp-panel {
-          background: var(--bp-card);
-          border: 1px solid var(--bp-border);
-          border-radius: var(--bp-radius);
-          box-shadow: var(--bp-shadow);
-          overflow: hidden;
-        }
-
-        .bp-panelHead {
-          padding: 14px 16px;
-          background: #f8fafc;
-          border-bottom: 1px solid var(--bp-border);
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          font-size: 14px;
-        }
-
-        .bp-panelHead > div {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-        }
-
-        .bp-panelHead span {
-          background: #e2e8f0;
-          color: #475569;
-          border-radius: 999px;
-          padding: 3px 9px;
-          font-size: 12px;
-          font-weight: 850;
-        }
-
-        .bp-list {
-          padding: 10px;
-          max-height: calc(100vh - 340px);
-          overflow: auto;
-        }
-
-        .bp-buildingCard {
-          margin-bottom: 8px;
-        }
-
-        .bp-buildingButton,
-        .bp-apartmentButton {
-          width: 100%;
-          border: 1px solid var(--bp-border);
-          background: white;
-          border-radius: 15px;
-          padding: 12px;
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          cursor: pointer;
-          color: var(--bp-text);
-          text-align: start;
-        }
-
-        .bp-buildingButton:hover,
-        .bp-apartmentButton:hover {
-          border-color: #93c5fd;
-          background: #f8fbff;
-        }
-
-        .bp-buildingButton.selected,
-        .bp-apartmentButton.selected {
-          background: #eff6ff;
-          border-color: #93c5fd;
-        }
-
-        .bp-iconBubble {
-          width: 40px;
-          height: 40px;
-          border-radius: 14px;
-          background: var(--bp-blue-soft);
-          color: var(--bp-blue);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          flex: 0 0 auto;
-        }
-
-        .bp-buildingInfo {
-          display: flex;
-          flex-direction: column;
-          min-width: 0;
-          flex: 1;
-        }
-
-        .bp-buildingInfo strong,
-        .bp-apartmentButton strong {
-          font-size: 14px;
-          font-weight: 900;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-
-        .bp-buildingInfo span,
-        .bp-apartmentButton span {
-          color: var(--bp-muted);
-          font-size: 12px;
-          font-weight: 650;
-          margin-top: 2px;
-        }
-
-        .bp-status {
-          border-radius: 999px;
-          padding: 4px 9px;
-          font-size: 11px;
-          font-weight: 900;
-          white-space: nowrap;
-        }
-
-        .bp-status.ok {
-          background: var(--bp-green-soft);
-          color: #047857;
-        }
-
-        .bp-status.bad {
-          background: var(--bp-red-soft);
-          color: #991b1b;
-        }
-
-        .bp-apartmentList {
-          padding: 8px 0 0 16px;
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-        }
-
-        [dir="rtl"] .bp-apartmentList {
-          padding: 8px 16px 0 0;
-        }
-
-        .bp-apartmentButton {
-          border-radius: 13px;
-          background: #f8fafc;
-        }
-
-        .bp-apartmentButton > div {
-          display: flex;
-          flex-direction: column;
-          min-width: 0;
-        }
-
-        .bp-workPanel {
-          min-height: 560px;
-        }
-
-        .bp-workHead {
-          padding: 18px 20px;
-          border-bottom: 1px solid var(--bp-border);
-          background: linear-gradient(135deg, #f8fafc, #eff6ff);
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 16px;
-        }
-
-        .bp-workHead h2 {
-          margin: 4px 0 0;
-          font-size: 22px;
-          font-weight: 950;
-        }
-
-        .bp-breadcrumb {
-          color: var(--bp-muted);
-          font-size: 12px;
-          font-weight: 800;
-        }
-
-        .bp-swapBanner {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          background: #fff7ed;
-          border: 1px solid #fed7aa;
-          color: #9a3412;
-          border-radius: 999px;
-          padding: 8px 10px;
-          font-size: 12px;
-          font-weight: 850;
-        }
-
-        .bp-swapBanner button {
-          border: none;
-          background: #fed7aa;
-          color: #9a3412;
-          border-radius: 999px;
-          padding: 5px 8px;
-          cursor: pointer;
-          font-weight: 900;
-        }
-
-        .bp-roomGrid {
-          padding: 16px;
-          display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
-          gap: 14px;
-        }
-
-        .bp-roomCard {
-          border: 1px solid var(--bp-border);
-          border-radius: 18px;
-          background: white;
-          padding: 14px;
-          box-shadow: 0 3px 10px rgba(15, 23, 42, 0.04);
-        }
-
-        .bp-roomCard.full {
-          border-color: #fca5a5;
-          background: #fffafa;
-        }
-
-        .bp-roomCard.readonly {
-          opacity: 0.88;
-        }
-
-        .bp-roomTop {
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
-          gap: 10px;
-          margin-bottom: 12px;
-        }
-
-        .bp-roomTop h3 {
-          margin: 0;
-          font-size: 16px;
-          font-weight: 950;
-        }
-
-        .bp-roomTop span {
-          display: block;
-          margin-top: 3px;
-          color: var(--bp-muted);
-          font-size: 12px;
-          font-weight: 750;
-        }
-
-        .bp-primarySmall,
-        .bp-primary,
-        .bp-secondary {
-          border: none;
-          border-radius: 13px;
-          padding: 9px 11px;
-          cursor: pointer;
-          font-weight: 900;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          gap: 6px;
-        }
-
-        .bp-primarySmall,
-        .bp-primary {
-          background: var(--bp-blue);
-          color: white;
-        }
-
-        .bp-secondary {
-          background: #f1f5f9;
-          color: #334155;
-        }
-
-        .bp-primarySmall:disabled,
-        .bp-primary:disabled,
-        .bp-secondary:disabled {
-          opacity: 0.55;
-          cursor: not-allowed;
-        }
-
-        .bp-meter {
-          height: 8px;
-          background: #e2e8f0;
-          border-radius: 999px;
-          overflow: hidden;
-          margin-bottom: 12px;
-        }
-
-        .bp-meter > div {
-          height: 100%;
-          background: linear-gradient(90deg, #60a5fa, #2563eb);
-          border-radius: 999px;
-        }
-
-        .bp-studentList {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        }
-
-        .bp-studentRow {
-          border: 1px solid var(--bp-border);
-          background: #f8fafc;
-          border-radius: 14px;
-          padding: 9px;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-          cursor: grab;
-        }
-
-        .bp-studentRow.swapSelected {
-          background: #fff7ed;
-          border-color: #fb923c;
-        }
-
-        .bp-studentMain,
-        .bp-modalItem {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          min-width: 0;
-        }
-
-        .bp-studentMain > div:last-child,
-        .bp-modalItem > div:not(.bp-avatar) {
-          display: flex;
-          flex-direction: column;
-          min-width: 0;
-        }
-
-        .bp-studentMain strong,
-        .bp-modalItem strong {
-          font-size: 13px;
-          font-weight: 900;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-
-        .bp-studentMain span,
-        .bp-modalItem span {
-          color: var(--bp-muted);
-          font-size: 11px;
-          font-weight: 700;
-          margin-top: 2px;
-        }
-
-        .bp-avatar {
-          width: 30px;
-          height: 30px;
-          border-radius: 11px;
-          background: var(--bp-blue-soft);
-          color: var(--bp-blue);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          flex: 0 0 auto;
-        }
-
-        .bp-actions {
-          display: flex;
-          align-items: center;
-          gap: 5px;
-        }
-
-        .bp-actions button,
-        .bp-modalHead button {
-          border: 1px solid var(--bp-border);
-          background: white;
-          border-radius: 10px;
-          width: 31px;
-          height: 31px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          cursor: pointer;
-          color: #475569;
-        }
-
-        .bp-actions button:disabled {
-          opacity: 0.45;
-          cursor: not-allowed;
-        }
-
-        .bp-actions button.danger {
-          color: var(--bp-red);
-        }
-
-        .bp-emptyState {
-          min-height: 520px;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          gap: 10px;
-          color: var(--bp-muted);
-          text-align: center;
-          padding: 28px;
-        }
-
-        .bp-emptyState strong {
-          color: var(--bp-text);
-          font-size: 18px;
-          font-weight: 950;
-        }
-
-        .bp-emptyState.small {
-          min-height: 260px;
-          grid-column: 1 / -1;
-        }
-
-        .bp-bigIcon {
-          width: 78px;
-          height: 78px;
-          border-radius: 24px;
-          background: var(--bp-blue-soft);
-          color: var(--bp-blue);
-          border: 1px solid #bfdbfe;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-        }
-
-        .bp-emptyMini,
-        .bp-emptyRoom,
-        .bp-loadingLine,
-        .bp-loadingBlock {
-          color: var(--bp-muted);
-          font-weight: 750;
-          font-size: 13px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 8px;
-          padding: 16px;
+        .inv-panel { background: var(--inv-panel); border: 1px solid var(--inv-border); border-radius: 12px; padding: 10px; box-shadow: var(--inv-shadow); }
+
+        .inv-sectionHeader { display: flex; align-items: center; justify-content: space-between; padding: 4px 4px 8px; }
+        .inv-sectionHeader h3 { margin: 0; font-size: 12.5px; font-weight: 700; color: var(--inv-text); }
+
+        .inv-emptyPanel {
+          display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+          color: var(--inv-muted); padding: 20px 10px; text-align: center; font-size: 12px;
+        }
+        .inv-emptyPanelTitle { font-weight: 650; font-size: 12.5px; color: var(--inv-text); }
+        .inv-emptyPanel p { margin: 0; font-size: 11.5px; max-width: 220px; }
+
+        /* Navigator */
+        .inv-buildingList { display: flex; flex-direction: column; gap: 6px; max-height: 64vh; overflow-y: auto; }
+        .inv-buildingItem {
+          text-align: start; border: 1px solid var(--inv-border); border-inline-start: 3px solid transparent;
+          border-radius: 9px; padding: 8px 9px; background: var(--inv-panel); cursor: pointer;
+          display: flex; flex-direction: column; gap: 3px;
+        }
+        .inv-buildingItem.is-selected { background: var(--inv-primary-soft); border-inline-start-color: var(--inv-primary); }
+        .inv-buildingItem.is-inactive { opacity: 0.6; }
+        .inv-buildingItemTop { display: flex; justify-content: space-between; align-items: center; }
+        .inv-buildingItemNumber { font-weight: 700; font-size: 12.5px; }
+        .inv-buildingItemMeta { font-size: 11px; color: var(--inv-muted); }
+        .inv-buildingItemCounts { font-size: 10.5px; color: var(--inv-muted); }
+        .inv-buildingItemBottom { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 2px; }
+        .inv-genderTag { font-size: 10px; font-weight: 650; background: var(--inv-panel-subtle); border: 1px solid var(--inv-border); border-radius: 7px; padding: 2px 6px; color: var(--inv-muted); }
+
+        /* Status / occupancy badges */
+        .inv-statusBadge { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 7px; }
+        .inv-statusBadge.is-active { background: var(--inv-success-soft); color: var(--inv-success); }
+        .inv-statusBadge.is-inactive { background: var(--inv-danger-soft); color: var(--inv-danger); }
+        .inv-statusDot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+        .inv-occupancyBadge { font-size: 11px; font-weight: 700; color: var(--inv-text); }
+        .inv-occupancyBadge.is-full { color: var(--inv-warning); }
+
+        /* Structure tables */
+        .inv-tableWrap { overflow-x: auto; margin-bottom: 6px; }
+        .inv-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        .inv-table th {
+          text-align: start; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.02em; color: var(--inv-muted);
+          border-bottom: 1px solid var(--inv-border); padding: 6px 8px; font-weight: 650; white-space: nowrap;
+        }
+        .inv-table td { padding: 7px 8px; border-bottom: 1px solid var(--inv-border); vertical-align: middle; }
+        .inv-table tbody tr { cursor: pointer; }
+        .inv-table tbody tr:hover { background: var(--inv-panel-subtle); }
+        .inv-table tbody tr.is-selected { background: var(--inv-primary-soft); }
+        .inv-table tbody tr.is-inactive { opacity: 0.55; }
+        .inv-table td:last-child { display: flex; gap: 4px; }
+        .inv-warnIcon { color: var(--inv-warning); margin-inline-start: 5px; display: inline-flex; vertical-align: middle; }
+        .inv-availabilityTag { font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 7px; }
+        .inv-availabilityTag.is-available { background: var(--inv-success-soft); color: var(--inv-success); }
+        .inv-availabilityTag.is-occupied { background: var(--inv-warning-soft); color: var(--inv-warning); }
+        .inv-bedCapabilityNote { font-size: 10.5px; color: var(--inv-muted); margin: 6px 2px 0; }
+
+        /* Inspector */
+        .inv-inspectorBody { display: flex; flex-direction: column; gap: 10px; }
+        .inv-inspectorHeader { display: flex; align-items: center; gap: 8px; color: var(--inv-primary); }
+        .inv-inspectorHeaderText { color: var(--inv-text); }
+        .inv-inspectorType { font-size: 10px; color: var(--inv-muted); text-transform: uppercase; letter-spacing: 0.02em; }
+        .inv-inspectorLabel { font-size: 14px; font-weight: 750; }
+        .inv-inspectorActions { display: flex; gap: 6px; flex-wrap: wrap; }
+        .inv-inspectorSection { border-top: 1px solid var(--inv-border); padding-top: 8px; }
+        .inv-inspectorSection h4 { margin: 0 0 6px; font-size: 10.5px; color: var(--inv-muted); text-transform: uppercase; letter-spacing: 0.02em; }
+        .inv-inspectorWarning { display: flex; align-items: center; gap: 5px; color: var(--inv-warning); font-size: 11px; margin: 0; }
+        .inv-detailRow { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+        .inv-detailRow span { color: var(--inv-muted); }
+
+        /* Drawer / dialog */
+        .inv-overlay {
+          position: fixed; inset: 0; background: rgba(17, 24, 39, 0.4); display: flex; align-items: stretch; z-index: 60;
+        }
+        .inv-drawerFooter { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--inv-border); }
+
+        .inv-dialog {
+          background: var(--inv-panel); border-radius: 14px; padding: 18px; width: 100%; max-width: 420px; margin: auto;
+          display: flex; flex-direction: column; gap: 12px; max-height: 88vh; overflow-y: auto;
+        }
+        .inv-dialog h3 { margin: 0; font-size: 14.5px; }
+
+        .inv-formField { display: flex; flex-direction: column; gap: 4px; }
+        .inv-formField label { font-size: 11px; font-weight: 650; color: var(--inv-muted); }
+        .inv-formField input, .inv-formField select, .inv-formField textarea {
+          border: 1px solid var(--inv-border); border-radius: 8px; padding: 7px 9px; font-size: 12.5px; background: var(--inv-panel); color: var(--inv-text);
+          font-family: inherit; resize: vertical;
+        }
+        .inv-formField small { font-size: 10.5px; color: var(--inv-muted); }
+
+        /* Edit / create modal — large centered dialog, replaces the old
+           edge-attached side drawer. Rendered via React portal straight
+           into body (see BuildingsPage render) so fixed positioning is
+           anchored to the real browser viewport, not to any app-shell
+           ancestor. z-index is set above the app sidebar (z-index: 100 in
+           Sidebar.js) so the sidebar can never paint on top of it. Header
+           and footer stay fixed while only the body scrolls, so long
+           apartment forms never require the whole modal to grow.
+
+           IMPORTANT: because this subtree is portaled directly under
+           <body>, it is NOT a DOM descendant of .inv-page — so the
+           --inv-* custom properties declared on .inv-page do not cascade
+           into it (CSS variables inherit through the DOM tree, which a
+           portal escapes). Every var(--inv-*) used below would otherwise
+           resolve to nothing, leaving the modal surface, borders, and
+           buttons fully transparent. Re-declaring the same token set here,
+           at the root of the portaled subtree, is what actually fixes it —
+           this was the real cause of the "see-through modal" bug, not
+           opacity or z-index. */
+        .inv-modalOverlay {
+          --inv-bg: #f4f5f7;
+          --inv-panel: #ffffff;
+          --inv-panel-subtle: #f9fafb;
+          --inv-border: #e5e7eb;
+          --inv-border-strong: #d1d5db;
+          --inv-text: #111827;
+          --inv-muted: #6b7280;
+          --inv-primary: #2563eb;
+          --inv-primary-hover: #1d4ed8;
+          --inv-primary-soft: #dbeafe;
+          --inv-success: #059669;
+          --inv-success-soft: #d1fae5;
+          --inv-warning: #b45309;
+          --inv-warning-soft: #fef3c7;
+          --inv-danger: #dc2626;
+          --inv-danger-soft: #fee2e2;
+
+          position: fixed; inset: 0; background: rgba(15, 23, 42, 0.55); opacity: 1; display: grid; place-items: center;
+          z-index: 9999; padding: 24px;
+        }
+        .inv-modal {
+          background: #ffffff; opacity: 1; isolation: isolate;
+          width: min(880px, calc(100vw - 48px)); max-height: calc(100vh - 48px); border-radius: 16px;
+          border: 1px solid var(--inv-border);
+          box-shadow: 0 20px 60px rgba(16, 24, 40, 0.35), 0 2px 8px rgba(16, 24, 40, 0.12);
+          display: flex; flex-direction: column; overflow: hidden; margin: 0; position: relative;
+        }
+        .inv-modalHeader {
+          display: flex; align-items: flex-start; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--inv-border); flex-shrink: 0;
+        }
+        .inv-modalHeaderIcon {
+          width: 36px; height: 36px; border-radius: 10px; background: var(--inv-primary-soft); color: var(--inv-primary);
+          display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+        }
+        .inv-modalHeaderText { flex: 1; min-width: 0; }
+        .inv-modalHeaderText h3 { margin: 0; font-size: 15.5px; font-weight: 750; }
+        .inv-modalHeaderContext { margin: 3px 0 0; font-size: 12px; color: var(--inv-muted); }
+        .inv-modalBody { padding: 18px 20px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 14px; }
+        .inv-modalFooter {
+          display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--inv-border); flex-shrink: 0;
+        }
+
+        .inv-modalSection {
+          border: 1px solid var(--inv-border); border-radius: 12px; padding: 14px 16px; background: var(--inv-panel-subtle);
+          display: flex; flex-direction: column; gap: 10px;
+        }
+        .inv-modalSection h4 { margin: 0; font-size: 11px; font-weight: 700; color: var(--inv-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+        .inv-modalGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
+        .inv-modalGrid.is-single { grid-template-columns: 1fr; }
+
+        .inv-readonlyField { display: flex; flex-direction: column; gap: 4px; }
+        .inv-readonlyField label { font-size: 11px; font-weight: 650; color: var(--inv-muted); }
+        .inv-readonlyValue {
+          font-size: 12.5px; padding: 7px 9px; border-radius: 8px; background: var(--inv-panel); border: 1px dashed var(--inv-border-strong);
+          color: var(--inv-text); min-height: 16px;
+        }
+
+        .inv-summaryRow {
+          display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px;
+          padding-top: 10px; border-top: 1px dashed var(--inv-border);
+        }
+        .inv-summaryItem { text-align: center; }
+        .inv-summaryItem span { display: block; font-size: 10px; color: var(--inv-muted); margin-bottom: 2px; }
+        .inv-summaryItem strong { font-size: 14px; font-weight: 750; }
+
+        .inv-statusRow { display: flex; align-items: center; gap: 10px; }
+
+        .inv-infoCallout {
+          display: flex; align-items: flex-start; gap: 8px; background: #eff6ff; border: 1px solid #bfdbfe; color: #1d4ed8;
+          border-radius: 10px; padding: 10px 12px; font-size: 11.5px; line-height: 1.5;
+        }
+        .inv-infoCallout svg { flex-shrink: 0; margin-top: 1px; }
+
+        .inv-impactBox { background: var(--inv-panel-subtle); border-radius: 10px; padding: 10px; }
+        .inv-impactTitle { display: flex; align-items: center; gap: 6px; font-weight: 700; color: var(--inv-warning); font-size: 12px; margin-bottom: 8px; }
+        .inv-impactGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; margin-bottom: 8px; }
+        .inv-impactGrid div { display: flex; justify-content: space-between; font-size: 11.5px; border-bottom: 1px dashed var(--inv-border); padding-bottom: 3px; }
+        .inv-impactGrid span { color: var(--inv-muted); }
+        .inv-impactNote { font-size: 11px; color: var(--inv-muted); margin: 0; }
+
+        /* Responsive */
+        @media (max-width: 1280px) {
+          .inv-workspace { grid-template-columns: minmax(250px, 285px) 1fr; }
+          .inv-inspectorPanel { grid-column: 1 / -1; }
+        }
+        @media (max-width: 960px) {
+          .inv-workspace { grid-template-columns: 1fr; }
+          .inv-inspectorPanel { grid-column: auto; }
+          .inv-buildingList { max-height: 260px; }
         }
-
-        .bp-emptyRoom {
-          border: 1px dashed #cbd5e1;
-          border-radius: 14px;
-          background: #f8fafc;
-        }
-
-        .bp-loadingBlock {
-          min-height: 260px;
-          grid-column: 1 / -1;
-        }
-
-        .bp-modalBackdrop {
-          position: fixed;
-          inset: 0;
-          z-index: 50;
-          background: rgba(15, 23, 42, 0.45);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 18px;
-        }
-
-        .bp-modal {
-          width: min(520px, 100%);
-          max-height: 82vh;
-          background: white;
-          border-radius: 20px;
-          border: 1px solid var(--bp-border);
-          box-shadow: 0 20px 60px rgba(15, 23, 42, 0.22);
-          overflow: hidden;
-          display: flex;
-          flex-direction: column;
-        }
-
-        .bp-modal.large {
-          width: min(760px, 100%);
-        }
-
-        .bp-modalHead {
-          padding: 14px 16px;
-          border-bottom: 1px solid var(--bp-border);
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-        }
-
-        .bp-modalHead strong {
-          font-size: 16px;
-          font-weight: 950;
-        }
-
-        .modalSearch {
-          margin: 12px;
-          min-height: 46px;
-          box-shadow: none;
-        }
-
-        .bp-modalList {
-          padding: 0 12px 12px;
-          overflow: auto;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        }
-
-        .bp-modalList.rooms {
-          max-height: 430px;
-        }
-
-        .bp-modalItem {
-          width: 100%;
-          border: 1px solid var(--bp-border);
-          background: #f8fafc;
-          border-radius: 14px;
-          padding: 10px;
-          cursor: pointer;
-          color: var(--bp-text);
-          text-align: start;
-        }
-
-        .bp-modalItem:hover {
-          border-color: #93c5fd;
-          background: #eff6ff;
-        }
-
-        .bp-modalItem.selected {
-          background: var(--bp-blue-soft);
-          border-color: #60a5fa;
-        }
-
-        .bp-modalItem.disabled {
-          opacity: 0.55;
-          cursor: not-allowed;
-        }
-
-        .bp-modalItem.room {
-          display: grid;
-          grid-template-columns: auto 1fr;
-        }
-
-        .bp-modalFooter {
-          padding: 12px 16px;
-          border-top: 1px solid var(--bp-border);
-          background: #f8fafc;
-          display: flex;
-          justify-content: flex-end;
-          gap: 10px;
-        }
-
-        @media (max-width: 1120px) {
-          .bp-toolbar {
-            grid-template-columns: 1fr;
-          }
-
-          .bp-statsGrid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-          }
-
-          .bp-layout {
-            grid-template-columns: 1fr;
-          }
-
-          .bp-list {
-            max-height: none;
-          }
-        }
-
         @media (max-width: 640px) {
-          .bp-page {
-            padding: 14px;
-          }
-
-          .bp-header {
-            flex-direction: column;
-            align-items: stretch;
-          }
-
-          .bp-statsGrid {
-            grid-template-columns: 1fr;
-          }
-
-          .bp-roomGrid {
-            grid-template-columns: 1fr;
-          }
-
-          .bp-workHead {
-            flex-direction: column;
-            align-items: stretch;
-          }
+          .inv-pageHeader { flex-direction: column; align-items: stretch; }
+          .inv-filterBar { flex-direction: column; align-items: stretch; }
+          .inv-filterField { min-width: 0; }
+          .inv-summaryStrip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .inv-dialog { max-width: calc(100vw - 24px); }
+          .inv-modalOverlay { padding: 12px; }
+          .inv-modal { width: calc(100vw - 24px); max-width: calc(100vw - 24px); max-height: calc(100vh - 24px); }
+          .inv-modalGrid { grid-template-columns: 1fr; }
         }
       `}</style>
     </div>

@@ -260,6 +260,7 @@ function AllocationPage({ language = 'he' }) {
   const [error, setError]         = useState(null);
   const [summary, setSummary]     = useState(null);
   const [inboxItem, setInboxItem] = useState(null);
+  const [showPopulationDetails, setShowPopulationDetails] = useState(false);
 
   // ── Run State ───────────────────────────────
   const [isRunning, setIsRunning]   = useState(false);
@@ -360,7 +361,7 @@ function AllocationPage({ language = 'he' }) {
         sameGender:        'אותו מגדר בדירה',
         sameGenderDesc:    'סטודנטים מוקצים לדירות מגדריות מתאימות',
         priorityFirst:     'סטודנטים בעדיפות קודמים',
-        priorityFirstDesc: 'קבוצת העדיפות הייעודית של הלשכה העליונה משובצת אך ורק לבניין 179; שאר סטודנטי העדיפות יכולים להישבץ בכל סוג מעונות ומקובצים יחד ככל האפשר',
+        priorityFirstDesc: 'סטודנטים אנייר זכאים בכפר הסמכה משובצים בעדיפות לבניין 179; כאשר אין בבניין 179 מיטה פנויה מתאימה, הם משובצים בבניין אחר בתוך כפר הסמכה. שאר סטודנטי העדיפות יכולים להישבץ בכל סוג מעונות ומקובצים יחד ככל האפשר',
         roommatePositiveOnly: '100% תשובות חיוביות לשותפים',
         roommatePositiveOnlyDesc: 'רק בקשות שותפים הדדיות מאושרות מלאות',
         ReligiousTogether: '100% התאמות דתיות',
@@ -421,6 +422,20 @@ function AllocationPage({ language = 'he' }) {
         transfers:       'העברות',
         leaving:         'עוזבים',
         priorityStudents:'עדיפות',
+        // Population summary (imported → excluded → sent to solver)
+        populationSummaryTitle: 'אוכלוסיית שיבוץ',
+        populationImported:  'נקלטו',
+        populationExcluded:  'הוחרגו',
+        populationSentToSolver: 'נשלחו לשיבוץ',
+        populationShowDetails: 'הצג פירוט',
+        populationHideDetails: 'הסתר פירוט',
+        populationExcludedAccessibility: 'נגישות — מיועדים לשיבוץ ידני',
+        populationExcludedLeaving: 'עוזבים — אינם משתתפים בשיבוץ',
+        populationExcludedOverlap: 'נמצאו בשתי הקבוצות',
+        populationExcludedTotalUnique: 'סה״כ ייחודי שהוחרג',
+        populationProcessed: 'עובדו',
+        populationAssignedWord: 'שובצו',
+        populationUnassignedWord: 'לא שובצו',
       },
       en: {
         title: 'Allocation ',
@@ -482,7 +497,7 @@ function AllocationPage({ language = 'he' }) {
         sameGender:        'Same gender in apartment',
         sameGenderDesc:    'Students are assigned to gender-appropriate apartments',
         priorityFirst:     'Priority students first',
-        priorityFirstDesc: 'The designated Upper Office priority group is assigned exclusively to building 179; other priority students may be placed across any dorm type and are grouped together where possible',
+        priorityFirstDesc: 'Eligible Hasmaha (כפר הסמכה) ANIR students are preferentially assigned to Building 179 first; when Building 179 has no compatible bed available, they are assigned to another building within the Hasmaha dorm type instead. Other priority students may be placed across any dorm type and are grouped together where possible',
         roommatePositiveOnly: '100% positive roommate matches',
         roommatePositiveOnlyDesc: 'Only confirmed mutual roommate requests are fulfilled',
         ReligiousTogether: '100% religious apartment matches',
@@ -543,6 +558,20 @@ function AllocationPage({ language = 'he' }) {
         transfers:       'Transfers',
         leaving:         'Leaving',
         priorityStudents:'Priority',
+        // Population summary (imported → excluded → sent to solver)
+        populationSummaryTitle: 'Allocation Population',
+        populationImported:  'imported',
+        populationExcluded:  'excluded',
+        populationSentToSolver: 'sent to allocation',
+        populationShowDetails: 'Show details',
+        populationHideDetails: 'Hide details',
+        populationExcludedAccessibility: 'accessibility — handled manually',
+        populationExcludedLeaving: 'leaving — do not take part in allocation',
+        populationExcludedOverlap: 'in both groups',
+        populationExcludedTotalUnique: 'total unique excluded',
+        populationProcessed: 'processed',
+        populationAssignedWord: 'assigned',
+        populationUnassignedWord: 'unassigned',
       },
     };
     return strings[language] || strings.en;
@@ -573,6 +602,26 @@ function AllocationPage({ language = 'he' }) {
     return s;
   }, []);
 
+  const safePopulationSummary = useCallback((raw) => {
+    if (!raw || typeof raw !== 'object') return null;
+    const hasAnyField = [
+      'imported_students', 'excluded_accessibility', 'excluded_leaving',
+      'excluded_overlap', 'excluded_total', 'sent_to_solver',
+    ].some((key) => raw[key] !== undefined);
+    if (!hasAnyField) return null;
+
+    return {
+      imported_students:      Number(raw.imported_students) || 0,
+      excluded_accessibility: Number(raw.excluded_accessibility) || 0,
+      excluded_leaving:       Number(raw.excluded_leaving) || 0,
+      excluded_overlap:       Number(raw.excluded_overlap) || 0,
+      excluded_total:         Number(raw.excluded_total) || 0,
+      sent_to_solver:         Number(raw.sent_to_solver) || 0,
+      assigned:   raw.assigned !== undefined ? Number(raw.assigned) || 0 : null,
+      unassigned: raw.unassigned !== undefined ? Number(raw.unassigned) || 0 : null,
+    };
+  }, []);
+
   const safeSummary = useCallback((raw) => {
     const data = unwrapResponse(raw);
     if (!data || typeof data !== 'object') throw new Error(t.malformedSummary);
@@ -585,6 +634,7 @@ function AllocationPage({ language = 'he' }) {
       priority_students:   Number(data.priority_students) || 0,
       total_capacity:      Number(data.total_capacity) || 0,
       occupancy_rate:      Number(data.occupancy_rate) || 0,
+      population_summary:  safePopulationSummary(data.population_summary),
       latest_inbox:        data.latest_inbox && typeof data.latest_inbox === 'object' ? data.latest_inbox : null,
       students_by_category: data.students_by_category && typeof data.students_by_category === 'object'
         ? {
@@ -612,7 +662,7 @@ function AllocationPage({ language = 'he' }) {
       region: data.region && typeof data.region === 'object' ? data.region : null,
       ...data,
     };
-  }, [t.malformedSummary, unwrapResponse]);
+  }, [t.malformedSummary, unwrapResponse, safePopulationSummary]);
 
   const safeInbox = useCallback((raw) => {
     const data = unwrapResponse(raw);
@@ -825,6 +875,7 @@ function AllocationPage({ language = 'he' }) {
             roommate_matches:       data.roommate_matches ?? runData?.roommate_matches ?? 0,
             conflicts:              data.conflicts ?? runData?.conflicts ?? 0,
             assignments:            data.assignments ?? [],
+            population_summary:     safePopulationSummary(data.population_summary),
             run:                    runData,
           });
           loadPage().catch(() => {});
@@ -849,7 +900,7 @@ function AllocationPage({ language = 'he' }) {
         console.warn('Polling error:', err);
       }
     }, 3000);
-  }, [stopPolling, loadPage, showToast, t.stoppedStatus, t.unknownError]);
+  }, [stopPolling, loadPage, showToast, t.stoppedStatus, t.unknownError, safePopulationSummary]);
 
   const recoverActiveRun = useCallback(
   async (regionId, currentSummary = null) => {
@@ -956,6 +1007,9 @@ function AllocationPage({ language = 'he' }) {
               assignments:
                 detail.assignments ?? [],
 
+              population_summary:
+                safePopulationSummary(detail.population_summary),
+
               run: detail.run,
             });
           }
@@ -983,7 +1037,7 @@ function AllocationPage({ language = 'he' }) {
       );
     }
   },
-  [startPolling]
+  [startPolling, safePopulationSummary]
 );
 
   const loadPageRef = useRef(loadPage);
@@ -1308,6 +1362,68 @@ showToast(
             )}
           </div>
         </div>
+
+        {/* ── 1b. Population Summary (compact) ── */}
+        {(() => {
+          const activePopulation =
+            (hasCurrentAllocation && result?.population_summary)
+              ? result.population_summary
+              : summary?.population_summary;
+          if (!activePopulation) return null;
+
+          const {
+            imported_students, excluded_accessibility, excluded_leaving,
+            excluded_overlap, excluded_total, sent_to_solver, assigned, unassigned,
+          } = activePopulation;
+
+          return (
+            <div className="ap-population-card">
+              <div className="ap-population-row">
+                <span className="ap-population-chip ap-population-chip-blue">
+                  {imported_students} {t.populationImported}
+                </span>
+                <span className="ap-population-arrow">→</span>
+                <span className="ap-population-chip ap-population-chip-amber">
+                  {excluded_total} {t.populationExcluded}
+                </span>
+                <span className="ap-population-arrow">→</span>
+                <span className="ap-population-chip ap-population-chip-green">
+                  {sent_to_solver} {t.populationSentToSolver}
+                </span>
+
+                {excluded_total > 0 && (
+                  <button
+                    type="button"
+                    className="ap-population-toggle"
+                    onClick={() => setShowPopulationDetails((prev) => !prev)}
+                    aria-expanded={showPopulationDetails}
+                  >
+                    {showPopulationDetails ? t.populationHideDetails : t.populationShowDetails}
+                  </button>
+                )}
+              </div>
+
+              {showPopulationDetails && excluded_total > 0 && (
+                <ul className="ap-population-details">
+                  <li>{excluded_accessibility} {t.populationExcludedAccessibility}</li>
+                  <li>{excluded_leaving} {t.populationExcludedLeaving}</li>
+                  {excluded_overlap > 0 && (
+                    <li>{excluded_overlap} {t.populationExcludedOverlap}</li>
+                  )}
+                  <li className="ap-population-details-total">
+                    {t.populationExcludedTotalUnique}: {excluded_total}
+                  </li>
+                </ul>
+              )}
+
+              {typeof assigned === 'number' && typeof unassigned === 'number' && (
+                <div className="ap-population-processed">
+                  {sent_to_solver} {t.populationProcessed} = {assigned} {t.populationAssignedWord} + {unassigned} {t.populationUnassignedWord}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* ── 2. Controls Bar ────────────────── */}
         <div className="ap-controls-bar">
@@ -1810,6 +1926,71 @@ const styles = `  /* ── Variables ──────────────
   @keyframes ap-dot-pulse {
     0%, 100% { opacity: 1; transform: scale(1); }
     50% { opacity: 0.5; transform: scale(0.85); }
+  }
+
+  /* ── Population Summary (compact) ─────────── */
+  .ap-population-card {
+    background: #fff;
+    border: 1px solid var(--ap-border);
+    border-radius: var(--ap-radius);
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .ap-population-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .ap-population-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12.5px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .ap-population-chip-blue  { background: var(--ap-blue-soft);  border: 1px solid var(--ap-blue-border);  color: var(--ap-blue); }
+  .ap-population-chip-amber { background: var(--ap-amber-soft); border: 1px solid var(--ap-amber-border); color: var(--ap-amber); }
+  .ap-population-chip-green { background: var(--ap-green-soft); border: 1px solid var(--ap-green-border); color: var(--ap-green); }
+  .ap-population-arrow {
+    color: var(--ap-text-2);
+    font-size: 13px;
+  }
+  .ap-population-toggle {
+    margin-inline-start: auto;
+    background: none;
+    border: none;
+    color: var(--ap-blue);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 2px 4px;
+  }
+  .ap-population-toggle:hover { text-decoration: underline; }
+  .ap-population-details {
+    margin: 0;
+    padding-inline-start: 18px;
+    font-size: 12.5px;
+    color: var(--ap-text-2);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .ap-population-details-total {
+    font-weight: 700;
+    color: var(--ap-text);
+    list-style: none;
+    margin-inline-start: -18px;
+    margin-top: 2px;
+  }
+  .ap-population-processed {
+    font-size: 12.5px;
+    color: var(--ap-text-2);
+    font-weight: 600;
   }
 
   /* ── Controls Bar ────────────────────────── */

@@ -12,6 +12,7 @@ router.register(r'dorm-types', views.DormTypeViewSet, basename='dorm-type')
 router.register(r'buildings', views.BuildingViewSet, basename='building')
 router.register(r'apartments', views.ApartmentViewSet, basename='apartment')
 router.register(r'rooms', views.RoomViewSet, basename='room')
+router.register(r'beds', views.BedViewSet, basename='bed')
 router.register(r'students', views.StudentViewSet, basename='student')
 router.register(r'transfers', views.TransferViewSet, basename='transfer')
 router.register(r'requests', views.StudentRequestViewSet, basename='student-request')
@@ -52,6 +53,11 @@ urlpatterns = [
     path('allocation/runs/<int:run_id>/', views.get_allocation_run_detail, name='allocation-run-detail'),
     path('allocation/runs/<int:run_id>/stop/', views.stop_allocation_run, name='allocation-run-stop'),
     path('allocation/runs/<int:run_id>/delete/', views.delete_allocation_run, name='allocation-run-delete'),
+    path(
+        'allocation/runs/<int:run_id>/retry-unassigned/',
+        views.retry_unassigned_allocation_run,
+        name='allocation-run-retry-unassigned',
+    ),
     path('analysis/', views.analysis_data, name='analysis'),
 
     # What-If Building Inactivation

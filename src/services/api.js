@@ -276,6 +276,18 @@ export const allocationAPI = {
     }
   },
 
+  retryUnassigned: async (runId, payload = {}) => {
+    try {
+      const { data } = await api.post(
+        `/api/allocation/runs/${runId}/retry-unassigned/`,
+        payload
+      );
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to retry unassigned students"));
+    }
+  },
+
   getActiveRun: async (regionId = null) => {
     try {
       const url = regionId
@@ -844,6 +856,107 @@ export const roomsAPI = {
       return data;
     } catch (err) {
       throw new Error(getErrorMessage(err, "Failed to load rooms"));
+    }
+  },
+};
+
+// Dormitory structure management (BuildingsPage): Building -> Apartment ->
+// Room -> Bed. Named distinctly from the pre-existing `inventoryAPI`
+// (housing-type inventory summary) above to avoid a name collision.
+// Every write goes through throwApiError so structured backend errors
+// ({field, code, message} for occupant-conflict / capacity / availability
+// rules) survive as err.fieldErrors instead of being flattened into a
+// single opaque string.
+export const dormInventoryAPI = {
+  getBuildings: async (params = {}) => {
+    try {
+      const { data } = await api.get("/api/buildings/", { params });
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to load buildings");
+    }
+  },
+  createBuilding: async (payload) => {
+    try {
+      const { data } = await api.post("/api/buildings/", payload);
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to create building");
+    }
+  },
+  updateBuilding: async (id, payload) => {
+    try {
+      const { data } = await api.patch(`/api/buildings/${id}/`, payload);
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to update building");
+    }
+  },
+
+  getApartments: async (params = {}) => {
+    try {
+      const { data } = await api.get("/api/apartments/", { params });
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to load apartments");
+    }
+  },
+  createApartment: async (payload) => {
+    try {
+      const { data } = await api.post("/api/apartments/", payload);
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to create apartment");
+    }
+  },
+  updateApartment: async (id, payload) => {
+    try {
+      const { data } = await api.patch(`/api/apartments/${id}/`, payload);
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to update apartment");
+    }
+  },
+
+  getRooms: async (params = {}) => {
+    try {
+      const { data } = await api.get("/api/rooms/", { params });
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to load rooms");
+    }
+  },
+  createRoom: async (payload) => {
+    try {
+      const { data } = await api.post("/api/rooms/", payload);
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to create room");
+    }
+  },
+  updateRoom: async (id, payload) => {
+    try {
+      const { data } = await api.patch(`/api/rooms/${id}/`, payload);
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to update room");
+    }
+  },
+
+  getBeds: async (params = {}) => {
+    try {
+      const { data } = await api.get("/api/beds/", { params });
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to load beds");
+    }
+  },
+  updateBed: async (id, payload) => {
+    try {
+      const { data } = await api.patch(`/api/beds/${id}/`, payload);
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to update bed");
     }
   },
 };
