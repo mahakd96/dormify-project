@@ -327,14 +327,6 @@ function AllocationPage({ language = 'he' }) {
         lastRun:           'הרצה אחרונה',
         neverRun:          'לא הורץ',
         students:          'סטודנטים',
-        reallocationTitle:
-  'סטודנטים הדורשים שיבוץ מחדש',
-
-reallocationHint:
-  'השיבוץ הנוכחי של סטודנטים אלה אינו תקף עוד בעקבות השבתת משאב דיור.',
-
-reallocationStudent:
-  'דורש/ת שיבוץ מחדש',
         // Progress
         progressTitle:     'הרצת שיבוץ בתהליך',
         processed:         'עובדו',
@@ -471,14 +463,6 @@ reallocationStudent:
         lastRun:           'Last Run',
         neverRun:          'Never run',
         students:          'Students',
-        reallocationTitle:
-  'Students Requiring Reallocation',
-
-reallocationHint:
-  'These students no longer have a valid placement because housing inventory was deactivated.',
-
-reallocationStudent:
-  'Requires reallocation',
         // Progress
         progressTitle:     'Allocation in Progress',
         processed:         'Processed',
@@ -651,17 +635,6 @@ reallocationStudent:
       total_capacity:      Number(data.total_capacity) || 0,
       occupancy_rate:      Number(data.occupancy_rate) || 0,
       population_summary:  safePopulationSummary(data.population_summary),
-      students_needing_reallocation_count:
-  Number(
-    data.students_needing_reallocation_count
-  ) || 0,
-
-students_needing_reallocation:
-  Array.isArray(
-    data.students_needing_reallocation
-  )
-    ? data.students_needing_reallocation
-    : [],
       latest_inbox:        data.latest_inbox && typeof data.latest_inbox === 'object' ? data.latest_inbox : null,
       students_by_category: data.students_by_category && typeof data.students_by_category === 'object'
         ? {
@@ -782,14 +755,8 @@ students_needing_reallocation:
   const hasCurrentAllocation =
     currentAssignedStudents > 0;
 
-  const studentsNeedingReallocation =
-  Number(
-    summary?.students_needing_reallocation_count
-  ) || 0;
-
-const hasStudents =
-  currentUnassignedStudents > 0 ||
-  studentsNeedingReallocation > 0;
+  const hasStudents =
+    currentUnassignedStudents > 0;
 
   const currentStatusKey = useMemo(() => {
     if (isRunning && isStopping) {
@@ -1457,49 +1424,6 @@ showToast(
             </div>
           );
         })()}
-        {summary?.students_needing_reallocation_count > 0 && (
-  <div className="ap-reallocation-alert">
-    <div className="ap-reallocation-header">
-      <AlertTriangle size={18} />
-
-      <div>
-        <div className="ap-reallocation-title">
-          {summary.students_needing_reallocation_count}{' '}
-          {t.reallocationTitle}
-        </div>
-
-        <div className="ap-reallocation-hint">
-          {t.reallocationHint}
-        </div>
-      </div>
-    </div>
-
-    <div className="ap-reallocation-list">
-      {summary.students_needing_reallocation.map(
-        (student) => (
-          <div
-            className="ap-reallocation-row"
-            key={student.student_db_id}
-          >
-            <div>
-              <strong>
-                {student.student_name}
-              </strong>
-
-              <span className="ap-reallocation-id">
-                {student.student_id}
-              </span>
-            </div>
-
-            <span className="ap-reallocation-reason">
-              {student.reason}
-            </span>
-          </div>
-        )
-      )}
-    </div>
-  </div>
-)}
 
         {/* ── 2. Controls Bar ────────────────── */}
         <div className="ap-controls-bar">
@@ -1538,17 +1462,22 @@ showToast(
           <div className="ap-controls-right">
             {/* View Results */}
             <button
-                className="ap-btn ap-btn-ghost"
-                onClick={handleViewResults}
+              className="ap-btn ap-btn-ghost"
+              onClick={handleViewResults}
+              disabled={
+  !hasCurrentAllocation ||
+  !result ||
+  runStatus !== 'completed'
+}
             >
-              <ExternalLink size={15}/>
+              <ExternalLink size={15} />
               {t.viewResults}
             </button>
 
             {/* Delete */}
             {showDelBtn && (
-                <button
-                    className="ap-btn ap-btn-ghost-danger"
+              <button
+                className="ap-btn ap-btn-ghost-danger"
                 onClick={requestDeleteResults}
                 disabled={isDeleting}
               >
@@ -2893,70 +2822,6 @@ const styles = `  /* ── Variables ──────────────
     from { transform: rotate(0deg); }
     to   { transform: rotate(360deg); }
   }
-  /* ── Reallocation Alert ─────────────────── */
-
-.ap-reallocation-alert {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 14px 16px;
-  border: 1px solid var(--ap-amber-border);
-  border-radius: var(--ap-radius);
-  background: var(--ap-amber-soft);
-}
-
-.ap-reallocation-header {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  color: var(--ap-amber);
-}
-
-.ap-reallocation-title {
-  font-size: 14px;
-  font-weight: 800;
-  color: var(--ap-text);
-}
-
-.ap-reallocation-hint {
-  margin-top: 3px;
-  font-size: 12px;
-  color: var(--ap-text-2);
-}
-
-.ap-reallocation-list {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-
-.ap-reallocation-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 9px 11px;
-  border: 1px solid var(--ap-amber-border);
-  border-radius: 9px;
-  background: #fff;
-}
-
-.ap-reallocation-row > div {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.ap-reallocation-id {
-  color: var(--ap-muted);
-  font-size: 11px;
-}
-
-.ap-reallocation-reason {
-  color: var(--ap-amber);
-  font-size: 12px;
-  font-weight: 700;
-}
 
   /* ── Responsive ──────────────────────────── */
   @media (max-width: 768px) {
