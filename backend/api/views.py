@@ -589,11 +589,6 @@ def assign_student_to_room(
             update_fields.append('updated_at')
         student.save(update_fields=update_fields)
 
-        _close_deactivation_requests_after_reallocation(
-            [student.id],
-            reviewed_by=assigned_by,
-        )
-
     return assignment
 
 def infer_movement_type(from_room: Room, to_room: Room):
@@ -3115,167 +3110,6 @@ def _exclude_non_solver_students(students_qs):
         accessibility_flag=True,
     )
 
-def _students_needing_reallocation_qs(region):
-    """
-    Students whose current placement became invalid because their
-    building, apartment, or room was deactivated.
-
-    Their old assignment is still stored for history until we actually
-    attempt reallocation.
-    """
-    queryset = _exclude_non_solver_students(
-        Student.objects.filter(
-            accepted_dorm_type__region=region,
-            assigned_room__isnull=False,
-        )
-    )
-
-    return queryset.filter(
-        Q(assigned_room__is_active=False)
-        | Q(assigned_room__apartment__is_active=False)
-        | Q(assigned_room__apartment__building__is_active=False)
-    ).select_related(
-        'accepted_dorm_type',
-        'accepted_dorm_type__region',
-        'assigned_room',
-        'assigned_room__apartment',
-        'assigned_room__apartment__building',
-    )
-
-
-def _reallocation_reason(student):
-    room = student.assigned_room
-
-    if not room:
-        return {
-            'reason_code': 'NO_CURRENT_ROOM',
-            'reason': 'לסטודנט אין שיבוץ פעיל תקין',
-        }
-
-    apartment = room.apartment
-    building = apartment.building
-
-    if not building.is_active:
-        return {
-            'reason_code': 'BUILDING_INACTIVE',
-            'reason': f'בניין {building.number} אינו פעיל עוד',
-            'building_id': building.id,
-            'building_number': building.number,
-            'apartment_id': apartment.id,
-            'apartment_number': apartment.number,
-            'room_id': room.id,
-            'room_name': room.name,
-        }
-
-    if not apartment.is_active:
-        return {
-            'reason_code': 'APARTMENT_INACTIVE',
-            'reason': (
-                f'דירה {apartment.number} בבניין '
-                f'{building.number} אינה פעילה עוד'
-            ),
-            'building_id': building.id,
-            'building_number': building.number,
-            'apartment_id': apartment.id,
-            'apartment_number': apartment.number,
-            'room_id': room.id,
-            'room_name': room.name,
-        }
-
-    if not room.is_active:
-        return {
-            'reason_code': 'ROOM_INACTIVE',
-            'reason': (
-                f'חדר {room.name}, דירה {apartment.number}, '
-                f'בניין {building.number} אינו פעיל עוד'
-            ),
-            'building_id': building.id,
-            'building_number': building.number,
-            'apartment_id': apartment.id,
-            'apartment_number': apartment.number,
-            'room_id': room.id,
-            'room_name': room.name,
-        }
-
-    return {
-        'reason_code': 'INVALID_ASSIGNMENT',
-        'reason': 'השיבוץ הנוכחי אינו תקף עוד',
-    }
-
-
-def _reallocation_students_payload(region):
-    students = list(_students_needing_reallocation_qs(region))
-
-    rows = []
-
-    for student in students:
-        reason_data = _reallocation_reason(student)
-
-        rows.append({
-            'student_db_id': student.id,
-            'student_id': student.student_id,
-            'student_name': student.full_name,
-            'gender': student.gender,
-            'housing_type': student.housing_type,
-            'housing_type_display': (
-                student.get_housing_type_display()
-                if student.housing_type
-                else ''
-            ),
-            'accepted_dorm_type': (
-                student.accepted_dorm_type.name
-                if student.accepted_dorm_type
-                else ''
-            ),
-            **reason_data,
-        })
-
-    return rows
-
-def _prepare_students_for_reallocation(student_ids):
-    """
-    End only assignments whose inventory is no longer active.
-
-    Historical BedAssignment rows are preserved; only their ACTIVE status
-    ends. Student.assigned_room is cleared so the solver can create a new
-    valid assignment.
-    """
-    if not student_ids:
-        return 0
-
-    invalid_assignments = BedAssignment.objects.filter(
-        student_id__in=student_ids,
-        status=BedAssignment.Status.ACTIVE,
-    ).filter(
-        Q(bed__room__is_active=False)
-        | Q(bed__room__apartment__is_active=False)
-        | Q(bed__room__apartment__building__is_active=False)
-    )
-
-    affected_student_ids = list(
-        invalid_assignments.values_list(
-            'student_id',
-            flat=True,
-        ).distinct()
-    )
-
-    if not affected_student_ids:
-        return 0
-
-    now = timezone.now()
-
-    invalid_assignments.update(
-        status=BedAssignment.Status.ENDED,
-        ended_at=now,
-    )
-
-    Student.objects.filter(
-        id__in=affected_student_ids
-    ).update(
-        assigned_room=None
-    )
-
-    return len(affected_student_ids)
 
 def _population_summary_for_region(region, *, sent_to_solver_student_ids=None):
     """
@@ -3320,21 +3154,10 @@ def _population_summary_for_region(region, *, sent_to_solver_student_ids=None):
     excluded_total = excluded_accessibility + excluded_leaving - excluded_overlap
 
     if sent_to_solver_student_ids is None:
-        reallocation_student_ids = list(
-            _students_needing_reallocation_qs(region)
-            .values_list('id', flat=True)
+        eligible_qs = _exclude_non_solver_students(population_qs).filter(
+            assigned_room__isnull=True,
         )
-
-        eligible_qs = _exclude_non_solver_students(
-            population_qs
-        ).filter(
-            Q(assigned_room__isnull=True)
-            | Q(id__in=reallocation_student_ids)
-        )
-
-        sent_to_solver_student_ids = list(
-            eligible_qs.values_list('id', flat=True)
-        )
+        sent_to_solver_student_ids = list(eligible_qs.values_list('id', flat=True))
     else:
         sent_to_solver_student_ids = list(sent_to_solver_student_ids)
 
@@ -3450,24 +3273,11 @@ def run_allocation(request):
         # You may pass {"include_assigned": true} only for debugging/rebuilding full allocations.
         include_assigned = request.data.get('include_assigned') is True
 
-        reallocation_student_ids = []
-
         if not include_assigned:
-            reallocation_student_ids = list(
-                _students_needing_reallocation_qs(region)
-                .values_list('id', flat=True)
-            )
-
             if 'assigned_bed' in student_fields:
-                students = students.filter(
-                    Q(assigned_bed__isnull=True)
-                    | Q(id__in=reallocation_student_ids)
-                )
+                students = students.filter(assigned_bed__isnull=True)
             elif 'assigned_room' in student_fields:
-                students = students.filter(
-                    Q(assigned_room__isnull=True)
-                    | Q(id__in=reallocation_student_ids)
-                )
+                students = students.filter(assigned_room__isnull=True)
 
         # Optional narrow scope if the frontend wants to allocate only new/transfer students.
         allocation_scope = request.data.get('allocation_scope')
@@ -3499,22 +3309,11 @@ def run_allocation(request):
         # active assignment in the region.
         run_student_ids = list(students.values_list('id', flat=True))
 
-        _prepare_students_for_reallocation(
-            reallocation_student_ids
-        )
-
         # Population summary: why students_count (sent to the solver) is
         # smaller than the region's full imported population — scoped to
         # this region/run only, never a global Student count.
         population_summary = _population_summary_for_region(
             region, sent_to_solver_student_ids=run_student_ids,
-        )
-        reallocation_students = (
-            _reallocation_students_payload(region)
-        )
-
-        students_needing_reallocation_count = len(
-            reallocation_students
         )
 
         print(
@@ -3566,11 +3365,6 @@ def run_allocation(request):
                     'anier_building_179_diagnostics': dict(EMPTY_ANIER_BUILDING_179_DIAGNOSTICS),
                     'population_summary': {**population_summary, 'assigned': 0, 'unassigned': 0},
                     'assignments': [],
-                    'students_needing_reallocation_count':
-                        students_needing_reallocation_count,
-
-                    'students_needing_reallocation':
-                        reallocation_students,
                     'run': AllocationRunSerializer(allocation_run).data
                 }
             }, status=status.HTTP_200_OK)
@@ -3598,11 +3392,6 @@ def run_allocation(request):
             rooms=rooms,
             constraints_config=constraints_config
         ) or {}
-
-        _close_deactivation_requests_after_reallocation(
-            run_student_ids,
-            reviewed_by=request.user,
-        )
 
         print(
             f">>> AFTER_SOLVER run_id={allocation_run.id} region={region.id} result_type={type(result).__name__}",
@@ -4142,25 +3931,11 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
             students_total_in_region = students_base.count()
             students = students_base
 
-            reallocation_student_ids = []
-
             if not include_assigned:
-                reallocation_student_ids = list(
-                    _students_needing_reallocation_qs(region)
-                    .values_list('id', flat=True)
-                )
-
                 if 'assigned_bed' in student_fields:
-                    students = students.filter(
-                        Q(assigned_bed__isnull=True)
-                        | Q(id__in=reallocation_student_ids)
-                    )
-
+                    students = students.filter(assigned_bed__isnull=True)
                 elif 'assigned_room' in student_fields:
-                    students = students.filter(
-                        Q(assigned_room__isnull=True)
-                        | Q(id__in=reallocation_student_ids)
-                    )
+                    students = students.filter(assigned_room__isnull=True)
 
             if allocation_scope == 'new_transfer_only' and 'category' in student_fields:
                 students = students.filter(
@@ -4186,9 +3961,6 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
             # unassigned request can trace exactly who this run considered
             # — not a re-derived, possibly-drifted approximation.
             run_student_ids = list(students.values_list('id', flat=True))
-            _prepare_students_for_reallocation(
-                reallocation_student_ids
-            )
             population_summary = _population_summary_for_region(
                 region, sent_to_solver_student_ids=run_student_ids,
             )
@@ -4236,21 +4008,6 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                 constraints_config=constraints_config,
                 allocation_run_id=allocation_run_id,
             ) or {}
-
-            run_user = AllocationRun.objects.filter(
-                pk=allocation_run_id
-            ).select_related(
-                'run_by'
-            ).first()
-
-            _close_deactivation_requests_after_reallocation(
-                run_student_ids,
-                reviewed_by=(
-                    run_user.run_by
-                    if run_user
-                    else None
-                ),
-            )
 
             # Persisted immediately (not held in process memory) so this
             # data survives a worker restart and is visible to any worker
@@ -4961,12 +4718,7 @@ def allocation_results(request):
     ).exclude(
         accessibility_flag=True
     ).filter(
-        Q(assigned_room__isnull=True)
-        | Q(assigned_room__is_active=False)
-        | Q(assigned_room__apartment__is_active=False)
-        | Q(
-            assigned_room__apartment__building__is_active=False
-        )
+        assigned_room__isnull=True
     )
 
     if region:
@@ -5012,14 +4764,6 @@ def allocation_results(request):
             for value in special_statuses
             if value not in (None, '')
         ]
-        reallocation_data = None
-
-        if student.assigned_room_id:
-            reallocation_data = _reallocation_reason(
-                student
-            )
-
-
 
         unassigned_students.append({
             'student_db_id': student.id,
@@ -5028,16 +4772,6 @@ def allocation_results(request):
                 student,
                 'business_partner_id',
                 '',
-            ),
-            'unassigned_reason': (
-                reallocation_data['reason']
-                if reallocation_data
-                else (
-                    'סטודנט אנייר זכאי לבניין 179...'
-                    if _is_hasmaha_anier_student(student)
-                    else
-                    'לא נמצא שיבוץ חוקי בתוצאת השיבוץ הנוכחית'
-                )
             ),
 
             'student_name': student.full_name,
@@ -5108,6 +4842,13 @@ def allocation_results(request):
             ),
 
             'special_statuses': special_statuses,
+            'unassigned_reason': (
+                'סטודנט אנייר זכאי לבניין 179 (כפר הסמכה) — לא נמצאה מיטה '
+                'מתאימה בבניין 179 או בבניין אחר בכפר הסמכה בתוצאת השיבוץ '
+                'הנוכחית.'
+                if _is_hasmaha_anier_student(student)
+                else 'לא נמצא שיבוץ חוקי בתוצאת השיבוץ הנוכחית'
+            ),
         })
 
     # ============================================================
@@ -5269,8 +5010,6 @@ def allocation_summary(request):
                 'priority_students': 0,
                 'total_capacity': 0,
                 'occupancy_rate': 0,
-                'students_needing_reallocation_count': 0,
-                'students_needing_reallocation': [],
                 'students_by_category': {
                     'new': 0,
                     'continuing': 0,
@@ -5345,12 +5084,6 @@ def allocation_summary(request):
     # diagnostics.population_summary (exposed via get_allocation_run_detail)
     # is the authoritative figure for that specific run.
     population_summary = _population_summary_for_region(region)
-
-    reallocation_students = _reallocation_students_payload(region)
-
-    students_needing_reallocation_count = len(
-        reallocation_students
-    )
 
     # Keep the summary's actionable counts aligned with run_allocation:
     # students who are leaving, or who are accessibility/disability cases
@@ -5541,8 +5274,6 @@ def allocation_summary(request):
         'region': RegionSerializer(region).data,
         'total_students': total_students,
         'unassigned_students': unassigned_students,
-        'students_needing_reallocation_count': students_needing_reallocation_count,
-        'students_needing_reallocation': reallocation_students,
         'assigned_students': assigned_students,
         'available_beds': available_beds,
         'priority_students': priority_students,
@@ -6878,10 +6609,6 @@ def _create_deactivation_transfer_request(assignment, reason, requested_by):
     if already_pending:
         return None
 
-    snapshot = _assignment_snapshot(student)
-
-    snapshot['workflow_trigger'] = 'inventory_deactivation'
-
     transfer_request = StudentRequest.objects.create(
         student=student,
         request_type=StudentRequest.RequestType.ROOM,
@@ -6890,180 +6617,12 @@ def _create_deactivation_transfer_request(assignment, reason, requested_by):
         requested_by=requested_by,
         transfer_scope=StudentRequest.TransferScope.SAME_REGION,
         source_region_id=_student_current_region_id(student),
-        current_assignment_snapshot=snapshot,
+        current_assignment_snapshot=_assignment_snapshot(student),
     )
     transfer_request.request_number = f"REQ-{transfer_request.id:06d}"
     transfer_request.save(update_fields=['request_number'])
     return transfer_request
 
-def _snapshot_points_to_inactive_inventory(snapshot):
-    snapshot = snapshot or {}
-
-    building_id = snapshot.get('building_id')
-    apartment_id = snapshot.get('apartment_id')
-    room_id = snapshot.get('room_id')
-
-    if building_id and Building.objects.filter(
-        pk=building_id,
-        is_active=False,
-    ).exists():
-        return True
-
-    if apartment_id and Apartment.objects.filter(
-        pk=apartment_id,
-        is_active=False,
-    ).exists():
-        return True
-
-    if room_id and Room.objects.filter(
-        pk=room_id,
-        is_active=False,
-    ).exists():
-        return True
-
-    return False
-
-
-def _close_deactivation_requests_after_reallocation(
-    student_ids,
-    reviewed_by=None,
-):
-    """
-    Close pending requests created by inventory deactivation once the
-    student has a valid active assignment again.
-
-    New requests are identified by workflow_trigger.
-    Older requests are supported by comparing the original assignment
-    snapshot with the student's new active assignment.
-    """
-    if not student_ids:
-        return 0
-
-    active_assignments = BedAssignment.objects.filter(
-        student_id__in=student_ids,
-        status=BedAssignment.Status.ACTIVE,
-        bed__room__is_active=True,
-        bed__room__apartment__is_active=True,
-        bed__room__apartment__building__is_active=True,
-    ).select_related(
-        'student',
-        'bed',
-        'bed__room',
-        'bed__room__apartment',
-        'bed__room__apartment__building',
-    )
-
-    assignment_by_student = {
-        assignment.student_id: assignment
-        for assignment in active_assignments
-    }
-
-    if not assignment_by_student:
-        return 0
-
-    pending_requests = StudentRequest.objects.filter(
-        student_id__in=assignment_by_student.keys(),
-        status=StudentRequest.Status.PENDING,
-        request_type__in=[
-            StudentRequest.RequestType.ROOM,
-            StudentRequest.RequestType.APARTMENT,
-        ],
-    ).order_by('created_at')
-
-    now = timezone.now()
-    closed_count = 0
-
-    for req in pending_requests:
-        snapshot = req.current_assignment_snapshot or {}
-        new_assignment = assignment_by_student.get(req.student_id)
-
-        if not new_assignment:
-            continue
-
-        # -----------------------------------------------------
-        # New requests:
-        # explicit marker saved when inventory was deactivated
-        # -----------------------------------------------------
-        is_deactivation_request = (
-            snapshot.get('workflow_trigger')
-            == 'inventory_deactivation'
-        )
-
-        # -----------------------------------------------------
-        # Old requests:
-        # they do not have workflow_trigger.
-        #
-        # If they contain the old BedAssignment id and the
-        # student now has a DIFFERENT active BedAssignment,
-        # a new allocation happened.
-        #
-        # This works even when the student was returned to
-        # exactly the same room/bed.
-        # -----------------------------------------------------
-        if not is_deactivation_request:
-            old_assignment_id = snapshot.get('assignment_id')
-
-            if old_assignment_id:
-                assignment_changed = (
-                    str(old_assignment_id)
-                    != str(new_assignment.id)
-                )
-
-                reason_text = str(req.reason or '').strip().lower()
-
-                deactivation_reason_markers = [
-                    'לא פעיל',
-                    'לא פעילה',
-                    'אינו פעיל',
-                    'אינה פעילה',
-                    'הושבת',
-                    'הושבתה',
-                    'השבתת',
-                    'תחזוקה',
-                    'שיפוץ',
-                    'תקלה',
-                    'סגירה',
-                    'inactive',
-                    'deactivated',
-                    'maintenance',
-                    'renovation',
-                ]
-
-                reason_looks_like_deactivation = any(
-                    marker in reason_text
-                    for marker in deactivation_reason_markers
-                )
-
-                if (
-                    assignment_changed
-                    and reason_looks_like_deactivation
-                ):
-                    is_deactivation_request = True
-
-        if not is_deactivation_request:
-            continue
-
-        # Student now has a valid active placement,
-        # therefore the deactivation request is resolved.
-        req.status = StudentRequest.Status.APPROVED
-        req.reviewed_at = now
-        req.final_assignment = new_assignment
-
-        update_fields = [
-            'status',
-            'reviewed_at',
-            'final_assignment',
-        ]
-
-        if reviewed_by is not None:
-            req.reviewed_by = reviewed_by
-            update_fields.append('reviewed_by')
-
-        req.save(update_fields=update_fields)
-
-        closed_count += 1
-
-    return closed_count
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
