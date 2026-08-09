@@ -5421,6 +5421,29 @@ def analysis_data(request):
 
     latest_run = runs_qs.select_related('run_by', 'region').order_by('-started_at').first()
 
+    # Minimal, hand-built representation for the Analysis dashboard's "recent
+    # allocation runs" freshness list - deliberately NOT the full
+    # AllocationRunSerializer. That serializer includes run_by/run_by_name
+    # (the identity of the staff member who triggered the run) and
+    # error_message (free-text internal diagnostics), neither of which the
+    # analytics UI displays or needs; exposing them here would hand every
+    # region-authorized viewer a staff member's name and internal error text
+    # for no analytical benefit. Only the fields the freshness panel actually
+    # renders are included. Sourced from the same region-scoped `runs_qs`
+    # already used for `latest_run` above - never a wider queryset.
+    recent_runs = [
+        {
+            'id': run.id,
+            'region': run.region_id,
+            'region_name': run.region.name if run.region else '',
+            'status': run.status,
+            'successful_assignments': run.successful_assignments,
+            'started_at': run.started_at,
+            'completed_at': run.completed_at,
+        }
+        for run in runs_qs.select_related('region').order_by('-started_at')[:5]
+    ]
+
     # Pending requests via the unified StudentRequest workflow (the page
     # actually used for review/approval today) - kept separate from the
     # legacy Transfer-based pending_transfers above, which predates it.
@@ -5552,6 +5575,11 @@ def analysis_data(request):
 
         return None
 
+    # Assigned student ids (region-scoped queryset already filtered above),
+    # reused here so the per-region breakdown below can split each region's
+    # total into "assigned" vs "waiting" without a second query per student.
+    assigned_student_ids = set(assignments_qs.values_list('student_id', flat=True))
+
     students_by_region_counts = {}
 
     for student in students_qs.select_related(
@@ -5574,18 +5602,108 @@ def analysis_data(request):
         if not region_name:
             continue
 
-        students_by_region_counts[region_name] = students_by_region_counts.get(region_name, 0) + 1
+        bucket = students_by_region_counts.setdefault(
+            region_name, {'count': 0, 'assigned': 0, 'waiting': 0}
+        )
+        bucket['count'] += 1
+        if student.id in assigned_student_ids:
+            bucket['assigned'] += 1
+        else:
+            bucket['waiting'] += 1
 
     students_by_region = [
         {
             'region': region_name,
-            'count': count,
+            'count': bucket['count'],
+            # Real per-region demand/allocation split, derived from the same
+            # active BedAssignment set used everywhere else on this page -
+            # powers the capacity-vs-demand and allocation-status-by-region
+            # views on the redesigned Analysis dashboard.
+            'assigned': bucket['assigned'],
+            'waiting': bucket['waiting'],
         }
-        for region_name, count in sorted(
+        for region_name, bucket in sorted(
             students_by_region_counts.items(),
             key=lambda item: item[0]
         )
     ]
+
+    # =========================
+    # Special requests - by type and by region
+    # Explicitly re-scoped to PENDING (not just inherited from requests_qs
+    # above) so this block stays correct even if that queryset's base
+    # filter changes later. Built from requests_qs, which already carries
+    # the region-scoping Q-filter for the current user (see above) - never
+    # a wider queryset, so no cross-region leakage.
+    # =========================
+    pending_requests_qs = requests_qs.filter(status=StudentRequest.Status.PENDING)
+
+    requests_by_type = list(
+        pending_requests_qs.values('request_type').annotate(count=Count('id')).order_by('-count')
+    )
+
+    # `requests_by_region` reports an ATTRIBUTED region per request, not a
+    # verified "operational region" - there is no single field on
+    # StudentRequest that always carries that. Attribution priority, from
+    # strongest to weakest evidence:
+    #
+    #   1. source_region - the student's region snapshot at request-creation
+    #      time. Populated ONLY for room/apartment requests (see
+    #      StudentRequestViewSet.perform_create). This is the same field
+    #      TransfersPage.js already surfaces to users as the request's
+    #      origin region ("source_region_name"), so it is the strongest,
+    #      already-trusted signal where it exists.
+    #   2. the student's current accepted_dorm_type.region - a verified,
+    #      real region tied to the actual student the request concerns.
+    #      Covers swap/remove/other request types with an existing student.
+    #   3. requested_by.region - the filing staff member's own region. This
+    #      is a best-effort proxy, NOT an independently verified
+    #      operational region: it is only reached for request types with no
+    #      existing Student row yet (add_student, where student_data is a
+    #      free-form JSON blob and target_room/target region are chosen
+    #      later, at approval time - see StudentRequest.target_room's own
+    #      docstring). It assumes the filer is acting on behalf of their own
+    #      region's office, which is the normal case but is not enforced by
+    #      any server-side constraint at creation time.
+    #
+    #   Deliberately never target_region/target_room - that is the
+    #   destination the request is asking to move TO, already shown
+    #   separately elsewhere (target_region_name), and would answer a
+    #   different question ("where do they want to go" vs "where is this
+    #   request attributed from").
+    #
+    #   A request for which none of the three resolve is skipped entirely,
+    #   never shown under a fabricated "unknown" bucket - same convention as
+    #   students_by_region above. It still counts toward `pending_requests`
+    #   and `requests_by_type`, just not toward this by-region breakdown.
+    requests_by_region_counts = {}
+    for req in pending_requests_qs.select_related(
+            'source_region',
+            'student__accepted_dorm_type__region',
+            'requested_by__region',
+    ):
+        attributed_region = None
+        if req.source_region:
+            attributed_region = req.source_region.name
+        elif req.student_id and req.student.accepted_dorm_type and req.student.accepted_dorm_type.region:
+            attributed_region = req.student.accepted_dorm_type.region.name
+        elif req.requested_by.region:
+            attributed_region = req.requested_by.region.name
+
+        if not attributed_region:
+            continue
+
+        requests_by_region_counts[attributed_region] = requests_by_region_counts.get(attributed_region, 0) + 1
+
+    requests_by_region = [
+        {'region': region_name, 'count': count}
+        for region_name, count in sorted(requests_by_region_counts.items(), key=lambda item: item[0])
+    ]
+
+    # requested_by is a required (non-nullable) FK, so req.requested_by is
+    # always present; only its .region can be None (e.g. a central admin
+    # with no region filed the request).
+    oldest_pending_request = pending_requests_qs.order_by('created_at').first()
 
     # =========================
     # Transfers distributions
@@ -5705,8 +5823,17 @@ def analysis_data(request):
         'transfers_by_status': transfers_by_status,
         'transfers_by_type': transfers_by_type,
 
+        'requests_by_type': requests_by_type,
+        'requests_by_region': requests_by_region,
+        'oldest_pending_request_created_at': (
+            oldest_pending_request.created_at if oldest_pending_request else None
+        ),
+
+        # latest_run keeps the full AllocationRunSerializer shape unchanged -
+        # backward compatible with existing consumers of this field.
         'latest_run': AllocationRunSerializer(latest_run).data if latest_run else None,
         'latest_batch': ImportBatchSerializer(latest_batch).data if latest_batch else None,
+        'recent_runs': recent_runs,
     }, status=status.HTTP_200_OK)
 
 # =========================
