@@ -1,0 +1,69 @@
+{
+  "description": "Soft Trade-off – roommateMatch weight 10 vs sameReligion weight 3",
+  "constraints_config": {
+    "sameGender": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "priorityFirst": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "roommatePositiveOnly": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 0
+    },
+    "ReligiousTogether": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "sameReligion": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 3
+    },
+    "roommateMatch": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 10
+    },
+    "sectorMatching": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 7
+    },
+    "avoidYearMix_1_with_3_4": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    },
+    "avoidAtudaimWithHasmaha": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    }
+  },
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL",
+      "FEASIBLE"
+    ]
+  },
+  "allocation_expectations": {
+    "unassigned_count": 0,
+    "minimum_mutual_roommate_matches": 3
+  }
+}

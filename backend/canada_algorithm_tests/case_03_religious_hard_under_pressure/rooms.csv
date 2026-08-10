@@ -1,0 +1,11 @@
+﻿room_code,apartment_code,capacity,is_active,bed_label
+F_A_R1,F_A,2,True,F_A_R1_B
+F_A_R2,F_A,2,True,F_A_R2_B
+F_B_R1,F_B,2,True,F_B_R1_B
+F_B_R2,F_B,2,True,F_B_R2_B
+F_C_R1,F_C,2,True,F_C_R1_B
+M1_R1,M1,2,True,M1_R1_B
+M1_R2,M1,2,True,M1_R2_B
+M2_R1,M2,2,True,M2_R1_B
+M2_R2,M2,2,True,M2_R2_B
+M2_R3,M2,2,True,M2_R3_B

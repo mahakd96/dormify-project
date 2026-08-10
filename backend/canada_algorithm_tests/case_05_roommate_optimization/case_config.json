@@ -1,0 +1,87 @@
+{
+  "description": "Roommate Optimization – four feasible mutual roommate pairs",
+  "constraints_config": {
+    "sameGender": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "priorityFirst": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "roommatePositiveOnly": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 0
+    },
+    "ReligiousTogether": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "sameReligion": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "roommateMatch": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 8
+    },
+    "sectorMatching": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 7
+    },
+    "avoidYearMix_1_with_3_4": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    },
+    "avoidAtudaimWithHasmaha": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    }
+  },
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL",
+      "FEASIBLE"
+    ]
+  },
+  "allocation_expectations": {
+    "unassigned_count": 0,
+    "minimum_mutual_roommate_matches": 4,
+    "must_share_apartment": [
+      [
+        "F01",
+        "F02"
+      ],
+      [
+        "F03",
+        "F04"
+      ],
+      [
+        "M01",
+        "M02"
+      ],
+      [
+        "M03",
+        "M04"
+      ]
+    ]
+  }
+}
