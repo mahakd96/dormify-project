@@ -1,0 +1,99 @@
+Found 5 test(s).
+Creating test database for alias 'default' ('test_dormify_test')...
+Operations to perform:
+  Synchronize unmigrated apps: accounts, corsheaders, messages, rest_framework, rest_framework_simplejwt, staticfiles
+  Apply all migrations: admin, api, auth, contenttypes, sessions
+Synchronizing apps without migrations:
+  Creating tables...
+    Running deferred SQL...
+Running migrations:
+  Applying contenttypes.0001_initial... OK
+  Applying contenttypes.0002_remove_content_type_name... OK
+  Applying auth.0001_initial... OK
+  Applying auth.0002_alter_permission_name_max_length... OK
+  Applying auth.0003_alter_user_email_max_length... OK
+  Applying auth.0004_alter_user_username_opts... OK
+  Applying auth.0005_alter_user_last_login_null... OK
+  Applying auth.0006_require_contenttypes_0002... OK
+  Applying auth.0007_alter_validators_add_error_messages... OK
+  Applying auth.0008_alter_user_username_max_length... OK
+  Applying auth.0009_alter_user_last_name_max_length... OK
+  Applying auth.0010_alter_group_name_max_length... OK
+  Applying auth.0011_update_proxy_permissions... OK
+  Applying auth.0012_alter_user_first_name_max_length... OK
+  Applying api.0001_initial... OK
+  Applying admin.0001_initial... OK
+  Applying admin.0002_logentry_remove_auto_add... OK
+  Applying admin.0003_logentry_add_action_flag_choices... OK
+  Applying api.0002_student_placement_sector_and_more... OK
+  Applying api.0003_studentrequest... OK
+  Applying api.0004_studentrequest_other_description_and_more... OK
+  Applying api.0005_studentrequest_removal_notes_and_more... OK
+  Applying api.0006_studentrequest_student_data_and_more... OK
+  Applying api.0007_studentrequest_priority_and_more... OK
+  Applying api.0003_alter_room_options_room_building... OK
+  Applying api.0004_alter_building_options_alter_room_options_and_more... OK
+  Applying api.0005_alter_student_gender... OK
+  Applying api.0008_merge_20260628_2306... OK
+  Applying api.0005_allocationrun_lifecycle_bedassignment_run_fk... OK
+  Applying api.0009_merge_20260629_1738... OK
+  Applying api.0010_student_accessibility_flag_and_more... OK
+  Applying api.0011_building_gender_restriction... OK
+  Applying api.0010_studentrequest_current_assignment_snapshot_and_more... OK
+  Applying api.0012_merge_20260714_2148... OK
+  Applying api.0013_allocationrun_diagnostics... OK
+  Applying api.0014_assistedallocationaudit... OK
+  Applying sessions.0001_initial... OK
+System check identified no issues (0 silenced).
+test_is_occupied_matches_expected_values (api.performance_tests.test_beds_performance.BedOccupancyCorrectnessTests.test_is_occupied_matches_expected_values)
+Hand-computed expected values: ... ok
+test_is_occupied_matches_original_unannotated_property (api.performance_tests.test_beds_performance.BedOccupancyCorrectnessTests.test_is_occupied_matches_original_unannotated_property)
+Ground-truth cross-check: recompute is_occupied with the exact ... ok
+test_unannotated_bed_falls_back_correctly (api.performance_tests.test_beds_performance.BedOccupancyCorrectnessTests.test_unannotated_bed_falls_back_correctly)
+BedViewSet only supports get/patch/head/options (no create), so ... ok
+test_beds_list_query_count_is_flat_after_optimization (api.performance_tests.test_beds_performance.BedsListPerformanceTests.test_beds_list_query_count_is_flat_after_optimization)
+Core regression check: GET /api/beds/ must issue essentially the ... --- SMALL DATASET (N=10, post-optimization): n_beds=10 (occupied=5) ---
+endpoint: GET /api/beds/?room=4
+user role: central_admin
+beds_returned: 10
+total_sql_queries: 1
+distinct_query_shapes: 1
+server_side_request_time_ms: 5.71
+response_payload_bytes: 1137
+repeated_query_shapes (occurrence_count x shape, numbers masked as #):
+
+--- LARGE DATASET (N=50, post-optimization): n_beds=50 (occupied=25) ---
+endpoint: GET /api/beds/?room=5
+user role: central_admin
+beds_returned: 50
+total_sql_queries: 1
+distinct_query_shapes: 1
+server_side_request_time_ms: 10.59
+response_payload_bytes: 5717
+repeated_query_shapes (occurrence_count x shape, numbers masked as #):
+
+--- SCALING SUMMARY (post-optimization) ---
+small: n=10 total_queries=1 queries/bed=0.10 time_ms=5.71 bytes=1137
+large: n=50 total_queries=1 queries/bed=0.02 time_ms=10.59 bytes=5717
+marginal_queries_per_additional_bed: 0.00
+BLD-04 baseline marginal cost (pre-fix): 1.00 queries/bed
+
+ok
+test_beds_list_single_bed_baseline_overhead (api.performance_tests.test_beds_performance.BedsListPerformanceTests.test_beds_list_single_bed_baseline_overhead)
+Secondary measurement: the N=1 case isolates the fixed per-request ... --- SINGLE BED (N=1, post-optimization): n_beds=1 (occupied=0) ---
+endpoint: GET /api/beds/?room=6
+user role: central_admin
+beds_returned: 1
+total_sql_queries: 1
+distinct_query_shapes: 1
+server_side_request_time_ms: 7.32
+response_payload_bytes: 115
+repeated_query_shapes (occurrence_count x shape, numbers masked as #):
+
+ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 2.662s
+
+OK
+Destroying test database for alias 'default' ('test_dormify_test')...
