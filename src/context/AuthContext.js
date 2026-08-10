@@ -34,6 +34,9 @@ const PERMISSIONS = Object.freeze({
 
   RUN_ALLOCATION_ANY: "RUN_ALLOCATION_ANY",
   RUN_ALLOCATION_OWN_REGION: "RUN_ALLOCATION_OWN_REGION",
+
+  ASSIST_ALLOCATION_ANY: "ASSIST_ALLOCATION_ANY",
+  ASSIST_ALLOCATION_OWN_REGION: "ASSIST_ALLOCATION_OWN_REGION",
 });
 
 const ROLE_PERMISSIONS = Object.freeze({
@@ -46,6 +49,7 @@ const ROLE_PERMISSIONS = Object.freeze({
     PERMISSIONS.UPLOAD_EXCEL,
     PERMISSIONS.ASSIGN_PRIORITY,
     PERMISSIONS.RUN_ALLOCATION_ANY,
+    PERMISSIONS.ASSIST_ALLOCATION_ANY,
   ],
 
   region_boss: [
@@ -54,11 +58,13 @@ const ROLE_PERMISSIONS = Object.freeze({
     PERMISSIONS.APPROVE_WITHIN_REGION_TRANSFERS,
     PERMISSIONS.MANAGE_USERS_OWN_REGION,
     PERMISSIONS.RUN_ALLOCATION_OWN_REGION,
+    PERMISSIONS.ASSIST_ALLOCATION_OWN_REGION,
   ],
 
   employee: [
     PERMISSIONS.VIEW_OWN_REGION_ONLY,
     PERMISSIONS.EDIT_OWN_REGION,
+    PERMISSIONS.ASSIST_ALLOCATION_OWN_REGION,
   ],
 });
 
@@ -406,6 +412,13 @@ export const AuthProvider = ({ children }) => {
   const canUploadExcel = useCallback(() => isCentralAdmin(), [isCentralAdmin]);
   const canAssignPriority = useCallback(() => isCentralAdmin(), [isCentralAdmin]);
 
+  const canAssistAllocation = useCallback(() => {
+    if (!user) return false;
+    if (hasPermission(PERMISSIONS.ASSIST_ALLOCATION_ANY)) return true;
+    if (hasPermission(PERMISSIONS.ASSIST_ALLOCATION_OWN_REGION)) return true;
+    return false;
+  }, [user, hasPermission]);
+
   const value = {
     user,
     loading,
@@ -445,6 +458,7 @@ export const AuthProvider = ({ children }) => {
 
     canUploadExcel,
     canAssignPriority,
+    canAssistAllocation,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

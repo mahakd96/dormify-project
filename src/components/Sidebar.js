@@ -30,8 +30,8 @@ function Sidebar({ collapsed, onToggle, language }) {
 
   // ✅ safe wrappers (never crash)
   const canUploadExcel = typeof auth?.canUploadExcel === 'function' ? auth.canUploadExcel : () => false;
-  const canAssignPriority =
-    typeof auth?.canAssignPriority === 'function' ? auth.canAssignPriority : () => false;
+  const canAssistAllocation =
+    typeof auth?.canAssistAllocation === 'function' ? auth.canAssistAllocation : () => false;
 
   // ✅ FIX: your AuthContext provides canManageUsers() now (alias)
   const canManageUsers = typeof auth?.canManageUsers === 'function' ? auth.canManageUsers : () => false;
@@ -73,7 +73,7 @@ function Sidebar({ collapsed, onToggle, language }) {
       items: [
         { path: '/upload', icon: Upload, label: language === 'he' ? 'העלאת קובץ' : 'Upload File', show: canUploadExcel() },
         { path: '/students', icon: Users, label: language === 'he' ? 'סטודנטים' : 'Students', show: true },
-        { path: '/priority', icon: Star, label: language === 'he' ? 'סטודנטים עם בקשות מיוחדות' : 'Students with Special Requests', show: canAssignPriority() },
+        { path: '/assisted-allocation', icon: Star, label: language === 'he' ? 'שיבוץ מסייע' : 'Assisted Allocation', show: canAssistAllocation() },
       ],
     },
     {
