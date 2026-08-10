@@ -895,13 +895,17 @@ const DetailPane = ({ request, onApprove, onReject, acting, language,
               {request.student_phone && <span>· {request.student_phone}</span>}
             </div>
           </div>
-          <div className={`dp-type-tag dp-type-${typeCfg.color}`}><TypeIcon size={12}/> {language==='he'?typeCfg.labelHe:typeCfg.labelEn}</div>
+<div className={`dp-type-tag dp-type-${typeCfg.color}`}>
+  <TypeIcon size={12}/>
+  <span className="dp-type-label">סוג הבקשה:</span>
+  <span>{language === 'he' ? typeCfg.labelHe : typeCfg.labelEn}</span>
+</div>
         </div>
       </div>
 
       {/* Body */}
       <div className="dp-body">
-        {/* Timeline */}
+      {/* Timeline */}
         <section>
           <div className="sec-title">מסלול הבקשה</div>
           <Timeline events={tl}/>
@@ -1069,7 +1073,7 @@ export default function TransfersPage({ language = 'he' }) {
   const bedsAbortRef = useRef(null);
 
   // ── Draggable splitter ──
-  const [listWidth, setListWidth] = useState(360);
+  const [listWidth, setListWidth] = useState(430);
   const dragging = useRef(false);
   const dragStart = useRef(0);
   const widthStart = useRef(0);
@@ -1101,20 +1105,45 @@ export default function TransfersPage({ language = 'he' }) {
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
   }, []); // eslint-disable-line
 
-  useEffect(() => { loadRequests(); }, [tab, regionFilter]); // eslint-disable-line
-
+useEffect(() => {
+  loadRequests();
+}, [regionFilter]); // eslint-disable-line
   const loadRequests = async () => {
-    setLoading(true); setPageError('');
-    try {
-      const params = tab === 'all' ? {} : { status: tab };
-      if (isCentralAdmin() && regionFilter !== 'all') params.region = regionFilter;
-      const d = await requestsAPI.getAll(params);
-      const list = Array.isArray(d) ? d : (d.results || []);
-      setRequests(list);
-      if (selected) { const upd = list.find(r => r.id === selected.id); if (upd) setSelected(upd); }
-    } catch (err) { setPageError(err.message || 'שגיאה בטעינה'); }
-    finally { setLoading(false); }
-  };
+  setLoading(true);
+  setPageError('');
+
+  try {
+    const params = {};
+
+    // מנהל מרכזי עדיין יכול לסנן לפי אזור
+    if (isCentralAdmin() && regionFilter !== 'all') {
+      params.region = regionFilter;
+    }
+
+    // תמיד מביאים את כל הסטטוסים.
+    // הסינון לפי הכל / ממתינות / אושרו / נדחו נעשה ב-Frontend.
+    const d = await requestsAPI.getAll(params);
+
+    const list = Array.isArray(d)
+      ? d
+      : (d.results || []);
+
+    setRequests(list);
+
+    if (selected) {
+      const upd = list.find(r => r.id === selected.id);
+
+      if (upd) {
+        setSelected(upd);
+      }
+    }
+
+  } catch (err) {
+    setPageError(err.message || 'שגיאה בטעינה');
+  } finally {
+    setLoading(false);
+  }
+};
 
   const counts = useMemo(() => ({
     all:           requests.length,
@@ -1226,19 +1255,17 @@ export default function TransfersPage({ language = 'he' }) {
     { key:'pending',       label:'ממתינות', Icon:Clock,       color:'amber' },
     { key:'approved',      label:'אושרו',   Icon:CheckCircle, color:'green' },
     { key:'rejected',      label:'נדחו',    Icon:XCircle,     color:'rose'  },
-    { key:'add_student',   label:'הוספות',  Icon:UserPlus,    color:'blue'  },
-    { key:'remove_student',label:'הסרות',   Icon:UserMinus,   color:'rose'  },
-    { key:'transfers',     label:'העברות',  Icon:Home,        color:'violet'},
   ];
 
   const typeFilters = [
-    { v:'all',           l:'הכל'           },
-    { v:'add_student',   l:'הוספות'        },
-    { v:'remove_student',l:'הסרות'         },
-    { v:'room',          l:'שינוי חדר'     },
-    { v:'apartment',     l:'מעבר מדירה'    },
-    { v:'other',         l:'אחר'           },
-  ];
+  { v:'all',            l:'כל סוגי הבקשות' },
+  { v:'add_student',    l:'הוספת סטודנט'    },
+  { v:'remove_student', l:'הסרה ממעונות'    },
+  { v:'room',           l:'שינוי חדר'       },
+  { v:'apartment',      l:'מעבר דירה / אזור'},
+  { v:'swap',           l:'חילוף סטודנטים'  },
+  { v:'other',          l:'בקשה אחרת'       },
+];
 
   return (
     <div className="tp-root" dir="rtl">
@@ -1246,8 +1273,10 @@ export default function TransfersPage({ language = 'he' }) {
       {/* Top bar */}
       <div className="tp-top">
         <div className="tp-title-row">
-          <h1>בקשות</h1>
-          <span className="tp-sub">ניהול בקשות סטודנטים</span>
+          <div>
+            <h1>בקשות מעבר</h1>
+            <span className="tp-sub">ניהול ואישור בקשות שינוי מגורים של סטודנטים</span>
+          </div>
         </div>
         <div className="tp-top-actions">
           <button className="btn-refresh" onClick={loadRequests} disabled={loading}>
@@ -1262,16 +1291,16 @@ export default function TransfersPage({ language = 'he' }) {
       {/* Stats — full width */}
       <div className="stats-row">
         {statCards.map(sc => (
-          <StatCard key={sc.key}
-            label={sc.label} value={counts[sc.key] ?? 0}
+            <StatCard key={sc.key}
+                      label={sc.label} value={counts[sc.key] ?? 0}
             icon={sc.Icon} color={sc.color}
             active={tab === sc.key || (sc.key === 'all' && tab === 'all' && typeFilter === 'all')}
             onClick={() => {
-              if (['pending','approved','rejected'].includes(sc.key)) { setTab(sc.key); setTypeFilter('all'); }
-              else if (sc.key === 'all') { setTab('all'); setTypeFilter('all'); }
-              else if (sc.key === 'transfers') { setTab('all'); setTypeFilter('room'); }
-              else { setTab('all'); setTypeFilter(sc.key); }
-            }}
+  setTab(sc.key);
+  setTypeFilter('all');
+    setSelected(null);
+
+}}
           />
         ))}
       </div>
@@ -1290,35 +1319,77 @@ export default function TransfersPage({ language = 'he' }) {
               {searchQ && <button onClick={()=>setSearchQ('')}><X size={10}/></button>}
             </div>
             <div className="status-tabs">
-              {[{v:'all',l:'הכל'},{v:'pending',l:'ממתינות'},{v:'approved',l:'אושרו'},{v:'rejected',l:'נדחו'}].map(t=>(
-                <button key={t.v} className={`stab${tab===t.v?' stab-active':''}`} onClick={()=>setTab(t.v)}>{t.l}</button>
+              {[{v:'all',l:'הכל'},{v:'pending',l:'ממתינות'},{v:'approved',l:'אושרו'},{v:'rejected',l:'נדחו'}].map(t=> (
+                  <button
+                      key={t.v}
+                      className={`stab${tab === t.v ? ' stab-active' : ''}`}
+                      onClick={() => {
+                        setTab(t.v);
+                        setSelected(null);
+                      }}
+                  >
+                    {t.l}
+                  </button>
               ))}
             </div>
-            <div className="type-chips">
-              {typeFilters.map(tf=>(
-                <button key={tf.v} className={`type-chip${typeFilter===tf.v?' tc-active':''}`}
-                  onClick={()=>setTypeFilter(tf.v)}>{tf.l}</button>
-              ))}
+            <div className="filter-row">
+              <span className="filter-label">סוג בקשה</span>
+
+              <select
+                  className="type-select"
+                  value={typeFilter}
+onChange={(e) => {
+  setTypeFilter(e.target.value);
+  setSelected(null);
+}}              >
+                {typeFilters.map(tf => (
+                    <option key={tf.v} value={tf.v}>
+                      {tf.l}
+                    </option>
+                ))}
+              </select>
             </div>
             {isCentralAdmin() && (
-              <select
-                className="region-select"
-                value={regionFilter}
-                onChange={(e)=>setRegionFilter(e.target.value)}
-                title="סינון לפי אזור"
-              >
-                <option value="all">כל האזורים</option>
-                {regions.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-              </select>
-            )}
+  <div className="filter-row">
+    <span className="filter-label">אזור</span>
+
+    <select
+      className="region-select"
+      value={regionFilter}
+      onChange={(e) => setRegionFilter(e.target.value)}
+      title="סינון לפי אזור"
+    >
+      <option value="all">כל האזורים</option>
+      {regions.map(r => (
+        <option key={r.id} value={r.id}>
+          {r.name}
+        </option>
+      ))}
+    </select>
+  </div>
+)}
             <div className="lt-count">{visible.length} בקשות</div>
           </div>
 
           <div className="rq-list">
             {loading && !requests.length && <div className="list-loading"><Spinner/> טוען...</div>}
             {!loading && visible.length === 0 && (
-              <EmptyPane icon={Inbox} title="אין בקשות" sub="נסה לשנות פילטרים" action="+ בקשה חדשה" onAction={()=>setShowModal(true)}/>
-            )}
+  requests.length === 0
+    ? (
+      <EmptyPane
+        icon={Inbox}
+        title="אין בקשות מעבר כרגע"
+        sub="בקשות חדשות שייווצרו יופיעו כאן"
+      />
+    )
+    : (
+      <EmptyPane
+        icon={Search}
+        title="לא נמצאו בקשות"
+        sub="נסי לשנות את החיפוש או את הסינונים"
+      />
+    )
+)}
             {visible.map(r => (
               <ListItem key={r.id} request={r} selected={selected?.id===r.id}
                 onClick={()=>handleSelect(r)} language={language}/>
@@ -1335,46 +1406,62 @@ export default function TransfersPage({ language = 'he' }) {
         <div className="detail-outer">
           {!selected
             ? (
-              <div className="empty-detail-state">
-                <div className="eds-inner">
-                  <div className="eds-icon">
-                    <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
-                      <rect width="48" height="48" rx="14" fill="var(--blue-bg)"/>
-                      <rect x="12" y="14" width="24" height="3" rx="1.5" fill="var(--blue)"/>
-                      <rect x="12" y="21" width="18" height="3" rx="1.5" fill="var(--blue-bdr)"/>
-                      <rect x="12" y="28" width="20" height="3" rx="1.5" fill="var(--blue-bdr)"/>
-                      <circle cx="36" cy="34" r="7" fill="var(--blue)" opacity=".12"/>
-                      <path d="M33.5 34h5M36 31.5v5" stroke="var(--blue)" strokeWidth="1.8" strokeLinecap="round"/>
-                    </svg>
+                  <div className="empty-detail-state">
+                    <div className="eds-inner">
+
+                      <div className="eds-icon">
+                        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                          <rect width="48" height="48" rx="14" fill="var(--blue-bg)"/>
+                          <rect x="12" y="14" width="24" height="3" rx="1.5" fill="var(--blue)"/>
+                          <rect x="12" y="21" width="18" height="3" rx="1.5" fill="var(--blue-bdr)"/>
+                          <rect x="12" y="28" width="20" height="3" rx="1.5" fill="var(--blue-bdr)"/>
+                          <circle cx="36" cy="34" r="7" fill="var(--blue)" opacity=".12"/>
+                          <path
+                              d="M33.5 34h5M36 31.5v5"
+                              stroke="var(--blue)"
+                              strokeWidth="1.8"
+                              strokeLinecap="round"
+                          />
+                        </svg>
+                      </div>
+
+                      {requests.length === 0 ? (
+                          <>
+                            <h3 className="eds-title">אין בקשות להצגה</h3>
+                            <p className="eds-sub">
+                              כאשר תיווצר בקשת מעבר חדשה, פרטיה יוצגו כאן.
+                            </p>
+                          </>
+                      ) : (
+                          <>
+                            <h3 className="eds-title">בחרי בקשה מהרשימה</h3>
+                            <p className="eds-sub">
+                              בחרי בקשה כדי לצפות בפרטים, בשיבוץ הנוכחי ובפעולות הזמינות.
+                            </p>
+                          </>
+                      )}
+
+                    </div>
                   </div>
-                  <h3 className="eds-title">אין בקשה נבחרת</h3>
-                  <p className="eds-sub">בחר בקשה מהרשימה כדי לצפות בפרטיה ולנקוט פעולה</p>
-                  <div className="eds-hints">
-                    <div className="eds-hint"><span className="eds-key">⏎</span>פתח בקשה</div>
-                    <div className="eds-hint"><span className="eds-key">↑↓</span>ניווט</div>
-                    <div className="eds-hint"><span className="eds-key">N</span>בקשה חדשה</div>
-                  </div>
-                </div>
-              </div>
-            )
-            : <DetailPane
-                request={selected} language={language}
-                acting={actionId===selected.id}
-                onApprove={doApprove} onReject={doReject}
-                feasData={feasData[selected.id]}
-                checkingFeas={checkingFeas===selected.id}
-                onCheckFeas={checkFeasibility}
-                onLoadMoreFeas={()=>loadMoreFeasibility(selected.id)}
-                loadingMoreFeas={loadingMoreFeasId===selected.id}
-                loadMoreFeasError={loadMoreFeasErr[selected.id]||''}
-                rawBedOptions={bedOptions[selected.id]}
-                loadingBeds={loadingBeds===selected.id}
-                bedsError={bedsError[selected.id]}
-                onLoadMoreBedOptions={()=>loadMoreBedOptions(selected.id)}
-                loadingMoreBeds={loadingMoreBedsId===selected.id}
-                loadMoreBedsError={loadMoreBedsErr[selected.id]||''}
-                roomId={selRoom[selected.id]}
-                onSetRoom={rid=>setSelRoom(p=>({...p,[selected.id]:rid}))}
+              )
+              : <DetailPane
+                  request={selected} language={language}
+                  acting={actionId === selected.id}
+                  onApprove={doApprove} onReject={doReject}
+                  feasData={feasData[selected.id]}
+                  checkingFeas={checkingFeas === selected.id}
+                  onCheckFeas={checkFeasibility}
+                  onLoadMoreFeas={() => loadMoreFeasibility(selected.id)}
+                  loadingMoreFeas={loadingMoreFeasId === selected.id}
+                  loadMoreFeasError={loadMoreFeasErr[selected.id] || ''}
+                  rawBedOptions={bedOptions[selected.id]}
+                  loadingBeds={loadingBeds === selected.id}
+                  bedsError={bedsError[selected.id]}
+                  onLoadMoreBedOptions={() => loadMoreBedOptions(selected.id)}
+                  loadingMoreBeds={loadingMoreBedsId === selected.id}
+                  loadMoreBedsError={loadMoreBedsErr[selected.id] || ''}
+                  roomId={selRoom[selected.id]}
+                  onSetRoom={rid => setSelRoom(p => ({...p, [selected.id]: rid}))}
                 selFeasOpt={selFeasOpt[selected.id]}
                 onSelFeasOpt={opt=>setSelFeasOpt(p=>({...p,[selected.id]:opt}))}
               />
@@ -1490,10 +1577,16 @@ export default function TransfersPage({ language = 'he' }) {
           gap: 12px;
         }
         .tp-title-row {
-          display: flex;
-          align-items: baseline;
-          gap: 10px;
-        }
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.tp-title-row > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
         .tp-title-row h1 {
           font-size: 20px;
           font-weight: 700;
@@ -1532,25 +1625,39 @@ export default function TransfersPage({ language = 'he' }) {
 
         /* ── Stats row — full page width, equal columns ── */
         .stats-row {
-          display: grid;
-          grid-template-columns: repeat(7, 1fr);
-          gap: 0;
-          padding: 12px 20px 0;
-        }
-        .stat-card {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          padding: 12px 16px;
-          background: var(--surf);
-          border: 1px solid var(--bdr);
-          border-right: none;
-          cursor: pointer;
-          transition: background .1s;
-          position: relative;
-        }
-        .stat-card:first-child { border-radius: var(--r6) 0 0 var(--r6); border-right: 1px solid var(--bdr); }
-        .stat-card:last-child  { border-radius: 0 var(--r6) var(--r6) 0; }
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 10px;
+  padding: 14px 20px 0;
+}
+       .stat-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+
+  padding: 12px 16px;
+
+  background: var(--surf);
+
+  border: 1px solid var(--bdr);
+  border-radius: var(--r8);
+
+  cursor: pointer;
+
+  transition:
+    background .1s,
+    border-color .1s,
+    box-shadow .1s;
+
+  position: relative;
+
+  box-shadow: var(--sh0);
+}
+
+.stat-card:hover {
+  background: var(--surf-2);
+  border-color: var(--bdr-2);
+}
         .stat-card:hover { background: var(--surf-2); }
 
         .sc-ico {
@@ -1602,7 +1709,7 @@ export default function TransfersPage({ language = 'he' }) {
           display: grid;
           /* grid-template-columns set inline via style prop for draggable splitter */
           margin: 12px 20px 20px;
-          height: calc(100vh - 200px);
+          height: calc(100vh - 190px);
           min-height: 460px;
           background: var(--surf);
           border: 1px solid var(--bdr);
@@ -1701,29 +1808,43 @@ export default function TransfersPage({ language = 'he' }) {
           box-shadow: var(--sh0);
         }
 
-        .type-chips { display: flex; gap: 4px; flex-wrap: wrap; }
-        .region-select {
-          padding: 4px 8px;
-          border: 1px solid var(--bdr);
-          border-radius: 8px;
-          font-family: inherit; font-size: 12px; font-weight: 500;
-          color: var(--t2); background: white; cursor: pointer;
-        }
-        .type-chip {
-          padding: 3px 9px;
-          border: 1px solid var(--bdr);
-          background: transparent;
-          border-radius: 20px;
-          font-family: inherit; font-size: 12px; font-weight: 500;
-          color: var(--t3); cursor: pointer;
-          transition: all .1s;
-        }
-        .type-chip:hover { border-color: var(--bdr-2); color: var(--t2); background: var(--surf); }
-        .tc-active {
-          background: var(--blue) !important;
-          border-color: var(--blue) !important;
-          color: #fff !important; font-weight: 600;
-        }
+        .filter-row {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--t3);
+}
+
+.type-select,
+.region-select {
+  width: 100%;
+
+  padding: 7px 9px;
+
+  border: 1px solid var(--bdr);
+  border-radius: var(--r4);
+
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+
+  color: var(--t2);
+  background: var(--surf);
+
+  cursor: pointer;
+  outline: none;
+}
+
+.type-select:focus,
+.region-select:focus {
+  border-color: var(--bdr-focus);
+}
 
         .lt-count { font-size: 12px; font-weight: 400; color: var(--t4); }
 
@@ -1978,42 +2099,55 @@ export default function TransfersPage({ language = 'he' }) {
           font-weight: 400;
         }
         .dp-type-tag {
-          display: inline-flex;
-          align-items: center;
-          gap: 6px;
-          padding: 4px 12px;
-          border-radius: 20px;
-          font-size: 13px;
-          font-weight: 600;
-          margin-inline-start: auto;
-          flex-shrink: 0;
-        }
-        .dp-type-violet { background: var(--violet-bg); color: var(--violet); }
-        .dp-type-teal   { background: var(--teal-bg);   color: var(--teal);   }
-        .dp-type-amber  { background: var(--amber-bg);  color: var(--amber);  }
-        .dp-type-blue   { background: var(--blue-bg);   color: var(--blue);   }
-        .dp-type-rose   { background: var(--rose-bg);   color: var(--rose);   }
-        .dp-type-indigo   { background: var(--indigo-bg);   color: var(--indigo);   }
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+
+  margin-inline-start: auto;
+
+  font-size: 13px;
+  font-weight: 600;
+
+  background: transparent !important;
+  border: none !important;
+  padding: 0;
+
+  cursor: default;
+  flex-shrink: 0;
+}
+
+.dp-type-label {
+  color: var(--t3);
+  font-weight: 500;
+}
+
+.dp-type-violet { color: var(--violet); }
+.dp-type-teal   { color: var(--teal); }
+.dp-type-amber  { color: var(--amber); }
+.dp-type-blue   { color: var(--blue); }
+.dp-type-rose   { color: var(--rose); }
+.dp-type-indigo { color: var(--indigo); }
 
         .dp-body {
-          padding: 20px 24px;
-          display: flex; flex-direction: column;
-          gap: 20px;
-          flex: 1;
-          overflow-y: auto;
-        }
+  padding: 12px 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  flex: 1;
+  overflow-y: auto;
+}
         .dp-body::-webkit-scrollbar { width: 6px; }
         .dp-body::-webkit-scrollbar-thumb { background: var(--bdr); border-radius: 3px; }
 
         /* ── Section headers ── */
         .sec-title {
-          font-size: 12.5px;
-          font-weight: 700;
-          color: var(--t4);
-          text-transform: uppercase;
-          letter-spacing: .09em;
-          margin-bottom: 10px;
-        }
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--t4);
+  text-transform: uppercase;
+  letter-spacing: .09em;
+  margin-bottom: 6px;
+}
 
         /* ── Timeline — larger, clearer ── */
         .tl-wrap { display: flex; align-items: flex-start; }
@@ -2411,11 +2545,22 @@ export default function TransfersPage({ language = 'he' }) {
           backdrop-filter: blur(2px);
         }
         .modal-box {
-          background: var(--surf); border-radius: var(--r12);
-          width: 100%; max-width: 680px; max-height: 90vh;
-          display: flex; flex-direction: column;
-          box-shadow: var(--sh3); overflow: hidden;
-        }
+  background: var(--surf);
+  border-radius: var(--r12);
+
+  width: min(900px, 92vw);
+  max-width: 900px;
+
+  height: min(720px, 88vh);
+  max-height: 88vh;
+
+  display: flex;
+  flex-direction: column;
+
+  box-shadow: var(--sh3);
+
+  overflow: hidden;
+}
         .modal-head {
           display: flex; align-items: center; justify-content: space-between;
           padding: 16px 20px; border-bottom: 1px solid var(--bdr); flex-shrink: 0;
@@ -2489,8 +2634,18 @@ export default function TransfersPage({ language = 'he' }) {
         .wz-conn { flex: 1; height: 2px; background: var(--bdr); margin-bottom: 18px; min-width: 8px; }
         .wz-conn-done { background: var(--green); }
 
-        .wz-content { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
-        .wz-title { font-size: 17px; font-weight: 700; color: var(--t1); }
+.wz-content {
+  flex: 1;
+  min-height: 0;
+
+  overflow-y: auto;
+
+  padding: 24px;
+
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}        .wz-title { font-size: 17px; font-weight: 700; color: var(--t1); }
 
         .wz-field { display: flex; flex-direction: column; gap: 5px; }
         .wz-field label { font-size: 13px; font-weight: 600; color: var(--t2); }
@@ -2654,7 +2809,7 @@ export default function TransfersPage({ language = 'he' }) {
         /* ── Responsive ── */
         @media (max-width: 920px) {
           .tp-body { grid-template-columns: 300px 6px 1fr !important; height: auto; }
-          .stats-row { grid-template-columns: repeat(4, 1fr); }
+          .stats-row { grid-template-columns: repeat(2, 1fr); }
         }
         @media (max-width: 640px) {
           .tp-body { grid-template-columns: 1fr !important; height: auto; }
