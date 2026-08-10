@@ -464,8 +464,10 @@ export default function BedMatchPicker({
     loadMoreFailed: isHe ? 'טעינת בניינים נוספים נכשלה' : 'Failed to load more buildings',
     retry: isHe ? 'נסה שוב' : 'Retry',
     noOptions: isHe ? 'לא נמצאו מיטות פנויות התואמות לכללי החובה.' : 'No available beds match the hard constraints.',
-    noOptionsForFilter: isHe ? 'אין תוצאות עבור הסינון הנוכחי מבין הבניינים שנטענו.' : 'No loaded buildings match the current filter.',
-    showAllInstead: isHe ? 'הצג את הכול' : 'Show all',
+noOptionsForFilter: isHe
+  ? 'לא נמצאו בניינים תחת הסינון הנוכחי'
+  : 'No buildings found for the current filter.',
+showAllInstead: isHe ? 'הצגת בניינים אפשריים' : 'Show available buildings',
     whyNot: isHe ? 'אפשרויות שאינן זמינות' : 'Unavailable options',
     residents: isHe ? 'דיירים קיימים בדירה' : 'Current residents in apartment',
     residentsWord: isHe ? 'דיירים' : 'residents',
@@ -575,7 +577,48 @@ export default function BedMatchPicker({
 
   return (
     <div className="bmp-root">
-      <div className="bmp-summary">{t.summary}</div>
+<div className="bmp-section-head">
+  <div>
+    <h3 className="bmp-section-title">אפשרויות שיבוץ זמינות</h3>
+    <p className="bmp-section-sub">
+      בחרי בניין, דירה, חדר ומיטה המתאימים לסטודנט
+    </p>
+  </div>
+</div>
+
+      <div className="bmp-summary-grid">
+        <div className="bmp-summary-card">
+          <Building2 size={16}/>
+          <div>
+            <strong>{totalBuildings}</strong>
+            <span>בניינים</span>
+          </div>
+        </div>
+
+        <div className="bmp-summary-card">
+          <DoorOpen size={16}/>
+          <div>
+            <strong>{totalApartments}</strong>
+            <span>דירות</span>
+          </div>
+        </div>
+
+        <div className="bmp-summary-card">
+          <Home size={16}/>
+          <div>
+            <strong>{totalRooms}</strong>
+            <span>חדרים</span>
+          </div>
+        </div>
+
+        <div className="bmp-summary-card bmp-summary-card-free">
+          <BedDouble size={16}/>
+          <div>
+            <strong>{totalValidBeds}</strong>
+            <span>מיטות פנויות</span>
+          </div>
+        </div>
+      </div>
       {dataIntegrity?.missing_bed_records > 0 && (
         <div className="bmp-integrity bmp-integrity-banner">
           <AlertTriangle size={13} />
@@ -676,57 +719,114 @@ export default function BedMatchPicker({
           scroll; buildings through the load-more footer live inside it. */}
       <div className="bmp-buildings" tabIndex={0} role="region" aria-label={isHe ? 'תוצאות שיבוץ' : 'Assignment results'}>
         {filteredBuildings.length === 0 ? (
-          <div className="bmp-empty bmp-empty-inline">
-            <AlertTriangle size={22} />
-            <p>{t.noOptionsForFilter}</p>
-            {filter !== 'all' && (
-              <button type="button" className="bmp-load-more" onClick={() => setFilter('all')}>
-                {t.showAllInstead}
-              </button>
-            )}
-          </div>
+            <div className="bmp-empty bmp-empty-inline">
+              {filter !== 'all' && (
+                  <button
+                      type="button"
+                      className="bmp-load-more"
+                      onClick={() => setFilter('all')}
+                  >
+                    {t.showAllInstead}
+                  </button>
+              )}
+            </div>
         ) : (
-          filteredBuildings.map((b) => {
-            const isOpen = expandedBuildings.has(b.building_id);
-            return (
-              <div key={b.building_id} className="bmp-building">
-                <button
-                  type="button"
-                  className="bmp-building-head"
-                  onClick={() => toggleBuilding(b.building_id)}
-                  aria-expanded={isOpen}
-                >
-                  <Building2 size={15} />
-                  <span className="bmp-building-title">{b.building_name || (isHe ? `בניין ${b.building_number}` : `Building ${b.building_number}`)}</span>
-                  {b.region_name && <span className="bmp-dim">· {b.region_name}</span>}
-                  {b.dorm_type && <span className="bmp-dim">· {b.dorm_type}</span>}
-                  <span className="bmp-dim">
-                    · {b.apartment_count} {t.apartmentsWord} · {b.room_count} {t.roomsWord}
-                  </span>
-                  <RecommendationPill level={b.recommendation_level} label={b.recommendation_label} />
-                  {b.has_roommate_match && <span className="bmp-pill bmp-pill-roommate">{t.roommateHere}</span>}
-                  <span className="bmp-free">{b.available_bed_count} {t.beds}</span>
-                  {isOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-                </button>
+            filteredBuildings.map((b) => {
+              const isOpen = expandedBuildings.has(b.building_id);
+              return (
+                  <div key={b.building_id} className="bmp-building">
+                    <button
+                        type="button"
+                      className="bmp-building-head"
+                      onClick={() => toggleBuilding(b.building_id)}
+                      aria-expanded={isOpen}
+                  >
+                    <div className="bmp-building-main">
 
-                {isOpen && (
-                  <div className="bmp-apartments">
-                    {(b.apartments || []).map((a) => (
-                      <ApartmentRow
-                        key={a.apartment_id}
-                        building={b} apartment={a}
-                        expanded={expandedApts.has(a.apartment_id)}
-                        onToggle={() => toggleApt(a.apartment_id)}
-                        expandedRooms={expandedRooms}
-                        onToggleRoom={toggleRoom}
-                        selectedBedId={selectedBedId}
-                        onSelect={onSelectBed}
-                        isHe={isHe} t={t}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
+                      <div className="bmp-building-icon">
+                        <Building2 size={17}/>
+                      </div>
+
+                      <div className="bmp-building-info">
+                        <div className="bmp-building-name-row">
+        <span className="bmp-building-title">
+          {b.building_name ||
+              (isHe
+                  ? `בניין ${b.building_number}`
+                  : `Building ${b.building_number}`)}
+        </span>
+
+                          <RecommendationPill
+                              level={b.recommendation_level}
+                              label={b.recommendation_label}
+                          />
+                        </div>
+
+                        <div className="bmp-building-meta">
+                          {b.region_name && <span>{b.region_name}</span>}
+
+                          {b.dorm_type && (
+                              <>
+                                <span className="bmp-meta-dot">•</span>
+                                <span>{b.dorm_type}</span>
+                              </>
+                          )}
+
+                          <span className="bmp-meta-dot">•</span>
+
+                          <span>
+          {b.apartment_count} {t.apartmentsWord}
+        </span>
+
+                          <span className="bmp-meta-dot">•</span>
+
+                          <span>
+          {b.room_count} {t.roomsWord}
+        </span>
+                        </div>
+                      </div>
+
+                    </div>
+
+                    <div className="bmp-building-side">
+
+                      {b.has_roommate_match && (
+                          <span className="bmp-pill bmp-pill-roommate">
+        {t.roommateHere}
+      </span>
+                      )}
+
+                      <span className="bmp-free">
+      <BedDouble size={13}/>
+                        {b.available_bed_count} {t.beds}
+    </span>
+
+                      {isOpen
+                          ? <ChevronUp size={16}/>
+                          : <ChevronDown size={16}/>
+                      }
+
+                    </div>
+                  </button>
+
+                  {isOpen && (
+                      <div className="bmp-apartments">
+                        {(b.apartments || []).map((a) => (
+                            <ApartmentRow
+                                key={a.apartment_id}
+                                building={b} apartment={a}
+                                expanded={expandedApts.has(a.apartment_id)}
+                                onToggle={() => toggleApt(a.apartment_id)}
+                                expandedRooms={expandedRooms}
+                                onToggleRoom={toggleRoom}
+                                selectedBedId={selectedBedId}
+                                onSelect={onSelectBed}
+                                isHe={isHe} t={t}
+                            />
+                        ))}
+                      </div>
+                  )}
+                </div>
             );
           })
         )}
@@ -734,21 +834,21 @@ export default function BedMatchPicker({
         <div className="bmp-results-footer">
           <span className="bmp-loaded-count">{t.showingOf(buildings.length, totalBuildings)}</span>
           {loadMoreError && (
-            <span className="bmp-loadmore-error">
-              <AlertTriangle size={12} /> {t.loadMoreFailed}: {loadMoreError}
+              <span className="bmp-loadmore-error">
+              <AlertTriangle size={12}/> {t.loadMoreFailed}: {loadMoreError}
             </span>
           )}
           {hasMore ? (
-            <button
-              type="button"
-              className="bmp-load-more bmp-load-more-primary"
-              onClick={onLoadMore}
-              disabled={loading || loadingMore}
-            >
-              {loadingMore ? t.loadingBuildings : (loadMoreError ? t.retry : t.loadMoreBuildings)}
-            </button>
+              <button
+                  type="button"
+                  className="bmp-load-more bmp-load-more-primary"
+                  onClick={onLoadMore}
+                  disabled={loading || loadingMore}
+              >
+                {loadingMore ? t.loadingBuildings : (loadMoreError ? t.retry : t.loadMoreBuildings)}
+              </button>
           ) : (
-            buildings.length > 0 && <span className="bmp-all-loaded">{t.allLoaded}</span>
+              buildings.length > 0 && <span className="bmp-all-loaded">{t.allLoaded}</span>
           )}
         </div>
       </div>
@@ -759,6 +859,82 @@ export default function BedMatchPicker({
 }
 
 const BMP_STYLES = `
+.bmp-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.bmp-section-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.bmp-section-sub {
+  margin: 3px 0 0;
+  font-size: 13px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+
+/* ── Summary cards ───────────────── */
+
+.bmp-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.bmp-summary-card {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+
+  padding: 10px 12px;
+
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+
+  background: #f8fafc;
+
+  color: #475569;
+}
+
+.bmp-summary-card svg {
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.bmp-summary-card div {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.bmp-summary-card strong {
+  font-size: 17px;
+  color: #0f172a;
+  font-weight: 800;
+}
+
+.bmp-summary-card span {
+  font-size: 11.5px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.bmp-summary-card-free {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.bmp-summary-card-free svg,
+.bmp-summary-card-free strong {
+  color: #15803d;
+}
   .bmp-root { display:flex; flex-direction:column; gap:14px; font-size:15px; min-height:0; flex:1; }
   .bmp-summary { font-size:15px; font-weight:700; color:#334155; }
   .bmp-toolbar { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
@@ -801,8 +977,124 @@ const BMP_STYLES = `
   }
   .bmp-buildings:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; }
   .bmp-building { border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; flex-shrink:0; }
-  .bmp-building-head { width:100%; display:flex; align-items:center; gap:9px; padding:14px 16px; background:#f8fafc; font-size:15px; font-weight:700; color:#1e293b; border:none; cursor:pointer; text-align:inherit; min-height:56px; font-family:inherit; }
-  .bmp-building-head:hover { background:#f1f5f9; }
+.bmp-building-head {
+  width: 100%;
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  gap: 14px;
+
+  padding: 12px 14px;
+
+  background: #fff;
+
+  border: none;
+
+  cursor: pointer;
+
+  text-align: inherit;
+
+  min-height: 66px;
+
+  font-family: inherit;
+}
+
+.bmp-building-head:hover {
+  background: #f8fafc;
+}  .bmp-building-head:hover { background:#f1f5f9; }
+.bmp-building-main {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+
+  min-width: 0;
+  flex: 1;
+}
+
+.bmp-building-icon {
+  width: 34px;
+  height: 34px;
+
+  border-radius: 9px;
+
+  background: #eff6ff;
+  color: #2563eb;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  flex-shrink: 0;
+}
+
+.bmp-building-info {
+  display: flex;
+  flex-direction: column;
+
+  gap: 3px;
+
+  min-width: 0;
+}
+
+.bmp-building-name-row {
+  display: flex;
+  align-items: center;
+
+  gap: 8px;
+
+  flex-wrap: wrap;
+}
+
+.bmp-building-title {
+  font-size: 15px;
+  font-weight: 800;
+  color: #0f172a;
+
+  white-space: nowrap;
+}
+
+.bmp-building-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+
+  flex-wrap: wrap;
+
+  font-size: 12.5px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.bmp-meta-dot {
+  color: #cbd5e1;
+}
+
+.bmp-building-side {
+  display: flex;
+  align-items: center;
+
+  gap: 10px;
+
+  flex-shrink: 0;
+}
+
+.bmp-free {
+  margin-inline-start: 0;
+
+  display: inline-flex;
+  align-items: center;
+
+  gap: 5px;
+
+  font-size: 13px;
+
+  color: #15803d;
+  font-weight: 800;
+
+  white-space: nowrap;
+}
   .bmp-building-title { font-weight:800; white-space:nowrap; }
   .bmp-dim { color:#64748b; font-weight:600; font-size:14px; }
   .bmp-full-text { color:#b91c1c; font-weight:700; }
@@ -816,8 +1108,16 @@ const BMP_STYLES = `
     outline: 2px solid #2563eb; outline-offset: 2px;
   }
   .bmp-apt-title { font-weight:800; color:#0f172a; font-size:15.5px; }
-  .bmp-pill { border-radius:999px; padding:4px 12px; font-size:12.5px; font-weight:800; white-space:nowrap; }
-  .bmp-pill-roommate { background:#ede9fe; color:#6d28d9; border:1px solid #c4b5fd; }
+.bmp-pill {
+  border-radius: 999px;
+
+  padding: 3px 9px;
+
+  font-size: 11.5px;
+  font-weight: 700;
+
+  white-space: nowrap;
+}  .bmp-pill-roommate { background:#ede9fe; color:#6d28d9; border:1px solid #c4b5fd; }
   .bmp-free { margin-inline-start:auto; font-size:13.5px; color:#16a34a; font-weight:800; white-space:nowrap; }
 
   .bmp-rooms { display:flex; flex-direction:column; gap:10px; padding:10px 16px 16px 16px; background:#fafbfc; }

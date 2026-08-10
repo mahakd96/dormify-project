@@ -1,0 +1,92 @@
+{
+  "description": "Priority with Shortage – 20 students, 16 beds, four priority students",
+  "constraints_config": {
+    "sameGender": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "priorityFirst": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "roommatePositiveOnly": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 0
+    },
+    "ReligiousTogether": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "sameReligion": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "roommateMatch": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 8
+    },
+    "sectorMatching": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 7
+    },
+    "avoidYearMix_1_with_3_4": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    },
+    "avoidAtudaimWithHasmaha": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    }
+  },
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL",
+      "FEASIBLE"
+    ]
+  },
+  "allocation_expectations": {
+    "unassigned_count": 4,
+    "must_be_assigned": [
+      "F01",
+      "F02",
+      "M01",
+      "M02"
+    ],
+    "unassigned_must_be_subset_of": [
+      "F03",
+      "F04",
+      "F05",
+      "F06",
+      "F07",
+      "F08",
+      "F09",
+      "F10",
+      "M03",
+      "M04",
+      "M05",
+      "M06",
+      "M07",
+      "M08",
+      "M09",
+      "M10"
+    ]
+  }
+}
