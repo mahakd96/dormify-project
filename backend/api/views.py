@@ -16,7 +16,10 @@ from rest_framework.exceptions import PermissionDenied as DRFPermissionDenied
 
 from django.utils import timezone
 from django.db import transaction
-from django.db.models import Q, Count, Prefetch
+from django.db.models import (
+    Q, Count, Prefetch, OuterRef, Subquery, IntegerField, Case, When, Value, F, BooleanField, Exists,
+)
+from django.db.models.functions import Coalesce, Greatest
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import connection
@@ -713,6 +716,66 @@ def _inventory_create_permission_error():
     )
 
 
+def _annotate_building_inventory_counts(queryset):
+    """
+    Queryset-level replacement for the per-row queries BuildingSerializer's
+    apartment_count/room_count/bed_count/occupied_beds SerializerMethodFields
+    used to run once per building (see performance baseline finding BLD-01:
+    ~6 extra SQL queries per building row, confirmed in
+    project-quality/performance/BUILDINGS_BASELINE_SUMMARY.md).
+
+    Each count is computed as an independent correlated subquery (Subquery +
+    OuterRef grouped by the target FK), not a plain Count() annotation on a
+    joined relation. This deliberately avoids the classic Django
+    multi-Count() JOIN-multiplication trap, where combining several
+    Count()/Sum() annotations on different related paths in one annotate()
+    call can silently multiply/inflate every count by the size of the other
+    joined relations. Each subquery here is independently grouped and
+    evaluated per building, so results are mathematically identical to
+    running each of the original four queries once per building - just
+    computed inside the single list/detail query instead of once per row.
+
+    Filtering semantics are preserved exactly, matching
+    BuildingSerializer.get_apartment_count/get_room_count/get_bed_count/
+    get_occupied_beds field-for-field:
+    - apartment_count: active apartments only.
+    - room_count: active rooms AND active parent apartment.
+    - bed_count: beds under an active room AND active apartment (Bed itself
+      has no is_active field).
+    - occupied_beds: distinct beds with an ACTIVE BedAssignment -
+      deliberately NOT filtered by room/apartment is_active, exactly like
+      the original get_occupied_beds (a bed can still show as "occupied"
+      after its room/apartment is deactivated; free_beds already clamps to
+      0 for that case in the serializer, same as before).
+
+    Coalesce(..., 0) makes a building with zero matches yield 0 instead of
+    NULL, matching the original .count() behavior (which returns 0, never
+    None).
+    """
+    apartment_count_sq = Apartment.objects.filter(
+        building=OuterRef('pk'), is_active=True,
+    ).order_by().values('building').annotate(c=Count('id')).values('c')
+
+    room_count_sq = Room.objects.filter(
+        apartment__building=OuterRef('pk'), is_active=True, apartment__is_active=True,
+    ).order_by().values('apartment__building').annotate(c=Count('id')).values('c')
+
+    bed_count_sq = Bed.objects.filter(
+        room__apartment__building=OuterRef('pk'), room__is_active=True, room__apartment__is_active=True,
+    ).order_by().values('room__apartment__building').annotate(c=Count('id')).values('c')
+
+    occupied_beds_sq = BedAssignment.objects.filter(
+        bed__room__apartment__building=OuterRef('pk'), status=BedAssignment.Status.ACTIVE,
+    ).order_by().values('bed__room__apartment__building').annotate(c=Count('bed_id', distinct=True)).values('c')
+
+    return queryset.annotate(
+        _apartment_count=Coalesce(Subquery(apartment_count_sq, output_field=IntegerField()), 0),
+        _room_count=Coalesce(Subquery(room_count_sq, output_field=IntegerField()), 0),
+        _bed_count=Coalesce(Subquery(bed_count_sq, output_field=IntegerField()), 0),
+        _occupied_beds=Coalesce(Subquery(occupied_beds_sq, output_field=IntegerField()), 0),
+    )
+
+
 class BuildingViewSet(viewsets.ModelViewSet):
     serializer_class = BuildingSerializer
     permission_classes = [IsAuthenticated]
@@ -723,9 +786,11 @@ class BuildingViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
     def get_queryset(self):
-        queryset = Building.objects.select_related(
-            'dorm_type',
-            'dorm_type__region',
+        queryset = _annotate_building_inventory_counts(
+            Building.objects.select_related(
+                'dorm_type',
+                'dorm_type__region',
+            )
         )
         is_active = _parse_is_active_filter(self.request)
         if is_active is not None:
@@ -1049,17 +1114,74 @@ class BuildingViewSet(viewsets.ModelViewSet):
         }, status=status.HTTP_201_CREATED)
 
 
+def _annotate_apartment_inventory_counts(queryset):
+    """
+    Queryset-level replacement for the per-row queries ApartmentSerializer's
+    actual_room_count/bed_count/occupied_beds SerializerMethodFields used to
+    run once per apartment (see performance baseline finding BLD-02: ~5
+    extra SQL queries per apartment row, confirmed in
+    project-quality/performance/APARTMENTS_BASELINE_SUMMARY.md).
+
+    Same technique as _annotate_building_inventory_counts (BLD-01, already
+    fixed): each count is an independent correlated subquery (Subquery +
+    OuterRef grouped by the target FK), not a plain Count() annotation on a
+    joined relation - this avoids the classic Django multi-Count()
+    JOIN-multiplication trap where combining several Count() annotations on
+    different related paths in one annotate() call can silently
+    multiply/inflate every count by the size of the other joined relations.
+    Each subquery here is independently grouped and evaluated per
+    apartment, so results are mathematically identical to running each of
+    the original three queries once per apartment - just computed inside
+    the single list/detail query instead of once per row.
+
+    Filtering semantics are preserved exactly, matching
+    ApartmentSerializer.get_actual_room_count/get_bed_count/
+    get_occupied_beds field-for-field:
+    - actual_room_count: active rooms only.
+    - bed_count: beds under an active room (Bed itself has no is_active
+      field).
+    - occupied_beds: distinct beds with an ACTIVE BedAssignment -
+      deliberately NOT filtered by room is_active, exactly like the
+      original get_occupied_beds (a bed can still show as "occupied" after
+      its room is deactivated; free_beds already clamps to 0 for that case
+      in the serializer, same as before).
+
+    Coalesce(..., 0) makes an apartment with zero matches yield 0 instead
+    of NULL, matching the original .count() behavior (which returns 0,
+    never None).
+    """
+    room_count_sq = Room.objects.filter(
+        apartment=OuterRef('pk'), is_active=True,
+    ).order_by().values('apartment').annotate(c=Count('id')).values('c')
+
+    bed_count_sq = Bed.objects.filter(
+        room__apartment=OuterRef('pk'), room__is_active=True,
+    ).order_by().values('room__apartment').annotate(c=Count('id')).values('c')
+
+    occupied_beds_sq = BedAssignment.objects.filter(
+        bed__room__apartment=OuterRef('pk'), status=BedAssignment.Status.ACTIVE,
+    ).order_by().values('bed__room__apartment').annotate(c=Count('bed_id', distinct=True)).values('c')
+
+    return queryset.annotate(
+        _actual_room_count=Coalesce(Subquery(room_count_sq, output_field=IntegerField()), 0),
+        _bed_count=Coalesce(Subquery(bed_count_sq, output_field=IntegerField()), 0),
+        _occupied_beds=Coalesce(Subquery(occupied_beds_sq, output_field=IntegerField()), 0),
+    )
+
+
 class ApartmentViewSet(viewsets.ModelViewSet):
     serializer_class = ApartmentSerializer
     permission_classes = [IsAuthenticated]
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
     def get_queryset(self):
-        queryset = Apartment.objects.select_related(
-            'building',
-            'building__dorm_type',
-            'building__dorm_type__region'
-        ).all()
+        queryset = _annotate_apartment_inventory_counts(
+            Apartment.objects.select_related(
+                'building',
+                'building__dorm_type',
+                'building__dorm_type__region'
+            ).all()
+        )
 
         is_active = _parse_is_active_filter(self.request, default='all')
         if is_active is not None:
@@ -1156,18 +1278,108 @@ class ApartmentViewSet(viewsets.ModelViewSet):
         return response
 
 
+def _annotate_room_inventory_counts(queryset):
+    """
+    Queryset-level replacement for the per-row queries RoomSerializer's
+    current_occupancy/available_beds/is_full/bed_count/
+    has_missing_bed_records fields used to run per room (see performance
+    baseline finding BLD-03: ~7 extra SQL queries per active room row,
+    confirmed in project-quality/performance/ROOMS_BASELINE_SUMMARY.md).
+
+    Same technique as _annotate_building_inventory_counts (BLD-01) /
+    _annotate_apartment_inventory_counts (BLD-02): the raw counts are
+    independent correlated subqueries (Subquery + OuterRef grouped by the
+    target FK), not plain Count() annotations combined in one annotate()
+    call - avoiding JOIN multiplication. The derived boolean/clamped
+    fields (_available_beds, _is_full, _has_missing_bed_records) are then
+    computed from those already-annotated columns via Case/When/F
+    expressions in a second/third .annotate() step on the same queryset -
+    still one SQL statement, still zero extra round trips per row.
+
+    Filtering semantics preserved exactly, matching
+    RoomSerializer.current_occupancy/available_beds/is_full/bed_count/
+    has_missing_bed_records - and the Room model properties they're
+    sourced from - field-for-field:
+    - current_occupancy: count of ACTIVE BedAssignments for this room,
+      regardless of the room's own is_active (Room.current_occupancy has
+      no is_active check).
+    - bed_count: total Bed rows for this room (Bed has no is_active
+      field).
+    - available_beds: 0 if the room is inactive (short-circuit, matches
+      Room.available_beds exactly); otherwise
+      max(bed_count - distinct_occupied_bed_count, 0).
+    - is_full: True if the room is inactive OR available_beds <= 0
+      (matches Room.is_full). This collapses to just "available_beds <= 0"
+      here, because available_beds is already forced to 0 for inactive
+      rooms by the rule above - making that comparison True in both the
+      "inactive" and the "active but full" case, exactly like the
+      original two-branch property.
+    - has_missing_bed_records: bed_count < capacity (matches
+      RoomSerializer.get_has_missing_bed_records exactly - no is_active
+      dependency there either).
+    """
+    bed_count_sq = Bed.objects.filter(
+        room=OuterRef('pk'),
+    ).order_by().values('room').annotate(c=Count('id')).values('c')
+
+    current_occupancy_sq = BedAssignment.objects.filter(
+        bed__room=OuterRef('pk'), status=BedAssignment.Status.ACTIVE,
+    ).order_by().values('bed__room').annotate(c=Count('id')).values('c')
+
+    # Deliberately a SEPARATE subquery from current_occupancy_sq, mirroring
+    # the original code exactly: Room.current_occupancy uses a plain
+    # .count() of ACTIVE assignments, while Room.available_beds computes
+    # "used" beds via a distinct bed_id count - two differently-written
+    # queries that are numerically guaranteed equal only because of the
+    # unique_active_assignment_per_bed DB constraint (at most one ACTIVE
+    # assignment per bed). Keeping them as distinct annotations preserves
+    # that original structure literally rather than assuming the
+    # equivalence.
+    used_beds_distinct_sq = BedAssignment.objects.filter(
+        bed__room=OuterRef('pk'), status=BedAssignment.Status.ACTIVE,
+    ).order_by().values('bed__room').annotate(c=Count('bed_id', distinct=True)).values('c')
+
+    queryset = queryset.annotate(
+        _bed_count=Coalesce(Subquery(bed_count_sq, output_field=IntegerField()), 0),
+        _current_occupancy=Coalesce(Subquery(current_occupancy_sq, output_field=IntegerField()), 0),
+        _used_beds_distinct=Coalesce(Subquery(used_beds_distinct_sq, output_field=IntegerField()), 0),
+    )
+    queryset = queryset.annotate(
+        _available_beds=Case(
+            When(is_active=False, then=Value(0)),
+            default=Greatest(F('_bed_count') - F('_used_beds_distinct'), Value(0)),
+            output_field=IntegerField(),
+        ),
+    )
+    queryset = queryset.annotate(
+        _is_full=Case(
+            When(_available_beds__lte=0, then=Value(True)),
+            default=Value(False),
+            output_field=BooleanField(),
+        ),
+        _has_missing_bed_records=Case(
+            When(_bed_count__lt=F('capacity'), then=Value(True)),
+            default=Value(False),
+            output_field=BooleanField(),
+        ),
+    )
+    return queryset
+
+
 class RoomViewSet(viewsets.ModelViewSet):
     serializer_class = RoomSerializer
     permission_classes = [IsAuthenticated]
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
     def get_queryset(self):
-        queryset = Room.objects.select_related(
-            'apartment',
-            'apartment__building',
-            'apartment__building__dorm_type',
-            'apartment__building__dorm_type__region'
-        ).all()
+        queryset = _annotate_room_inventory_counts(
+            Room.objects.select_related(
+                'apartment',
+                'apartment__building',
+                'apartment__building__dorm_type',
+                'apartment__building__dorm_type__region'
+            ).all()
+        )
 
         is_active = _parse_is_active_filter(self.request, default='all')
         if is_active is not None:
@@ -1243,6 +1455,30 @@ class RoomViewSet(viewsets.ModelViewSet):
         return super().update(request, *args, **kwargs)
 
 
+def _annotate_bed_occupancy(queryset):
+    """
+    Queryset-level replacement for the per-row query BedSerializer's
+    is_occupied field used to run once per bed (see performance baseline
+    finding BLD-04: ~1 extra SQL query per bed row, confirmed in
+    project-quality/performance/BEDS_BASELINE_SUMMARY.md).
+
+    Unlike Buildings/Apartments/Rooms (BLD-01/02/03), this is a single
+    boolean check, not a count - Exists(...) is the natural fit rather
+    than a Subquery+Coalesce count. Exists() compiles to a correlated
+    `EXISTS (SELECT 1 FROM ... WHERE ...)` subquery per row, computed
+    inside the same single SQL statement as the list/detail query, with no
+    JOIN-multiplication risk (there is nothing else being annotated here
+    to multiply against).
+
+    Filtering semantics match Bed.is_occupied exactly:
+    `self.assignments.filter(status=ACTIVE).exists()`.
+    """
+    active_assignment_exists = BedAssignment.objects.filter(
+        bed=OuterRef('pk'), status=BedAssignment.Status.ACTIVE,
+    )
+    return queryset.annotate(_is_occupied=Exists(active_assignment_exists))
+
+
 class BedViewSet(viewsets.ModelViewSet):
     """
     Read-only browsing plus label-only editing. Individual bed
@@ -1257,13 +1493,15 @@ class BedViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'patch', 'head', 'options']
 
     def get_queryset(self):
-        queryset = Bed.objects.select_related(
-            'room',
-            'room__apartment',
-            'room__apartment__building',
-            'room__apartment__building__dorm_type',
-            'room__apartment__building__dorm_type__region',
-        ).all()
+        queryset = _annotate_bed_occupancy(
+            Bed.objects.select_related(
+                'room',
+                'room__apartment',
+                'room__apartment__building',
+                'room__apartment__building__dorm_type',
+                'room__apartment__building__dorm_type__region',
+            ).all()
+        )
 
         room_id = self.request.query_params.get('room')
         if room_id:
