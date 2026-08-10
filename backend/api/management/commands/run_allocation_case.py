@@ -230,7 +230,12 @@ class Command(BaseCommand):
         )
 
         self.print_expected_vs_actual(report)
-        self.print_actual_allocation(report)
+
+        self.print_allocation_by_apartment_with_constraints(
+            report=report,
+            students_rows=students_rows,
+        )
+
         self.print_final_verdict(report)
 
         if report["failures"] and not report_only:
@@ -1531,6 +1536,235 @@ class Command(BaseCommand):
         if len(text) > width:
             text = text[: width - 3] + "..."
         return text.ljust(width)
+
+    def print_allocation_by_apartment_with_constraints(self, report, students_rows):
+        self.stdout.write("")
+        self.stdout.write("=" * 100)
+        self.stdout.write("ALLOCATION BY APARTMENT WITH STUDENT CONSTRAINTS")
+        self.stdout.write("=" * 100)
+
+        student_rows_by_id = {
+            row["student_id"].strip(): row
+            for row in students_rows
+        }
+
+        apartments = defaultdict(list)
+
+        for student_id, assignment in report["assignment_by_student"].items():
+            apartments[assignment["apartment_code"]].append(
+                (student_id, assignment)
+            )
+
+        for apartment_code in sorted(apartments):
+            self.stdout.write("")
+            self.stdout.write("=" * 100)
+            self.stdout.write(f"APARTMENT {apartment_code}")
+            self.stdout.write("=" * 100)
+
+            header = (
+                f"{'Student':<9}"
+                f"{'Gender':<9}"
+                f"{'Religion':<16}"
+                f"{'Religious Req.':<17}"
+                f"{'Priority':<10}"
+                f"{'Roommates':<24}"
+                f"{'Room':<15}"
+            )
+
+            self.stdout.write(header)
+            self.stdout.write("-" * 100)
+
+            for student_id, assignment in sorted(
+                    apartments[apartment_code],
+                    key=lambda x: (x[1]["room_code"], x[0])
+            ):
+                row = student_rows_by_id[student_id]
+
+                gender = row.get("gender", "").strip() or "-"
+
+                religion = (
+                        row.get("requested_religion", "").strip()
+                        or row.get("religion", "").strip()
+                        or "-"
+                )
+
+                religious_request = (
+                        row.get("religious_for_placement", "").strip()
+                        or row.get("religious_preference", "").strip()
+                        or "-"
+                )
+
+                priority = (
+                    "YES"
+                    if self.parse_bool(row.get("is_priority", "False"))
+                    else "NO"
+                )
+
+                roommate_requests = []
+                for index in range(1, 6):
+                    roommate_id = row.get(
+                        f"roommate_request_student_id_{index}",
+                        ""
+                    ).strip()
+
+                    if roommate_id:
+                        roommate_requests.append(roommate_id)
+
+                roommate_text = (
+                    ", ".join(roommate_requests)
+                    if roommate_requests
+                    else "-"
+                )
+
+                self.stdout.write(
+                    f"{student_id:<9}"
+                    f"{gender:<9}"
+                    f"{religion:<16}"
+                    f"{religious_request:<17}"
+                    f"{priority:<10}"
+                    f"{roommate_text:<24}"
+                    f"{assignment['room_code']:<15}"
+                )
+
+        self.stdout.write("")
+        self.stdout.write("=" * 100)
+        self.stdout.write("UNASSIGNED STUDENTS")
+        self.stdout.write("=" * 100)
+
+        if report["unassigned_students"]:
+            for student_id in report["unassigned_students"]:
+                row = student_rows_by_id[student_id]
+
+                religion = (
+                        row.get("requested_religion", "").strip()
+                        or row.get("religion", "").strip()
+                        or "-"
+                )
+
+                religious_request = (
+                        row.get("religious_for_placement", "").strip()
+                        or "-"
+                )
+
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"{student_id} | "
+                        f"Gender={row.get('gender', '-')} | "
+                        f"Religion={religion} | "
+                        f"Religious={religious_request}"
+                    )
+                )
+        else:
+            self.stdout.write(
+                self.style.SUCCESS("No unassigned students.")
+            )
+
+
+
+
+
+    def print_student_constraints_summary(self, report, students_rows):
+        self.stdout.write("")
+        self.stdout.write("=" * 150)
+        self.stdout.write("STUDENT CONSTRAINTS AND ALLOCATION RESULT")
+        self.stdout.write("=" * 150)
+
+        header = (
+            f"{'Student':<9}"
+            f"{'Gender':<9}"
+            f"{'Religion':<13}"
+            f"{'Religious Req.':<17}"
+            f"{'Priority':<10}"
+            f"{'Sector':<11}"
+            f"{'Roommate Requests':<28}"
+            f"{'Status':<12}"
+            f"{'Apartment':<12}"
+            f"{'Room':<14}"
+        )
+
+        self.stdout.write(header)
+        self.stdout.write("-" * 150)
+
+        for row in sorted(
+                students_rows,
+                key=lambda value: value.get("student_id", "")
+        ):
+            student_id = row.get("student_id", "").strip()
+
+            gender = row.get("gender", "").strip() or "-"
+
+            religion = (
+                    row.get("requested_religion", "").strip()
+                    or row.get("religion", "").strip()
+                    or "-"
+            )
+
+            religious_request = (
+                    row.get("religious_for_placement", "").strip()
+                    or row.get("religious_preference", "").strip()
+                    or "-"
+            )
+
+            priority = (
+                "YES"
+                if self.parse_bool(row.get("is_priority", "False"))
+                else "NO"
+            )
+
+            sector = row.get("placement_sector", "").strip() or "-"
+
+            roommate_requests = []
+            for index in range(1, 6):
+                roommate_id = row.get(
+                    f"roommate_request_student_id_{index}", ""
+                ).strip()
+
+                if roommate_id:
+                    positive = self.parse_bool(
+                        row.get(
+                            f"roommate_request_flag_{index}",
+                            "False"
+                        )
+                    )
+
+                    roommate_requests.append(
+                        f"{roommate_id}{'(+)' if positive else ''}"
+                    )
+
+            roommates_text = (
+                ", ".join(roommate_requests)
+                if roommate_requests
+                else "-"
+            )
+
+            assignment = report["assignment_by_student"].get(student_id)
+
+            if assignment:
+                status = "ASSIGNED"
+                apartment = assignment["apartment_code"]
+                room = assignment["room_code"]
+            else:
+                status = "UNASSIGNED"
+                apartment = "-"
+                room = "-"
+
+            line = (
+                f"{student_id:<9}"
+                f"{gender:<9}"
+                f"{religion:<13}"
+                f"{religious_request:<17}"
+                f"{priority:<10}"
+                f"{sector:<11}"
+                f"{roommates_text[:27]:<28}"
+                f"{status:<12}"
+                f"{apartment:<12}"
+                f"{room:<14}"
+            )
+
+            if assignment:
+                self.stdout.write(line)
+            else:
+                self.stdout.write(self.style.WARNING(line))
 
     def print_expected_vs_actual(self, report):
         self.stdout.write("")

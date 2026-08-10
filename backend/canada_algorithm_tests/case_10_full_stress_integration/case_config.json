@@ -1,0 +1,106 @@
+{
+  "description": "Full Stress Integration – hard constraints + soft preferences + shortage + operational rules",
+  "constraints_config": {
+    "sameGender": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "priorityFirst": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "roommatePositiveOnly": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 0
+    },
+    "ReligiousTogether": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 0
+    },
+    "sameReligion": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "roommateMatch": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 8
+    },
+    "sectorMatching": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 7
+    },
+    "avoidYearMix_1_with_3_4": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    },
+    "avoidAtudaimWithHasmaha": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    }
+  },
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL",
+      "FEASIBLE"
+    ]
+  },
+  "allocation_expectations": {
+    "unassigned_count": 2,
+    "must_be_assigned": [
+      "F09",
+      "F10",
+      "M01",
+      "M02"
+    ],
+    "unassigned_must_be_subset_of": [
+      "M03",
+      "M04",
+      "M05",
+      "M06",
+      "M07",
+      "M08",
+      "M09",
+      "M10"
+    ],
+    "must_share_apartment": [
+      [
+        "F05",
+        "F06"
+      ],
+      [
+        "M01",
+        "M02"
+      ]
+    ],
+    "must_not_share_apartment": [
+      [
+        "F09",
+        "M09"
+      ]
+    ],
+    "apartment_allowed_students": {
+      "F_RES": [
+        "F09",
+        "F10"
+      ]
+    }
+  }
+}
