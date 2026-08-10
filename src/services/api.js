@@ -67,9 +67,21 @@ const flattenErrorValue = (value, keyHint) => {
   return String(value);
 };
 
+// Server errors (5xx from a crashed Django view, a proxy timeout page, etc.)
+// often come back as a full HTML document rather than a DRF-rendered JSON
+// body. That HTML must never be surfaced as a user-facing message — log it
+// for debugging and fall through to the generic "empty/unknown body" case.
+const isHtmlBody = (data) =>
+  typeof data === "string" && /^\s*<(!doctype html|html)/i.test(data);
+
 const getErrorMessage = (err, fallback = "Request failed") => {
   const data = err?.response?.data;
   const status = err?.response?.status;
+
+  if (isHtmlBody(data)) {
+    console.error(`${fallback}: received HTML error body (HTTP ${status || "?"})`, data);
+    return `${fallback}: HTTP ${status || "?"} with empty/unknown body`;
+  }
 
   if (typeof data === "string" && data.trim()) {
     return data.length > 400
@@ -971,6 +983,73 @@ export const dormInventoryAPI = {
       return data;
     } catch (err) {
       throwApiError(err, "Failed to update bed");
+    }
+  },
+};
+
+// Assisted Allocation workbench (accessibility + unassigned students).
+// Same throwApiError convention as dormInventoryAPI/requestsAPI so
+// structured backend errors (violated-rule lists, {error} messages) survive
+// as err.fieldErrors instead of being flattened.
+export const assistedAllocationAPI = {
+  getQueue: async (params = {}) => {
+    try {
+      const { data } = await api.get("/api/assisted-allocation/queue/", { params });
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to load assisted allocation queue");
+    }
+  },
+  getStudentDetail: async (studentId) => {
+    try {
+      const { data } = await api.get(`/api/assisted-allocation/students/${studentId}/detail/`);
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to load student detail");
+    }
+  },
+  getRecommendations: async (studentId, params = {}) => {
+    try {
+      const { data } = await api.get(
+        `/api/assisted-allocation/students/${studentId}/recommendations/`,
+        { params }
+      );
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to load recommendations");
+    }
+  },
+  checkOverride: async (studentId, bedId) => {
+    try {
+      const { data } = await api.get(
+        `/api/assisted-allocation/students/${studentId}/override-check/`,
+        { params: { bed_id: bedId } }
+      );
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to check override");
+    }
+  },
+  assign: async (studentId, bedId) => {
+    try {
+      const { data } = await api.post(
+        `/api/assisted-allocation/students/${studentId}/assign/`,
+        { bed_id: bedId }
+      );
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to assign student");
+    }
+  },
+  override: async (studentId, bedId, note) => {
+    try {
+      const { data } = await api.post(
+        `/api/assisted-allocation/students/${studentId}/override/`,
+        { bed_id: bedId, note }
+      );
+      return data;
+    } catch (err) {
+      throwApiError(err, "Failed to assign student with override");
     }
   },
 };

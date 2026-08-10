@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { studentsAPI, requestsAPI, regionsAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import BedMatchPicker, { assignActionLabel, mergeBuildings } from '../components/BedMatchPicker';
+import StudentSearch from '../components/StudentSearch';
 import {
   Search, X, Plus, Loader2, Check, AlertTriangle,
   Home, DoorOpen, FileText, MapPin, Building2, BedDouble,
@@ -107,59 +108,8 @@ const WizardBar = ({ steps, current, colorKey }) => (
 );
 
 // ── Student search ────────────────────────────────────────────
-const StudentSearch = ({ onPick, filter, placeholder }) => {
-  const [q, setQ] = useState('');
-  const [res, setRes] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const debRef = useRef(null);
-
-  useEffect(() => {
-    if (debRef.current) clearTimeout(debRef.current);
-    const t = q.trim();
-    if (t.length < 2) { setRes([]); return; }
-    debRef.current = setTimeout(async () => {
-      setLoading(true);
-      try {
-        const d = await studentsAPI.getAll({ search: t });
-        const list = Array.isArray(d) ? d : (d.results || []);
-        setRes(filter ? list.filter(filter) : list);
-      } catch { setRes([]); }
-      finally { setLoading(false); }
-    }, 300);
-  }, [q]);
-
-  const getName = s => s?.full_name || `${s?.first_name||''} ${s?.last_name||''}`.trim();
-
-  return (
-    <div className="ss-wrap">
-      <div className="ss-field">
-        <Search size={13} className="ss-ico"/>
-        <input value={q} onChange={e=>setQ(e.target.value)} placeholder={placeholder||'חיפוש...'} autoFocus/>
-        {loading && <Spinner size={13}/>}
-        {q && !loading && <button className="ss-clear" onClick={()=>{setQ('');setRes([]);}}><X size={11}/></button>}
-      </div>
-      {res.length > 0 && (
-        <div className="ss-drop">
-          {res.map(s => {
-            const name = getName(s);
-            return (
-              <button key={s.id} type="button" className="ss-row"
-                onClick={()=>{onPick(s);setQ('');setRes([]);}}>
-                <div className="ss-ava">{(name[0]||'?').toUpperCase()}</div>
-                <div className="ss-info">
-                  <span className="ss-name">{name}</span>
-                  <span className="ss-id mono">{s.student_id}</span>
-                </div>
-                <Pill color={s.is_assigned?'green':'gray'} small>{s.is_assigned?'משובץ':'לא משובץ'}</Pill>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {q.length>=2 && !loading && res.length===0 && <div className="ss-empty">לא נמצאו תוצאות</div>}
-    </div>
-  );
-};
+// StudentSearch itself now lives in src/components/StudentSearch.js
+// (shared with the Assisted Allocation page) - imported above.
 
 const PickedBar = ({ student, onClear }) => {
   const name = student?.full_name || `${student?.first_name||''} ${student?.last_name||''}`.trim();
@@ -2611,42 +2561,7 @@ export default function TransfersPage({ language = 'he' }) {
         .wz-teal   { background: var(--teal);   }
         .wz-amber  { background: var(--amber);  }
 
-        /* ── Student search ── */
-        .ss-wrap { position: relative; }
-        .ss-field {
-          display: flex; align-items: center; gap: 8px;
-          border: 1px solid var(--bdr); border-radius: var(--r4);
-          padding: 9px 12px; background: var(--surf); transition: border-color .12s;
-        }
-        .ss-field:focus-within { border-color: var(--bdr-focus); }
-        .ss-ico { color: var(--t4); flex-shrink: 0; }
-        .ss-field input {
-          flex: 1; border: none; background: transparent;
-          font-family: inherit; font-size: 14px; outline: none; min-width: 0; color: var(--t1);
-        }
-        .ss-field input::placeholder { color: var(--t4); }
-        .ss-clear { background: none; border: none; cursor: pointer; color: var(--t4); display: flex; align-items: center; }
-        .ss-drop {
-          position: absolute; top: calc(100% + 4px);
-          inset-inline-start: 0; inset-inline-end: 0;
-          background: var(--surf); border: 1px solid var(--bdr); border-radius: var(--r8);
-          box-shadow: var(--sh3); z-index: 100; max-height: 260px; overflow-y: auto;
-        }
-        .ss-row {
-          display: flex; align-items: center; gap: 10px; width: 100%;
-          padding: 10px 13px; border: none; background: transparent;
-          font-family: inherit; cursor: pointer; text-align: start; transition: background .1s;
-        }
-        .ss-row:hover { background: var(--surf-2); }
-        .ss-ava {
-          width: 32px; height: 32px; background: var(--blue); color: #fff;
-          border-radius: var(--r6); display: flex; align-items: center; justify-content: center;
-          font-size: 13px; font-weight: 700; flex-shrink: 0;
-        }
-        .ss-info { flex: 1; min-width: 0; }
-        .ss-name { display: block; font-size: 14px; font-weight: 600; color: var(--t1); }
-        .ss-id   { font-size: 12px; color: var(--t4); font-family: 'SF Mono', Consolas, monospace; }
-        .ss-empty { padding: 14px; text-align: center; font-size: 13px; color: var(--t4); }
+        /* ── Student search: now in src/components/StudentSearch.js ── */
 
         .picked-bar {
           display: flex; align-items: center; gap: 10px;
