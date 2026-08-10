@@ -394,16 +394,41 @@ class BuildingSerializer(serializers.ModelSerializer):
             'free_beds',
         ]
 
+    # apartment_count/room_count/bed_count/occupied_beds are computed at the
+    # queryset level (see views._annotate_building_inventory_counts) as
+    # correlated-subquery annotations (_apartment_count/_room_count/
+    # _bed_count/_occupied_beds), so BuildingViewSet.get_queryset() results
+    # carry them with zero extra queries per row (performance baseline
+    # finding BLD-01). Each getter here reads that annotation when present
+    # (fast path) and falls back to the original per-object query only when
+    # it isn't - e.g. a freshly created Building from
+    # BuildingViewSet.create(), which serializes a plain unannotated
+    # instance returned by serializer.save() rather than one fetched via
+    # get_queryset(). The fallback query is byte-for-byte the original
+    # get_*_count implementation, so behavior/values are identical either
+    # way - only the query count differs.
     def get_apartment_count(self, obj):
+        value = getattr(obj, '_apartment_count', None)
+        if value is not None:
+            return value
         return obj.apartments.filter(is_active=True).count()
 
     def get_room_count(self, obj):
+        value = getattr(obj, '_room_count', None)
+        if value is not None:
+            return value
         return Room.objects.filter(apartment__building=obj, is_active=True, apartment__is_active=True).count()
 
     def get_bed_count(self, obj):
+        value = getattr(obj, '_bed_count', None)
+        if value is not None:
+            return value
         return Bed.objects.filter(room__apartment__building=obj, room__is_active=True, room__apartment__is_active=True).count()
 
     def get_occupied_beds(self, obj):
+        value = getattr(obj, '_occupied_beds', None)
+        if value is not None:
+            return value
         return BedAssignment.objects.filter(
             bed__room__apartment__building=obj, status=BedAssignment.Status.ACTIVE,
         ).values('bed_id').distinct().count()
@@ -452,13 +477,35 @@ class ApartmentSerializer(serializers.ModelSerializer):
             'dorm_type',
         ]
 
+    # actual_room_count/bed_count/occupied_beds are computed at the
+    # queryset level (see views._annotate_apartment_inventory_counts) as
+    # correlated-subquery annotations (_actual_room_count/_bed_count/
+    # _occupied_beds), so ApartmentViewSet.get_queryset() results carry
+    # them with zero extra queries per row (performance baseline finding
+    # BLD-02). Each getter here reads that annotation when present (fast
+    # path) and falls back to the original per-object query only when it
+    # isn't - e.g. a freshly created Apartment from
+    # ApartmentViewSet.create(), which serializes a plain unannotated
+    # instance returned by serializer.save() rather than one fetched via
+    # get_queryset(). The fallback query is byte-for-byte the original
+    # get_*_count implementation, so behavior/values are identical either
+    # way - only the query count differs.
     def get_actual_room_count(self, obj):
+        value = getattr(obj, '_actual_room_count', None)
+        if value is not None:
+            return value
         return obj.rooms.filter(is_active=True).count()
 
     def get_bed_count(self, obj):
+        value = getattr(obj, '_bed_count', None)
+        if value is not None:
+            return value
         return Bed.objects.filter(room__apartment=obj, room__is_active=True).count()
 
     def get_occupied_beds(self, obj):
+        value = getattr(obj, '_occupied_beds', None)
+        if value is not None:
+            return value
         return BedAssignment.objects.filter(
             bed__room__apartment=obj, status=BedAssignment.Status.ACTIVE,
         ).values('bed_id').distinct().count()
@@ -475,9 +522,9 @@ class RoomSerializer(serializers.ModelSerializer):
     region = serializers.CharField(source='region.id', read_only=True)
     region_name = serializers.CharField(source='region.name', read_only=True)
     number = serializers.CharField(read_only=True)
-    current_occupancy = serializers.IntegerField(read_only=True)
-    available_beds = serializers.IntegerField(read_only=True)
-    is_full = serializers.BooleanField(read_only=True)
+    current_occupancy = serializers.SerializerMethodField()
+    available_beds = serializers.SerializerMethodField()
+    is_full = serializers.SerializerMethodField()
     bed_count = serializers.SerializerMethodField()
     has_missing_bed_records = serializers.SerializerMethodField()
 
@@ -501,7 +548,46 @@ class RoomSerializer(serializers.ModelSerializer):
             'has_missing_bed_records',
         ]
 
+    # current_occupancy/available_beds/is_full/bed_count/
+    # has_missing_bed_records are computed at the queryset level (see
+    # views._annotate_room_inventory_counts) as correlated-subquery /
+    # Case-expression annotations (_current_occupancy/_available_beds/
+    # _is_full/_bed_count/_has_missing_bed_records), so
+    # RoomViewSet.get_queryset() results carry them with zero extra
+    # queries per row (performance baseline finding BLD-03). Each getter
+    # here reads that annotation when present (fast path) and falls back
+    # to the original Room model property / query only when it isn't -
+    # e.g. a freshly created Room from RoomViewSet.create(), which
+    # serializes a plain unannotated instance returned by
+    # serializer.save() rather than one fetched via get_queryset(). The
+    # fallback path is byte-for-byte the original property/query, so
+    # behavior/values are identical either way - only the query count
+    # differs. `getattr(..., None) is not None` correctly distinguishes a
+    # legitimately-annotated `0`/`False` from "annotation absent", since
+    # every annotation is wrapped in Coalesce(...) or a Case with an
+    # explicit default - it is never actually NULL when present.
+    def get_current_occupancy(self, obj):
+        value = getattr(obj, '_current_occupancy', None)
+        if value is not None:
+            return value
+        return obj.current_occupancy
+
+    def get_available_beds(self, obj):
+        value = getattr(obj, '_available_beds', None)
+        if value is not None:
+            return value
+        return obj.available_beds
+
+    def get_is_full(self, obj):
+        value = getattr(obj, '_is_full', None)
+        if value is not None:
+            return value
+        return obj.is_full
+
     def get_bed_count(self, obj):
+        value = getattr(obj, '_bed_count', None)
+        if value is not None:
+            return value
         return obj.beds.count()
 
     def get_has_missing_bed_records(self, obj):
@@ -509,6 +595,9 @@ class RoomSerializer(serializers.ModelSerializer):
         # `manage.py materialize_beds` command, never automatically on
         # capacity edits (see ensure_room_beds in views.py) — surfaced here
         # so staff can see the gap instead of it looking like a silent bug.
+        value = getattr(obj, '_has_missing_bed_records', None)
+        if value is not None:
+            return value
         return obj.beds.count() < obj.capacity
 
 
@@ -524,7 +613,7 @@ class BedSerializer(serializers.ModelSerializer):
     room_name = serializers.CharField(source='room.name', read_only=True)
     apartment_number = serializers.CharField(source='room.apartment.number', read_only=True)
     building_number = serializers.IntegerField(source='room.apartment.building.number', read_only=True)
-    is_occupied = serializers.BooleanField(read_only=True)
+    is_occupied = serializers.SerializerMethodField()
 
     class Meta:
         model = Bed
@@ -538,6 +627,24 @@ class BedSerializer(serializers.ModelSerializer):
             'is_occupied',
         ]
         read_only_fields = ['room']
+
+    # is_occupied is computed at the queryset level (see
+    # views._annotate_bed_occupancy) as an Exists(...) annotation
+    # (_is_occupied), so BedViewSet.get_queryset() results carry it with
+    # zero extra queries per row (performance baseline finding BLD-04).
+    # Reads that annotation when present (fast path) and falls back to
+    # the original Bed.is_occupied model property only when it isn't -
+    # there is no bed-creation endpoint (BedViewSet only supports
+    # get/patch/head/options), so the only realistic unannotated case is
+    # a Bed instance constructed/fetched some other way; the fallback
+    # keeps that path correct regardless. `is not None` correctly
+    # distinguishes a legitimately-annotated `False` from "annotation
+    # absent", since Exists(...) is a real boolean and never NULL.
+    def get_is_occupied(self, obj):
+        value = getattr(obj, '_is_occupied', None)
+        if value is not None:
+            return value
+        return obj.is_occupied
 
 
 # ===========================================

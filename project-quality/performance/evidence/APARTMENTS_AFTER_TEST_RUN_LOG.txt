@@ -1,0 +1,99 @@
+Found 5 test(s).
+Creating test database for alias 'default' ('test_dormify_test')...
+Operations to perform:
+  Synchronize unmigrated apps: accounts, corsheaders, messages, rest_framework, rest_framework_simplejwt, staticfiles
+  Apply all migrations: admin, api, auth, contenttypes, sessions
+Synchronizing apps without migrations:
+  Creating tables...
+    Running deferred SQL...
+Running migrations:
+  Applying contenttypes.0001_initial... OK
+  Applying contenttypes.0002_remove_content_type_name... OK
+  Applying auth.0001_initial... OK
+  Applying auth.0002_alter_permission_name_max_length... OK
+  Applying auth.0003_alter_user_email_max_length... OK
+  Applying auth.0004_alter_user_username_opts... OK
+  Applying auth.0005_alter_user_last_login_null... OK
+  Applying auth.0006_require_contenttypes_0002... OK
+  Applying auth.0007_alter_validators_add_error_messages... OK
+  Applying auth.0008_alter_user_username_max_length... OK
+  Applying auth.0009_alter_user_last_name_max_length... OK
+  Applying auth.0010_alter_group_name_max_length... OK
+  Applying auth.0011_update_proxy_permissions... OK
+  Applying auth.0012_alter_user_first_name_max_length... OK
+  Applying api.0001_initial... OK
+  Applying admin.0001_initial... OK
+  Applying admin.0002_logentry_remove_auto_add... OK
+  Applying admin.0003_logentry_add_action_flag_choices... OK
+  Applying api.0002_student_placement_sector_and_more... OK
+  Applying api.0003_studentrequest... OK
+  Applying api.0004_studentrequest_other_description_and_more... OK
+  Applying api.0005_studentrequest_removal_notes_and_more... OK
+  Applying api.0006_studentrequest_student_data_and_more... OK
+  Applying api.0007_studentrequest_priority_and_more... OK
+  Applying api.0003_alter_room_options_room_building... OK
+  Applying api.0004_alter_building_options_alter_room_options_and_more... OK
+  Applying api.0005_alter_student_gender... OK
+  Applying api.0008_merge_20260628_2306... OK
+  Applying api.0005_allocationrun_lifecycle_bedassignment_run_fk... OK
+  Applying api.0009_merge_20260629_1738... OK
+  Applying api.0010_student_accessibility_flag_and_more... OK
+  Applying api.0011_building_gender_restriction... OK
+  Applying api.0010_studentrequest_current_assignment_snapshot_and_more... OK
+  Applying api.0012_merge_20260714_2148... OK
+  Applying api.0013_allocationrun_diagnostics... OK
+  Applying api.0014_assistedallocationaudit... OK
+  Applying sessions.0001_initial... OK
+System check identified no issues (0 silenced).
+test_apartment_counts_match_expected_values (api.performance_tests.test_apartments_performance.ApartmentCountCorrectnessTests.test_apartment_counts_match_expected_values)
+Hand-computed expected values for the fixture above: ... ok
+test_apartment_counts_match_original_unannotated_queries (api.performance_tests.test_apartments_performance.ApartmentCountCorrectnessTests.test_apartment_counts_match_original_unannotated_queries)
+Ground-truth cross-check: recompute each count with the exact ... ok
+test_freshly_created_apartment_falls_back_correctly (api.performance_tests.test_apartments_performance.ApartmentCountCorrectnessTests.test_freshly_created_apartment_falls_back_correctly)
+ApartmentViewSet.create() serializes a plain instance returned by ... ok
+test_apartments_list_query_count_is_flat_after_optimization (api.performance_tests.test_apartments_performance.ApartmentsListPerformanceTests.test_apartments_list_query_count_is_flat_after_optimization)
+Core regression check: GET /api/apartments/ must issue essentially ... --- SMALL DATASET (post-optimization): n_apartments=5 ---
+endpoint: GET /api/apartments/?building=4&is_active=all
+user role: central_admin
+apartments_returned: 5
+total_sql_queries: 1
+distinct_query_shapes: 1
+server_side_request_time_ms: 8.22
+response_payload_bytes: 2341
+repeated_query_shapes (occurrence_count x shape, numbers masked as #):
+
+--- LARGE DATASET (post-optimization): n_apartments=25 ---
+endpoint: GET /api/apartments/?building=5&is_active=all
+user role: central_admin
+apartments_returned: 25
+total_sql_queries: 1
+distinct_query_shapes: 1
+server_side_request_time_ms: 13.60
+response_payload_bytes: 11742
+repeated_query_shapes (occurrence_count x shape, numbers masked as #):
+
+--- SCALING SUMMARY (post-optimization) ---
+small: n=5 total_queries=1 queries/apartment=0.20 time_ms=8.22 bytes=2341
+large: n=25 total_queries=1 queries/apartment=0.04 time_ms=13.60 bytes=11742
+marginal_queries_per_additional_apartment: 0.00
+BLD-02 baseline marginal cost (pre-fix): 5.00 queries/apartment
+
+ok
+test_apartments_list_single_apartment_baseline_overhead (api.performance_tests.test_apartments_performance.ApartmentsListPerformanceTests.test_apartments_list_single_apartment_baseline_overhead)
+Secondary measurement: the N=1 case isolates the fixed per-request ... --- SINGLE APARTMENT (N=1, post-optimization): n_apartments=1 ---
+endpoint: GET /api/apartments/?building=6&is_active=all
+user role: central_admin
+apartments_returned: 1
+total_sql_queries: 1
+distinct_query_shapes: 1
+server_side_request_time_ms: 20.08
+response_payload_bytes: 470
+repeated_query_shapes (occurrence_count x shape, numbers masked as #):
+
+ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 2.729s
+
+OK
+Destroying test database for alias 'default' ('test_dormify_test')...
