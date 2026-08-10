@@ -89,6 +89,34 @@ urlpatterns = [
     path('room-assignments/unassign/', views.unassign_student_room, name='unassign-student-room'),
     path('room-assignments/swap/', views.swap_students_rooms, name='swap-students-rooms'),
 
+    # Assisted Allocation workbench (accessibility + unassigned students)
+    path('assisted-allocation/queue/', views.assisted_allocation_queue, name='assisted-allocation-queue'),
+    path(
+        'assisted-allocation/students/<int:pk>/detail/',
+        views.assisted_allocation_student_detail,
+        name='assisted-allocation-student-detail',
+    ),
+    path(
+        'assisted-allocation/students/<int:pk>/recommendations/',
+        views.assisted_allocation_recommendations,
+        name='assisted-allocation-recommendations',
+    ),
+    path(
+        'assisted-allocation/students/<int:pk>/override-check/',
+        views.assisted_allocation_override_check,
+        name='assisted-allocation-override-check',
+    ),
+    path(
+        'assisted-allocation/students/<int:pk>/assign/',
+        views.assisted_allocation_assign,
+        name='assisted-allocation-assign',
+    ),
+    path(
+        'assisted-allocation/students/<int:pk>/override/',
+        views.assisted_allocation_override,
+        name='assisted-allocation-override',
+    ),
+
     # Reports
     path('reports/dormify-report/',            views.dormify_report,            name='dormify-report'),
     path('reports/student-allocation-report/', views.student_allocation_report, name='student-allocation-report'),

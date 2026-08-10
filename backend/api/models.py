@@ -1211,3 +1211,80 @@ class StudentRequest(models.Model):
         student_label = self.student.full_name if self.student else '(no student)'
         return f"{self.get_request_type_display()} - {student_label} - {self.get_status_display()}"
 
+
+class AssistedAllocationAudit(models.Model):
+    """
+    Audit trail for staff actions taken from the Assisted Allocation
+    workbench: manual assignment, manual override (bypassing a hard
+    compatibility rule), and apartment/building configuration changes.
+
+    No general-purpose audit/history mechanism exists elsewhere in this
+    codebase (no django-simple-history/reversion) - this one model is
+    written from three call sites (see api/views.py) rather than
+    introducing a per-model history table for each of Student, BedAssignment,
+    Building and Apartment.
+    """
+
+    class ActionType(models.TextChoices):
+        MANUAL_ASSIGNMENT = 'manual_assignment', _('שיבוץ ידני')
+        MANUAL_OVERRIDE = 'manual_override', _('שיבוץ בחריגה')
+        CONFIG_CHANGE = 'config_change', _('שינוי הגדרת דירה/בניין')
+
+    action_type = models.CharField(max_length=30, choices=ActionType.choices)
+    actor = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assisted_allocation_actions',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    student = models.ForeignKey(
+        Student,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assisted_allocation_actions',
+    )
+    bed_assignment = models.ForeignKey(
+        BedAssignment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assisted_allocation_audit_entries',
+    )
+    building = models.ForeignKey(
+        Building,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assisted_allocation_audit_entries',
+    )
+    apartment = models.ForeignKey(
+        Apartment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assisted_allocation_audit_entries',
+    )
+
+    previous_state = models.JSONField(default=dict, blank=True)
+    new_state = models.JSONField(default=dict, blank=True)
+    # List of {"code": ..., "label": ...} - only populated for MANUAL_OVERRIDE.
+    overridden_rules = models.JSONField(default=list, blank=True)
+    note = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = _('פעולת שיבוץ מסייע')
+        verbose_name_plural = _('פעולות שיבוץ מסייע')
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['student', '-created_at']),
+            models.Index(fields=['action_type', '-created_at']),
+        ]
+
+    def __str__(self):
+        student_label = self.student.full_name if self.student else '(no student)'
+        return f"{self.get_action_type_display()} - {student_label}"
+

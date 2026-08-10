@@ -12,7 +12,7 @@ import HomePage from './pages/HomePage';
 import BuildingsPage from './pages/BuildingsPage';
 import StudentsPage from './pages/StudentsPage';
 import UploadPage from './pages/UploadPage';
-import PriorityPage from './pages/PriorityPage';
+import AssistedAllocationPage from './pages/AssistedAllocationPage';
 import AllocationPage from './pages/AllocationPage';
 import AllocationResultsPage from './pages/AllocationResultsPage';
 import TransfersPage from './pages/TransfersPage';
@@ -102,7 +102,9 @@ function AppContent() {
         <Route path="/buildings" element={<BuildingsPage language={language} />} />
         <Route path="/students" element={<StudentsPage language={language} />} />
         <Route path="/upload" element={<UploadPage language={language} />} />
-        <Route path="/priority" element={<PriorityPage language={language} />} />
+        <Route path="/assisted-allocation" element={<AssistedAllocationPage />} />
+        {/* Old Accessibility / Special Requests page - preserved as an alias */}
+        <Route path="/priority" element={<Navigate to="/assisted-allocation" replace />} />
         <Route path="/allocation" element={<AllocationPage language={language} />} />
           <Route path="/analysis" element={<AnalysisPage language={language} />} />
           <Route path="/what-if" element={<WhatIfPage language={language} />} />

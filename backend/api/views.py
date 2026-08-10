@@ -24,7 +24,7 @@ from django.db import connection
 from .models import (
     User, Region, Office, StaffProfile, DormType, Building, Apartment, Room, Bed,
     Student, BedAssignment, MovementRequest, Transfer, StudentRequest,
-    AllocationRun, ImportBatch, RegionInbox
+    AllocationRun, ImportBatch, RegionInbox, AssistedAllocationAudit
 )
 from .serializers import (
     UserSerializer, LoginSerializer, RegisterSerializer,
@@ -544,7 +544,19 @@ def assign_student_to_room(
     assigned_by: User,
     assignment_type=BedAssignment.AssignmentType.MANUAL,
     bed_id=None,
+    skip_validation=False,
 ):
+    """
+    skip_validation: staff-authorized manual override only (Assisted
+    Allocation "manual override" action). Skips the
+    validate_apartment_assignment(...) compatibility check below - every
+    other safety step (apartment lock, bed re-verification under lock,
+    full_clean uniqueness constraints, denormalized assigned_room update)
+    still runs unchanged, so an override can never double-book a bed or
+    exceed room capacity. Callers passing True must have already computed
+    and confirmed the violated rules with
+    allocation.manual_placement.evaluate_manual_override.
+    """
     # Lock the apartment while validating and assigning so two concurrent
     # requests cannot violate Z6 apartment exclusivity.
     with transaction.atomic():
@@ -557,7 +569,8 @@ def assign_student_to_room(
         ).get(pk=room.pk)
         locked_room.apartment = locked_apartment
 
-        validate_apartment_assignment(student, locked_room)
+        if not skip_validation:
+            validate_apartment_assignment(student, locked_room)
 
         # A caller may target a specific bed (e.g. the per-bed matching UI) -
         # it is always re-verified free here, under the apartment lock,
@@ -770,11 +783,47 @@ class BuildingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        conflict = check_building_write_conflict(self.get_object(), request.data)
-        if conflict:
-            return Response(conflict, status=status.HTTP_400_BAD_REQUEST)
+        instance = self.get_object()
+        with transaction.atomic():
+            # Lock this building's row AND every apartment in it before
+            # re-checking occupancy: a building-level gender_restriction
+            # change affects every apartment underneath it, and
+            # assign_student_to_room locks the specific apartment it writes
+            # to (select_for_update on that Apartment pk) - locking every
+            # apartment here means any concurrent assignment into ANY of
+            # them blocks until this transaction commits/rolls back, so the
+            # "was empty when the recommendation was generated" check below
+            # can never go stale between the read and the actual save
+            # (e.g. a "שינוי הגדרה" suggestion built while the building was
+            # empty, applied moments after another employee filled a bed).
+            locked_instance = Building.objects.select_for_update().get(pk=instance.pk)
+            # order_by() clears Apartment's default ordering (['building',
+            # 'number']) before locking: Django resolves an FK in default
+            # ordering through the related model's own Meta.ordering
+            # (Building -> ['dorm_type', 'number']), which pulls in a LEFT
+            # OUTER JOIN to the nullable DormType FK - Postgres refuses
+            # FOR UPDATE on the nullable side of an outer join. .get() (used
+            # everywhere else in this file) sidesteps this by stripping
+            # ordering internally; a plain .filter() list does not.
+            list(Apartment.objects.select_for_update().filter(building=locked_instance).order_by())
 
-        return super().update(request, *args, **kwargs)
+            conflict = check_building_write_conflict(locked_instance, request.data)
+            if conflict:
+                return Response(conflict, status=status.HTTP_400_BAD_REQUEST)
+
+            previous_restriction = locked_instance.gender_restriction
+            response = super().update(request, *args, **kwargs)
+            if response.status_code == 200:
+                locked_instance.refresh_from_db(fields=['gender_restriction'])
+                if locked_instance.gender_restriction != previous_restriction:
+                    AssistedAllocationAudit.objects.create(
+                        action_type=AssistedAllocationAudit.ActionType.CONFIG_CHANGE,
+                        actor=request.user,
+                        building=locked_instance,
+                        previous_state={'gender_restriction': previous_restriction},
+                        new_state={'gender_restriction': locked_instance.gender_restriction},
+                    )
+        return response
 
     @action(detail=True, methods=['get'])
     def apartments(self, request, pk=None):
@@ -1067,11 +1116,44 @@ class ApartmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        conflict = check_apartment_write_conflict(self.get_object(), request.data)
-        if conflict:
-            return Response(conflict, status=status.HTTP_400_BAD_REQUEST)
+        instance = self.get_object()
+        with transaction.atomic():
+            # Lock this apartment's row before re-checking occupancy:
+            # assign_student_to_room locks the same Apartment pk via
+            # select_for_update before creating a BedAssignment, so holding
+            # this lock for the duration of the check+write means the two
+            # can never interleave - a concurrent assignment either fully
+            # commits before this check reads it, or blocks until this
+            # transaction is done. This closes the race where a "שינוי
+            # הגדרה" recommendation was generated while the apartment was
+            # empty, but another employee assigned a student into it a
+            # moment before this request was confirmed.
+            locked_instance = Apartment.objects.select_for_update().get(pk=instance.pk)
+            conflict = check_apartment_write_conflict(locked_instance, request.data)
+            if conflict:
+                return Response(conflict, status=status.HTTP_400_BAD_REQUEST)
 
-        return super().update(request, *args, **kwargs)
+            previous_state = {
+                'category': locked_instance.category,
+                'apartment_type': locked_instance.apartment_type,
+            }
+            response = super().update(request, *args, **kwargs)
+            if response.status_code == 200:
+                locked_instance.refresh_from_db(fields=['category', 'apartment_type'])
+                new_state = {
+                    'category': locked_instance.category,
+                    'apartment_type': locked_instance.apartment_type,
+                }
+                if new_state != previous_state:
+                    AssistedAllocationAudit.objects.create(
+                        action_type=AssistedAllocationAudit.ActionType.CONFIG_CHANGE,
+                        actor=request.user,
+                        apartment=locked_instance,
+                        building=locked_instance.building,
+                        previous_state=previous_state,
+                        new_state=new_state,
+                    )
+        return response
 
 
 class RoomViewSet(viewsets.ModelViewSet):
@@ -1810,6 +1892,23 @@ RECOMMENDATION_LEVEL_MAP = {
 
 def _reason(code):
     return {'code': code, 'label': REASON_LABELS[code]}
+
+
+# Assisted Allocation's own 3-tier classification (find_matching_room_options
+# assisted_mode=True) - distinct from the 5-level recommendation_level/
+# match_level scheme above, which stays unchanged for the Students/Transfers
+# pages that also call find_matching_room_options. 'possible' covers what
+# match_level calls 'valid' and 'warning' (a soft, non-blocking mismatch -
+# e.g. sector/year-mix - is still a directly assignable candidate, just a
+# lower-ranked one); 'override_required' is its own tier because that bed is
+# NOT directly assignable - it requires the explicit override flow.
+ASSISTED_STATUS_LABELS = {
+    'recommended': 'מומלץ',
+    'possible': 'אפשרי',
+    'override_required': 'דורש חריגה',
+}
+ASSISTED_STATUS_SORT_RANK = {'recommended': 0, 'possible': 1, 'override_required': 2}
+
 MAX_CONFLICT_EXAMPLES = 5
 MAX_CONFLICT_BUFFER = 50
 # Rooms whose only problem is "no free bed" are a far more useful diagnostic
@@ -1910,10 +2009,18 @@ def _room_conflicts(student, room, apartment, residents, available_beds):
     if expected is None:
         reasons.append('לסטודנט אין סוג דיור נתמך לשיבוץ')
     else:
+        from allocation.solver import _effective_apartment_category
+
         expected_type, expected_category = expected
         if apartment.apartment_type != expected_type:
             reasons.append('אי-התאמת סוג הדירה לסוג הדיור של הסטודנט')
-        if apartment.category != expected_category:
+        # Effective category: a building-wide gender_restriction (shared-
+        # facility buildings) overrides a possibly wrong/conflicting
+        # individual apartment category - mirrors
+        # allocation.manual_placement.evaluate_manual_override so browsing
+        # and the override-confirmation dialog never disagree about which
+        # rooms are gender-compatible.
+        if _effective_apartment_category(apartment) != expected_category:
             reasons.append('אי-התאמת מגדר/קטגוריית הדירה')
 
     return reasons
@@ -1954,6 +2061,7 @@ def _room_candidate_queryset(user, region_id=None, region_ids=None):
 def find_matching_room_options(
     user, student=None, student_data=None, same_apartment=None,
     region_id=None, region_ids=None, limit=10, offset=0, explain_conflicts_if_empty=True,
+    assisted_mode=False,
 ):
     """
     Real, currently-available placement options for a student (existing, or
@@ -2003,6 +2111,26 @@ def find_matching_room_options(
     contains a score or percentage, only recommendation_level/label (fixed
     tiers) plus matched_reasons/warnings/historical_reasons as {code,label}
     pairs.
+
+    assisted_mode: used only by the Assisted Allocation workbench
+    (assisted_allocation_recommendations). When True:
+      - candidates are hard-restricted to the student's own
+        accepted_dorm_type (never merely the region) - staying inside the
+        dorm type the student was actually accepted to is a business rule,
+        not a preference, so it is enforced unconditionally here (including
+        for is_priority students - unlike the automatic solver's own
+        _should_enforce_accepted_dorm_type bypass, which is intentionally
+        left untouched for automatic runs). A student with no
+        accepted_dorm_type_id yields zero candidates rather than an
+        unrestricted region-wide scan.
+      - each apartment additionally carries assisted_status
+        ('recommended' | 'possible' | 'override_required') and
+        override_violations - the same {code,label,overridable,consequence}
+        shape allocation.manual_placement.evaluate_manual_override returns,
+        computed from the residents/data already fetched here (no extra
+        queries) so a bed needing a documented override is visibly
+        distinguished from a normal recommendation instead of only
+        surfacing at assign-time.
     """
     student_data = student_data or {}
     current_room = None
@@ -2032,6 +2160,13 @@ def find_matching_room_options(
     elif same_apartment is False and current_apartment_id:
         rooms_qs = rooms_qs.exclude(apartment_id=current_apartment_id)
 
+    if assisted_mode:
+        accepted_dorm_type_id = getattr(student, 'accepted_dorm_type_id', None)
+        if not accepted_dorm_type_id:
+            rooms_qs = rooms_qs.none()
+        else:
+            rooms_qs = rooms_qs.filter(apartment__building__dorm_type_id=accepted_dorm_type_id)
+
     rooms = list(rooms_qs.prefetch_related('beds'))  # query #1 (Room + select_related chain), query #2 (beds prefetch)
     apartment_ids = {r.apartment_id for r in rooms}
 
@@ -2060,6 +2195,7 @@ def find_matching_room_options(
             'city': rs.city,
             'religion': rs.requested_religion,
             'religion_display': rs.get_requested_religion_display(),
+            'religious': rs.religious,
             'placement_sector': rs.placement_sector,
             'sector_display': rs.get_placement_sector_display(),
             'study_points': rs.study_points,
@@ -2223,7 +2359,10 @@ def find_matching_room_options(
     def _public_residents(other_residents):
         # roommate_ids is internal matching detail (a set, and other
         # students' private request lists) - never serialized to the client.
-        return [{k: v for k, v in r.items() if k != 'roommate_ids'} for r in other_residents]
+        # religious (observance level) is internal matching detail used only
+        # to compute religion_conflict/override_violations server-side.
+        _internal_keys = {'roommate_ids', 'religious'}
+        return [{k: v for k, v in r.items() if k not in _internal_keys} for r in other_residents]
 
     # ---- pass 1: hard constraints + real-bed availability per room -------
     valid_rooms_by_apartment = defaultdict(list)
@@ -2276,11 +2415,20 @@ def find_matching_room_options(
     # ---- pass 2: score each apartment once, aggregate into buildings -----
     buildings_by_id = {}
     level_counts = {'best_match': 0, 'empty': 0, 'valid': 0, 'warning': 0, 'conflict': 0}
+    assisted_status_counts = {'recommended': 0, 'possible': 0, 'override_required': 0}
     fully_empty_count = 0
     roommate_match_count = 0
     total_apartments = 0
     total_rooms = 0
     total_valid_beds = 0
+
+    if assisted_mode:
+        from types import SimpleNamespace
+
+        from allocation.manual_placement import (
+            OVERRIDE_VIOLATION_CONSEQUENCE, religion_conflict_for_candidate,
+        )
+        from allocation.solver import _get_student_priority, _has_anier_special_status
 
     for apartment_id, room_entries in valid_rooms_by_apartment.items():
         apartment = room_entries[0]['room'].apartment
@@ -2301,6 +2449,43 @@ def find_matching_room_options(
             fully_empty_count += apt_selectable
         if tier >= 2:
             roommate_match_count += apt_selectable
+
+        override_violations = []
+        if assisted_mode:
+            # preferred_dormitory is guaranteed true for every candidate here
+            # (the queryset is already hard-restricted to the accepted dorm
+            # type) - showing it on every single card would be redundant,
+            # not informative.
+            matched_preferences = [r for r in matched_preferences if r['code'] != 'preferred_dormitory']
+
+            resident_ns = [
+                SimpleNamespace(requested_religion=r['religion'], religious=r.get('religious', ''))
+                for r in other_residents
+            ]
+            if religion_conflict_for_candidate(student, resident_ns):
+                override_violations.append({
+                    'code': 'religion', 'label': 'אין התאמה דתית לדיירים הקיימים',
+                    'overridable': True, 'consequence': OVERRIDE_VIOLATION_CONSEQUENCE['religion'],
+                })
+                # Superseded by the precise violation above - the coarser
+                # group-level warning would just repeat the same fact with
+                # different wording.
+                warnings = [w for w in warnings if w['code'] != 'religion_conflict']
+            if apartment.inactive_reason == Apartment.InactiveReason.RESERVED and not (
+                _get_student_priority(student) or _has_anier_special_status(student)
+            ):
+                override_violations.append({
+                    'code': 'reserved', 'label': 'הדירה שמורה',
+                    'overridable': True, 'consequence': OVERRIDE_VIOLATION_CONSEQUENCE['reserved'],
+                })
+
+            if override_violations:
+                assisted_status = 'override_required'
+            elif match_level in ('best_match', 'empty'):
+                assisted_status = 'recommended'
+            else:
+                assisted_status = 'possible'
+            assisted_status_label = ASSISTED_STATUS_LABELS[assisted_status]
 
         rooms_payload = []
         apt_capacity_free = 0
@@ -2350,6 +2535,16 @@ def find_matching_room_options(
             'rooms': rooms_payload,
             '_sort_key': (-tier, -score, -rec_rank, str(apartment.number)),
         }
+        if assisted_mode:
+            apartment_payload['assisted_status'] = assisted_status
+            apartment_payload['assisted_status_label'] = assisted_status_label
+            apartment_payload['override_violations'] = override_violations
+            # Status always outranks score: an override-required apartment
+            # must never sort above a plain recommended/possible one just
+            # because a roommate match happens to raise its score.
+            apartment_payload['_sort_key'] = (
+                ASSISTED_STATUS_SORT_RANK[assisted_status], -tier, -score, -rec_rank, str(apartment.number),
+            )
 
         b = buildings_by_id.get(building.id)
         if b is None:
@@ -2380,8 +2575,19 @@ def find_matching_room_options(
                 'roommate_bed_count': 0,
                 'warning_free_bed_count': 0,
                 'apartments': [],
-                '_best_key': (-1, -1),
+                # Sentinel guaranteed lower than any real apt_key so the
+                # first apartment always wins the update below. Assisted
+                # mode's apt_key leads with -ASSISTED_STATUS_SORT_RANK
+                # (0 down to -2), so a plain (-1, -1) is NOT low enough - an
+                # override_required-only building's rank (-2) would never
+                # beat it and _best_key would stay a 2-tuple, breaking the
+                # 3-tuple sort key read below.
+                '_best_key': (-1, -1) if not assisted_mode else (-999, -1, -1),
             }
+            if assisted_mode:
+                b['assisted_status'] = assisted_status
+                b['assisted_status_label'] = assisted_status_label
+                b['assisted_counts'] = {'recommended': 0, 'possible': 0, 'override_required': 0}
 
         b['apartment_count'] += 1
         b['room_count'] += len(rooms_payload)
@@ -2396,14 +2602,20 @@ def find_matching_room_options(
         if match_level in ('best_match', 'empty', 'valid'):
             b['warning_free_bed_count'] += apt_selectable
         b['apartments'].append(apartment_payload)
+        if assisted_mode:
+            b['assisted_counts'][assisted_status] += apt_selectable
+            assisted_status_counts[assisted_status] += apt_selectable
 
-        apt_key = (tier, score)
+        apt_key = (-ASSISTED_STATUS_SORT_RANK[assisted_status], tier, score) if assisted_mode else (tier, score)
         if apt_key > tuple(b['_best_key']):
             b['_best_key'] = apt_key
             b['recommendation_level'] = rec_level
             b['recommendation_label'] = rec_label
             b['recommendation_rank'] = rec_rank
             b['top_reasons'] = matched_preferences[:3]
+            if assisted_mode:
+                b['assisted_status'] = assisted_status
+                b['assisted_status_label'] = assisted_status_label
 
         total_apartments += 1
         total_rooms += len(rooms_payload)
@@ -2415,6 +2627,10 @@ def find_matching_room_options(
         buildings_by_id.values(),
         key=lambda b: (
             -b['_best_key'][0], -b['_best_key'][1],
+            b['building_number'] if b['building_number'] is not None else 10 ** 9,
+            b['building_id'],
+        ) if not assisted_mode else (
+            -b['_best_key'][0], -b['_best_key'][1], -b['_best_key'][2],
             b['building_number'] if b['building_number'] is not None else 10 ** 9,
             b['building_id'],
         ),
@@ -2520,6 +2736,7 @@ def find_matching_room_options(
             'missing_bed_records': integrity_missing_beds,
             'rooms_with_extra_bed_records': integrity_rooms_extra,
         },
+        **({'assisted_status_counts': assisted_status_counts} if assisted_mode else {}),
     }
 
 
@@ -4428,6 +4645,54 @@ def allocation_history(request):
     return Response({'runs': serializer.data})
 
 
+def _unassigned_students_queryset(region=None):
+    """
+    Currently-unassigned, solver-eligible students (excludes leaving and
+    accessibility-flagged students, who are never part of this population -
+    accessibility students are handled entirely by the separate
+    accessibility-pending queue, see _accessibility_pending_queryset).
+
+    Single source of truth for this population, shared by allocation_results
+    and the Assisted Allocation queue endpoint so they can never drift.
+    """
+    queryset = Student.objects.select_related(
+        'accepted_dorm_type',
+        'accepted_dorm_type__region',
+    ).exclude(
+        category=Student.StudentCategory.LEAVING
+    ).exclude(
+        accessibility_flag=True
+    ).filter(
+        assigned_room__isnull=True
+    )
+
+    if region:
+        queryset = queryset.filter(accepted_dorm_type__region=region)
+
+    return queryset.order_by(
+        '-is_priority',
+        'last_name',
+        'first_name',
+        'student_id',
+    )
+
+
+def _accessibility_pending_queryset(region=None):
+    """Accessibility-flagged students who still have no bed assignment."""
+    queryset = Student.objects.select_related(
+        'accepted_dorm_type',
+        'accepted_dorm_type__region',
+    ).filter(
+        accessibility_flag=True,
+        assigned_room__isnull=True,
+    )
+
+    if region:
+        queryset = queryset.filter(accepted_dorm_type__region=region)
+
+    return queryset.order_by('last_name', 'first_name', 'student_id')
+
+
 def _build_unassigned_analysis(students):
     """
     Group currently-unassigned students by the characteristics that
@@ -4703,35 +4968,8 @@ def allocation_results(request):
 
     # ============================================================
     # Unassigned students
-    #
-    # Keep this population aligned with allocation_summary and the
-    # solver population:
-    # - exclude leaving students
-    # - exclude accessibility cases handled manually
-    # - show only students without a current assignment
     # ============================================================
-    unassigned_qs = Student.objects.select_related(
-        'accepted_dorm_type',
-        'accepted_dorm_type__region',
-    ).exclude(
-        category=Student.StudentCategory.LEAVING
-    ).exclude(
-        accessibility_flag=True
-    ).filter(
-        assigned_room__isnull=True
-    )
-
-    if region:
-        unassigned_qs = unassigned_qs.filter(
-            accepted_dorm_type__region=region
-        )
-
-    unassigned_qs = unassigned_qs.order_by(
-        '-is_priority',
-        'last_name',
-        'first_name',
-        'student_id',
-    )
+    unassigned_qs = _unassigned_students_queryset(region)
 
     # Materialized once so both the per-student rows below and the grouped
     # unassigned_analysis further down iterate the same population without
@@ -4980,6 +5218,520 @@ def allocation_results(request):
         'available_beds': available_beds,
         'unassigned_analysis': unassigned_analysis,
     }, status=status.HTTP_200_OK)
+
+
+# ============================================================================
+# Assisted Allocation - staff workbench for accessibility + unassigned
+# students (see src/pages/AssistedAllocationPage.js). Every hard-constraint
+# check here reuses allocation.solver / allocation.manual_placement; this
+# section only handles region scoping, request/response shape, and audit
+# logging.
+# ============================================================================
+
+def _user_can_access_student_region(user, student):
+    """
+    Mirrors the region-scoping already used for room-assignment actions
+    (_user_can_edit_room), applied to a Student via their accepted dorm
+    type's region rather than a Room. A student with no resolvable region
+    can only be acted on by a central admin - a regional user can never
+    claim jurisdiction over a student the system cannot place in their
+    region.
+    """
+    if not user or not user.is_authenticated:
+        return False
+    if user.is_central_admin:
+        return True
+    if not user.region_id:
+        return False
+    dorm_type = student.accepted_dorm_type
+    if not dorm_type or not dorm_type.region_id:
+        return False
+    return dorm_type.region_id == user.region_id
+
+
+def _assisted_allocation_student_row(student, group='', is_transfer_requested=False):
+    dorm_type = student.accepted_dorm_type
+    region = dorm_type.region if dorm_type else None
+    special_statuses = [
+        value for value in [
+            student.special_status_1, student.special_status_2,
+            student.special_status_3, student.special_status_4,
+        ] if value
+    ]
+
+    return {
+        'student_db_id': student.id,
+        'student_id': student.student_id,
+        'full_name': student.full_name,
+        'first_name': student.first_name,
+        'last_name': student.last_name,
+
+        'gender': student.gender,
+        'gender_display': student.get_gender_display() if student.gender else '',
+
+        'accepted_dorm_type_id': dorm_type.id if dorm_type else None,
+        'accepted_dorm_type': dorm_type.name if dorm_type else '',
+
+        'housing_type': student.housing_type,
+        'housing_type_display': (
+            student.get_housing_type_display() if student.housing_type else ''
+        ),
+
+        'requested_religion': student.requested_religion,
+        'religion_display': (
+            student.get_requested_religion_display() if student.requested_religion else ''
+        ),
+
+        'region_id': region.id if region else '',
+        'region': region.name if region else '',
+
+        'is_priority': student.is_priority,
+        'priority_reason': student.priority_reason,
+
+        'accessibility_flag': student.accessibility_flag,
+        'disability_percent': (
+            str(student.disability_percent) if student.disability_percent is not None else None
+        ),
+        'medical_reason': student.medical_reason,
+        'special_statuses': special_statuses,
+
+        'group': group,
+        'is_transfer_requested': is_transfer_requested,
+    }
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def assisted_allocation_queue(request):
+    user = request.user
+    region_value = request.query_params.get('region')
+
+    if user.is_central_admin or user.is_boss:
+        if region_value:
+            region = _resolve_region(region_value)
+            if not region:
+                return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        elif user.is_central_admin:
+            region = None
+        elif user.region:
+            region = user.region
+        else:
+            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        if not user.region:
+            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+        region = user.region
+
+    accessibility_students = list(_accessibility_pending_queryset(region))
+    unassigned_students = list(_unassigned_students_queryset(region))
+
+    resolved_audit_qs = AssistedAllocationAudit.objects.filter(
+        action_type__in=[
+            AssistedAllocationAudit.ActionType.MANUAL_ASSIGNMENT,
+            AssistedAllocationAudit.ActionType.MANUAL_OVERRIDE,
+        ],
+        bed_assignment__status=BedAssignment.Status.ACTIVE,
+        student__isnull=False,
+    ).select_related(
+        'student', 'student__accepted_dorm_type', 'student__accepted_dorm_type__region',
+    ).order_by('-created_at')
+    if region:
+        resolved_audit_qs = resolved_audit_qs.filter(student__accepted_dorm_type__region=region)
+
+    resolved_students = []
+    seen_ids = set()
+    for audit in resolved_audit_qs:
+        if audit.student_id in seen_ids:
+            continue
+        seen_ids.add(audit.student_id)
+        resolved_students.append(audit.student)
+
+    transfer_requested_ids = set(
+        StudentRequest.objects.filter(
+            request_type=StudentRequest.RequestType.REGION_TRANSFER,
+            status=StudentRequest.Status.PENDING,
+        ).values_list('student_id', flat=True)
+    )
+
+    counts = {
+        'accessibility_pending': len(accessibility_students),
+        'unassigned': len(unassigned_students),
+        'resolved': len(resolved_students),
+        'transfer_requested': len(transfer_requested_ids),
+    }
+    counts['needs_placement'] = counts['accessibility_pending'] + counts['unassigned']
+
+    tab = request.query_params.get('tab', 'needs_placement')
+    group_of = {}
+    if tab == 'accessibility':
+        students = accessibility_students
+        group_of = {s.id: 'accessibility' for s in students}
+    elif tab == 'unassigned':
+        students = unassigned_students
+        group_of = {s.id: 'unassigned' for s in students}
+    elif tab == 'resolved':
+        students = resolved_students
+        group_of = {s.id: 'resolved' for s in students}
+    else:
+        students = accessibility_students + unassigned_students
+        group_of = {s.id: 'accessibility' for s in accessibility_students}
+        for s in unassigned_students:
+            group_of.setdefault(s.id, 'unassigned')
+
+    gender_filter = request.query_params.get('gender')
+    if gender_filter:
+        students = [s for s in students if s.gender == gender_filter]
+
+    dorm_type_filter = request.query_params.get('dorm_type')
+    if dorm_type_filter:
+        students = [s for s in students if str(s.accepted_dorm_type_id) == str(dorm_type_filter)]
+
+    search = (request.query_params.get('search') or '').strip().lower()
+    if search:
+        students = [
+            s for s in students
+            if search in s.full_name.lower() or search in (s.student_id or '').lower()
+        ]
+
+    rows = [
+        _assisted_allocation_student_row(
+            s,
+            group=group_of.get(s.id, tab),
+            is_transfer_requested=s.id in transfer_requested_ids,
+        )
+        for s in students
+    ]
+
+    return Response({
+        'counts': counts,
+        'students': rows,
+        'region_id': region.id if region else None,
+        'region_name': region.name if region else None,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def assisted_allocation_student_detail(request, pk):
+    try:
+        student = Student.objects.select_related(
+            'accepted_dorm_type', 'accepted_dorm_type__region', 'assigned_room',
+        ).get(pk=pk)
+    except Student.DoesNotExist:
+        return Response({'error': 'הסטודנט לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not _user_can_access_student_region(request.user, student):
+        return Response({'error': 'אין הרשאה לאזור זה'}, status=status.HTTP_403_FORBIDDEN)
+
+    group = 'accessibility' if student.accessibility_flag else 'unassigned'
+    row = _assisted_allocation_student_row(student, group=group)
+
+    roommate_requests = []
+    for i in range(1, 6):
+        name = getattr(student, f'roommate_request_{i}', '')
+        if not name:
+            continue
+        roommate_requests.append({
+            'name': name,
+            'student_id': getattr(student, f'roommate_request_student_id_{i}', ''),
+            'mutual': bool(getattr(student, f'roommate_request_flag_{i}', False)),
+        })
+
+    reason = None
+    if not student.accessibility_flag and not student.is_assigned:
+        dorm_type = student.accepted_dorm_type
+        if dorm_type is None:
+            reason = {'reason_code': 'NO_ACCEPTED_DORM_TYPE', 'inventory_breakdown': []}
+        else:
+            from allocation.solver import analyze_unassigned_group
+
+            rooms = list(
+                Room.objects.filter(
+                    apartment__building__dorm_type=dorm_type,
+                    is_active=True,
+                    apartment__is_active=True,
+                    apartment__building__is_active=True,
+                ).select_related(
+                    'apartment', 'apartment__building', 'apartment__building__dorm_type',
+                ).prefetch_related('beds')
+            )
+            analysis = analyze_unassigned_group(student, rooms)
+            category_labels = dict(Apartment.Category.choices)
+            apartment_type_labels = dict(Apartment.ApartmentType.choices)
+            reason = {
+                'reason_code': analysis['reason_code'],
+                'physically_free_beds_in_accepted_dorm': analysis['physically_free_beds_in_accepted_dorm'],
+                'compatible_free_beds': analysis['compatible_free_beds'],
+                'inventory_breakdown': [
+                    {
+                        'category': item['category'],
+                        'category_display': category_labels.get(item['category'], item['category'] or ''),
+                        'apartment_type': item['apartment_type'],
+                        'apartment_type_display': apartment_type_labels.get(
+                            item['apartment_type'], item['apartment_type'] or '',
+                        ),
+                        'free_beds': item['free_beds'],
+                    }
+                    for item in analysis['inventory_breakdown']
+                ],
+            }
+
+    history = [
+        {
+            'action_type': entry.action_type,
+            'action_type_display': entry.get_action_type_display(),
+            'actor_name': entry.actor.get_full_name() if entry.actor else '',
+            'created_at': entry.created_at.isoformat(),
+            'note': entry.note,
+            'overridden_rules': entry.overridden_rules,
+        }
+        for entry in AssistedAllocationAudit.objects.filter(student=student)
+            .select_related('actor').order_by('-created_at')[:10]
+    ]
+
+    return Response({
+        'student': row,
+        'roommate_requests': roommate_requests,
+        'reason': reason,
+        'history': history,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def assisted_allocation_recommendations(request, pk):
+    try:
+        student = Student.objects.select_related(
+            'accepted_dorm_type', 'accepted_dorm_type__region',
+        ).get(pk=pk)
+    except Student.DoesNotExist:
+        return Response({'error': 'הסטודנט לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not _user_can_access_student_region(request.user, student):
+        return Response({'error': 'אין הרשאה לאזור זה'}, status=status.HTTP_403_FORBIDDEN)
+
+    dorm_type = student.accepted_dorm_type
+    region = dorm_type.region if dorm_type else None
+
+    if dorm_type is None:
+        return Response({
+            'candidates': {
+                'buildings': [], 'total_valid_beds': 0, 'has_more': False,
+                'next_offset': None, 'feasible': False,
+            },
+            'config_opportunities': [],
+            'accepted_dorm_type': None,
+            'reason': 'לסטודנט אין סוג מעונות/אזור מוגדר',
+        })
+
+    # No pagination: candidates are hard-scoped to the student's own
+    # accepted dorm type (never the whole region), which is a small,
+    # bounded inventory - fetching it in full lets the frontend offer real
+    # client-side search across every eligible bed instead of only the
+    # beds that happen to be on the currently-loaded page. The building
+    # list itself is already best-tier-first, so this is still a "ranked
+    # initial candidates" view - the UI renders building cards collapsed by
+    # default (lazy expansion), it just never needs a second round-trip.
+    candidates = find_matching_room_options(
+        request.user, student=student, region_id=region.id if region else None,
+        limit=None, offset=0, assisted_mode=True,
+    )
+
+    from allocation.manual_placement import find_configuration_opportunities, has_unsafe_configuration_candidates
+
+    config_opportunities = []
+    has_unsafe_config_candidates = False
+    if region is not None:
+        queue_students = list(_accessibility_pending_queryset(region)) + list(_unassigned_students_queryset(region))
+        config_opportunities = find_configuration_opportunities(region, queue_students)
+        for opportunity in config_opportunities:
+            opportunity['helps_selected_student'] = student.id in opportunity.get('affected_student_ids', [])
+        # Informational only (see has_unsafe_configuration_candidates
+        # docstring) - never affects config_opportunities itself, which
+        # already only ever contains genuinely empty, safe-to-change units.
+        has_unsafe_config_candidates = has_unsafe_configuration_candidates(region, queue_students)
+
+    return Response({
+        'candidates': candidates,
+        'config_opportunities': config_opportunities,
+        'has_unsafe_config_candidates': has_unsafe_config_candidates,
+        'accepted_dorm_type': {'id': dorm_type.id, 'name': dorm_type.name},
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def assisted_allocation_override_check(request, pk):
+    try:
+        student = Student.objects.get(pk=pk)
+    except Student.DoesNotExist:
+        return Response({'error': 'הסטודנט לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not _user_can_access_student_region(request.user, student):
+        return Response({'error': 'אין הרשאה לאזור זה'}, status=status.HTTP_403_FORBIDDEN)
+
+    bed_id = request.query_params.get('bed_id')
+    if not bed_id:
+        return Response({'error': 'יש לבחור מיטה'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        bed = Bed.objects.select_related(
+            'room', 'room__apartment', 'room__apartment__building',
+            'room__apartment__building__dorm_type', 'room__apartment__building__dorm_type__region',
+        ).get(pk=bed_id)
+    except Bed.DoesNotExist:
+        return Response({'error': 'המיטה לא נמצאה'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not _user_can_edit_room(request.user, bed.room):
+        return Response({'error': 'אין הרשאה לחדר זה'}, status=status.HTTP_403_FORBIDDEN)
+
+    from allocation.manual_placement import evaluate_manual_override
+    violations = evaluate_manual_override(student, bed.room)
+    blocked = any(not v['overridable'] for v in violations)
+    overridable_violations = [v for v in violations if v['overridable']]
+
+    return Response({
+        'violations': violations,
+        # blocked: at least one violation is structural (gender/housing
+        # type/building/dorm-type eligibility) - this placement can never be
+        # confirmed, with or without an override note.
+        'blocked': blocked,
+        # requires_override: compatible except for administrative
+        # (religion/reserved) violations an authorized admin may knowingly
+        # waive with a documented reason.
+        'requires_override': (not blocked) and bool(overridable_violations),
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def assisted_allocation_assign(request, pk):
+    try:
+        student = Student.objects.get(pk=pk)
+    except Student.DoesNotExist:
+        return Response({'error': 'הסטודנט לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not _user_can_access_student_region(request.user, student):
+        return Response({'error': 'אין הרשאה לאזור זה'}, status=status.HTTP_403_FORBIDDEN)
+
+    bed_id = request.data.get('bed_id')
+    if not bed_id:
+        return Response({'error': 'יש לבחור מיטה'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        bed = Bed.objects.select_related('room', 'room__apartment', 'room__apartment__building').get(pk=bed_id)
+    except Bed.DoesNotExist:
+        return Response({'error': 'המיטה לא נמצאה'}, status=status.HTTP_404_NOT_FOUND)
+
+    room = bed.room
+    if not _user_can_edit_room(request.user, room):
+        return Response({'error': 'אין הרשאה לחדר זה'}, status=status.HTTP_403_FORBIDDEN)
+
+    previous_state = _assignment_snapshot(student)
+
+    try:
+        assignment = assign_student_to_room(
+            student=student, room=room, assigned_by=request.user,
+            assignment_type=BedAssignment.AssignmentType.MANUAL, bed_id=bed.id,
+        )
+    except ValueError as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except ValidationError as e:
+        message = '; '.join(e.messages) if hasattr(e, 'messages') else str(e)
+        return Response({'error': message}, status=status.HTTP_400_BAD_REQUEST)
+
+    student.refresh_from_db()
+    AssistedAllocationAudit.objects.create(
+        action_type=AssistedAllocationAudit.ActionType.MANUAL_ASSIGNMENT,
+        actor=request.user,
+        student=student,
+        bed_assignment=assignment,
+        building=room.apartment.building,
+        apartment=room.apartment,
+        previous_state=previous_state,
+        new_state=_assignment_snapshot(student),
+    )
+
+    return Response({'message': 'הסטודנט שובץ בהצלחה', 'assignment_id': assignment.id})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def assisted_allocation_override(request, pk):
+    try:
+        student = Student.objects.get(pk=pk)
+    except Student.DoesNotExist:
+        return Response({'error': 'הסטודנט לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not _user_can_access_student_region(request.user, student):
+        return Response({'error': 'אין הרשאה לאזור זה'}, status=status.HTTP_403_FORBIDDEN)
+
+    bed_id = request.data.get('bed_id')
+    note = (request.data.get('note') or '').strip()
+    if not bed_id:
+        return Response({'error': 'יש לבחור מיטה'}, status=status.HTTP_400_BAD_REQUEST)
+    if not note:
+        return Response({'error': 'יש להזין סיבה לחריגה'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        bed = Bed.objects.select_related('room', 'room__apartment', 'room__apartment__building').get(pk=bed_id)
+    except Bed.DoesNotExist:
+        return Response({'error': 'המיטה לא נמצאה'}, status=status.HTTP_404_NOT_FOUND)
+
+    room = bed.room
+    if not _user_can_edit_room(request.user, room):
+        return Response({'error': 'אין הרשאה לחדר זה'}, status=status.HTTP_403_FORBIDDEN)
+
+    from allocation.manual_placement import evaluate_manual_override
+    # Recomputed server-side - a client-sent violation list is never trusted.
+    violations = evaluate_manual_override(student, room)
+
+    # Structural violations (gender/housing type/building/dorm-type
+    # eligibility) can never be overridden, by anyone, for any reason - a
+    # note does not make a fundamentally invalid placement valid. This is
+    # enforced here regardless of what the client showed, so a stale or
+    # hand-crafted request can never bypass it.
+    blocking = [v for v in violations if not v['overridable']]
+    if blocking:
+        return Response({
+            'error': 'לא ניתן לבצע שיבוץ בחריגה - קיימת חסימה מוחלטת שאינה ניתנת לעקיפה: '
+                     + '; '.join(v['label'] for v in blocking),
+            'violations': violations,
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    previous_state = _assignment_snapshot(student)
+
+    try:
+        assignment = assign_student_to_room(
+            student=student, room=room, assigned_by=request.user,
+            assignment_type=BedAssignment.AssignmentType.MANUAL, bed_id=bed.id,
+            skip_validation=True,
+        )
+    except ValueError as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except ValidationError as e:
+        message = '; '.join(e.messages) if hasattr(e, 'messages') else str(e)
+        return Response({'error': message}, status=status.HTTP_400_BAD_REQUEST)
+
+    student.refresh_from_db()
+    AssistedAllocationAudit.objects.create(
+        action_type=AssistedAllocationAudit.ActionType.MANUAL_OVERRIDE,
+        actor=request.user,
+        student=student,
+        bed_assignment=assignment,
+        building=room.apartment.building,
+        apartment=room.apartment,
+        previous_state=previous_state,
+        new_state=_assignment_snapshot(student),
+        overridden_rules=violations,
+        note=note,
+    )
+
+    return Response({
+        'message': 'השיבוץ בוצע בחריגה',
+        'assignment_id': assignment.id,
+        'overridden_rules': violations,
+    })
 
 
 @api_view(['GET'])
