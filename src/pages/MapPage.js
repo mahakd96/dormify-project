@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { api } from "../services/api";
 import { useAuth } from "../context/AuthContext";
+import { localizeLocationText } from "../utils/locationNames";
 
 const MAP_FILE = "technionDormMap.png";
 const MAP_SRC = `/maps/${MAP_FILE}`;
@@ -31,15 +32,20 @@ const clickableDormAreas = {
   mizrah: { top: "71.0%", left: "78.5%", width: "10.0%", height: "7.0%" },
 };
 
+// English labels are no longer hardcoded here - they come from the
+// centralized src/utils/locationNames.js dictionary (see that file's
+// header comment), so this page stays in sync with every other screen
+// that shows the same dorm/region names instead of maintaining its own
+// second translation table.
 const dormLabels = {
-  canada: { he: "מעונות קנדה", en: "Canada Dorms", officialBuildings: 22 },
-  senate: { he: "סנאט", en: "Senate", officialBuildings: 9 },
-  "neve-america": { he: "נווה אמריקה", en: "Neve America", officialBuildings: 19 },
-  rifkin: { he: "ריפקין", en: "Rifkin", officialBuildings: 12 },
-  broshim: { he: "ברושים", en: "Broshim", officialBuildings: 2 },
-  "kfar-hasmaha": { he: "כפר הסמכה", en: "Kfar Hasmaha", officialBuildings: 4 },
-  "segel-zutar": { he: "סגל זוטר", en: "Segel Zutar", officialBuildings: 6 },
-  mizrah: { he: "מזרח", en: "Mizrah", officialBuildings: 17 },
+  canada: { he: "מעונות קנדה", officialBuildings: 22 },
+  senate: { he: "סנאט", officialBuildings: 9 },
+  "neve-america": { he: "נווה אמריקה", officialBuildings: 19 },
+  rifkin: { he: "ריפקין", officialBuildings: 12 },
+  broshim: { he: "ברושים", officialBuildings: 2 },
+  "kfar-hasmaha": { he: "כפר הסמכה", officialBuildings: 4 },
+  "segel-zutar": { he: "סגל זוטר", officialBuildings: 6 },
+  mizrah: { he: "מזרח", officialBuildings: 17 },
 };
 
 const DORM_KEY_ALIASES = [
@@ -633,7 +639,7 @@ export default function MapPage({ language = "he" }) {
       result[key] = {
         key,
         labelHe: dormLabels[key].he,
-        labelEn: dormLabels[key].en,
+        labelEn: localizeLocationText(dormLabels[key].he, 'en'),
         officialBuildings: dormLabels[key].officialBuildings,
         buildingsCount: 0,
         activeBuildings: 0,

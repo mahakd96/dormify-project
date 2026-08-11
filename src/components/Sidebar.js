@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { localizeById } from '../utils/locationNames';
 
 import {
   LayoutDashboard,
@@ -43,8 +44,11 @@ function Sidebar({ collapsed, onToggle, language }) {
 
   // Region name comes straight from the backend user object (real data,
   // loaded from the DB) - no more hardcoded mockData region lookup table.
+  // Localized via the centralized helper so it shows its English name
+  // when the app language is English, instead of always staying Hebrew.
   const regionName = user?.region_name
-    || (language === 'he' ? 'כל האזורים' : 'All Regions');
+    ? localizeById(user.region, user.region_name, language)
+    : (language === 'he' ? 'כל האזורים' : 'All Regions');
 
   const getRoleName = () => {
     switch (user?.role) {
@@ -97,7 +101,7 @@ function Sidebar({ collapsed, onToggle, language }) {
       title: language === 'he' ? 'דוחות ונתונים' : 'Reports and Data',
       items: [
         { path: '/reports', icon: BarChart3, label: language === 'he' ? 'דוחות' : 'Reports', show: true },
-        { path: '/analysis', icon: TrendingUp, label: language === 'he' ? 'ניתוח נתונים' : 'Analytics & Insights', show: true },
+        { path: '/analysis', icon: TrendingUp, label: language === 'he' ? 'ניתוח נתונים' : 'Data Analysis', show: true },
       ],
     },
     {

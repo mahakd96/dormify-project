@@ -1,6 +1,14 @@
 ﻿import axios from "axios";
 
-const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:8000";
+// REACT_APP_API_BASE wins when set (e.g. a real deployment). Otherwise fall
+// back to whatever hostname the frontend itself was loaded from (with the
+// backend's port) instead of hardcoding "localhost" - so the app works the
+// same whether it's opened via http://localhost:3000 or http://127.0.0.1:3000
+// (a browser won't send localhost-scoped cookies/CORS state to 127.0.0.1,
+// or vice versa, so a mismatched hardcoded host silently breaks login).
+const API_BASE =
+  process.env.REACT_APP_API_BASE ||
+  `${window.location.protocol}//${window.location.hostname}:8000`;
 
 export const api = axios.create({
   baseURL: API_BASE,

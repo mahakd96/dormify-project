@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import FiltersDrawer from '../components/FiltersDrawer';
 import BedMatchPicker, { assignActionLabel, mergeBuildings } from '../components/BedMatchPicker';
 import { studentsAPI, requestsAPI, regionsAPI, api } from '../services/api';
+import { localizeRegionName, localizeDormTypeName } from '../utils/locationNames';
 import { useAuth } from '../context/AuthContext';
 import {
   Search, Star, X, Users, Phone, Mail, Home, MapPin,
@@ -422,7 +423,7 @@ function StudentsPage({ language }) {
 
   const getRegionName = (regionId) => {
     const region = filterOptions?.regions?.find((r) => String(r.id) === String(regionId));
-    return region?.name || regionId;
+    return region ? localizeRegionName(region, language) : regionId;
   };
 
   const getBuildingName = (buildingId) => {
@@ -1513,7 +1514,7 @@ const submitEditStudent = async () => {
                                   setReqError('');
                                 }}>
                                 <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                  <MapPin size={13} /> {r.name}
+                                  <MapPin size={13} /> {localizeRegionName(r, language)}
                                 </span>
                                 <span style={{ fontSize: 11, opacity: 0.7 }}>
                                   {isCurrent ? (language === 'he' ? 'האזור הנוכחי' : 'current region') : ''}
@@ -1705,7 +1706,7 @@ const submitEditStudent = async () => {
                 >
                   <option value="">{t.selectRegion}</option>
                   {addStudentRegions.map((r) => (
-                    <option key={r.id} value={r.id}>{r.name}</option>
+                    <option key={r.id} value={r.id}>{localizeRegionName(r, language)}</option>
                   ))}
                 </select>
                 {addStudentFieldErrors.region && (
@@ -1760,7 +1761,7 @@ const submitEditStudent = async () => {
                   {isCentralAdmin() && !addStudentForm.region ? t.selectRegionFirst : t.selectDormType}
                 </option>
                 {addStudentDormTypeOptions().map((dt) => (
-                  <option key={dt.id} value={dt.id}>{dt.name}</option>
+                  <option key={dt.id} value={dt.id}>{localizeDormTypeName(dt, language)}</option>
                 ))}
               </select>
               {addStudentFieldErrors.accepted_dorm_type && (
@@ -1935,7 +1936,7 @@ const submitEditStudent = async () => {
                 <select value={editStudentForm.region} onChange={(e) => handleEditStudentChange('region', e.target.value)}>
                   <option value="">{t.selectRegion}</option>
                   {addStudentRegions.map((r) => (
-                    <option key={r.id} value={r.id}>{r.name}</option>
+                    <option key={r.id} value={r.id}>{localizeRegionName(r, language)}</option>
                   ))}
                 </select>
                 {editStudentFieldErrors.region && (
@@ -1984,7 +1985,7 @@ const submitEditStudent = async () => {
                   {isCentralAdmin() && !editStudentForm.region ? t.selectRegionFirst : t.selectDormType}
                 </option>
                 {editStudentDormTypeOptions().map((dt) => (
-                  <option key={dt.id} value={dt.id}>{dt.name}</option>
+                  <option key={dt.id} value={dt.id}>{localizeDormTypeName(dt, language)}</option>
                 ))}
               </select>
               {editStudentFieldErrors.accepted_dorm_type && (
@@ -2077,7 +2078,7 @@ const submitEditStudent = async () => {
           >
             {(filterOptions?.regions || []).map((r) => (
               <option key={r.id} value={r.id}>
-                {r.name}
+                {localizeRegionName(r, language)}
                 {String(r.id) === String(assignBedStudent.region_id) ? ' (אזור הבית של הסטודנט/ית)' : ''}
               </option>
             ))}
