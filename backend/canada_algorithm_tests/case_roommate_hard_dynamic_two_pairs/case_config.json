@@ -1,0 +1,80 @@
+{
+  "description": "Dynamic roommate hard-constraint test with 20 students and two mutual-positive roommate pairs. Baseline: both pairs are compatible and must share an apartment. Then modify one member of a pair to create a hard religious conflict and rerun.",
+  "constraints_config": {
+    "sameGender": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "priorityFirst": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "roommatePositiveOnly": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "ReligiousTogether": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "roommateMatch": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 0
+    },
+    "sameReligion": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "sectorMatching": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 7
+    },
+    "avoidYearMix_1_with_3_4": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    },
+    "avoidAtudaimWithHasmaha": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    }
+  },
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL",
+      "FEASIBLE"
+    ],
+    "require_optimal": true,
+    "maximum_relative_gap": 0.0
+  },
+  "allocation_expectations": {
+    "unassigned_count": 0,
+    "must_share_apartment": [
+      [
+        "F01",
+        "F02"
+      ],
+      [
+        "M01",
+        "M02"
+      ]
+    ]
+  }
+}
