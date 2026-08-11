@@ -6372,6 +6372,10 @@ def analysis_data(request):
     assigned_students = assignments_qs.values('student_id').distinct().count()
     unassigned_students = max(total_students - assigned_students, 0)
 
+    # Reused below (students-by-region loop) to classify each student as
+    # assigned/unassigned without an extra query per student.
+    assigned_student_ids = set(assignments_qs.values_list('student_id', flat=True))
+
     # Priority KPIs must be scoped to the same "automatic allocation
     # population" as the solver/allocation_summary — i.e. exclude LEAVING
     # and accessibility-flagged students, who are never sent to the
@@ -6422,6 +6426,16 @@ def analysis_data(request):
             Q(target_room__apartment__building__dorm_type__region_id=region.id)
         ).distinct()
     pending_requests = requests_qs.count()
+
+    # Pending requests broken down by type, for the Data Analysis page's
+    # "Special requests" analysis. Single aggregate query, same shape as
+    # transfers_by_type below.
+    pending_requests_by_type = list(
+        requests_qs
+        .values('request_type')
+        .annotate(count=Count('id'))
+        .order_by('-count')
+    )
 
     priority_unassigned_students = allocatable_students_qs.filter(
         is_priority=True
@@ -6544,6 +6558,12 @@ def analysis_data(request):
 
     students_by_region_counts = {}
 
+    # Assigned/unassigned split per region, used by the Data Analysis page's
+    # "Demand / waiting students" analysis. Built in the same single-query
+    # loop as students_by_region above, so it costs nothing extra beyond the
+    # assigned_student_ids set already computed above (no N+1).
+    students_by_region_demand = {}
+
     for student in students_qs.select_related(
             'accepted_dorm_type',
             'accepted_dorm_type__region',
@@ -6565,6 +6585,29 @@ def analysis_data(request):
             continue
 
         students_by_region_counts[region_name] = students_by_region_counts.get(region_name, 0) + 1
+
+        demand_bucket = students_by_region_demand.setdefault(
+            region_name, {'total': 0, 'assigned': 0}
+        )
+        demand_bucket['total'] += 1
+        if student.id in assigned_student_ids:
+            demand_bucket['assigned'] += 1
+
+    region_name_to_id = {r.name: r.id for r in Region.objects.all()}
+
+    unassigned_by_region = [
+        {
+            'region': region_name,
+            'region_id': region_name_to_id.get(region_name, ''),
+            'total_students': bucket['total'],
+            'assigned_students': bucket['assigned'],
+            'unassigned_students': max(bucket['total'] - bucket['assigned'], 0),
+        }
+        for region_name, bucket in sorted(
+            students_by_region_demand.items(),
+            key=lambda item: item[0]
+        )
+    ]
 
     students_by_region = [
         {
@@ -6689,11 +6732,13 @@ def analysis_data(request):
         'students_by_category': students_by_category,
         'students_by_housing': students_by_housing,
         'students_by_region': students_by_region,
+        'unassigned_by_region': unassigned_by_region,
 
         'occupancy_data': occupancy_data,
 
         'transfers_by_status': transfers_by_status,
         'transfers_by_type': transfers_by_type,
+        'pending_requests_by_type': pending_requests_by_type,
 
         'latest_run': AllocationRunSerializer(latest_run).data if latest_run else None,
         'latest_batch': ImportBatchSerializer(latest_batch).data if latest_batch else None,
