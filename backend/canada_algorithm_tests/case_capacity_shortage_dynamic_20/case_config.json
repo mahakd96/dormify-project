@@ -1,0 +1,82 @@
+{
+  "description": "Dynamic capacity-shortage integration test with 20 students and 20 active beds.",
+  "constraints_config": {
+    "sameGender": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "priorityFirst": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "roommatePositiveOnly": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "ReligiousTogether": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "roommateMatch": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 0
+    },
+    "sameReligion": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "sectorMatching": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 7
+    },
+    "avoidYearMix_1_with_3_4": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    },
+    "avoidAtudaimWithHasmaha": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    }
+  },
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL",
+      "FEASIBLE"
+    ],
+    "require_optimal": true,
+    "maximum_relative_gap": 0.0
+  },
+  "allocation_expectations": {
+    "unassigned_count": 1,
+    "must_be_assigned": [
+      "F03",
+      "F04",
+      "M03",
+      "M04"
+    ],
+    "must_share_apartment": [
+      [
+        "M05",
+        "M06"
+      ]
+    ]
+  }
+}

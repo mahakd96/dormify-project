@@ -1,0 +1,106 @@
+{
+  "description": "Full integration test with 20 students, simple apartment names F1-F5/M1-M5, and capacity=1 in every room. Includes all current hard constraints and all soft-weight constraints.",
+  "constraints_config": {
+    "sameGender": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "priorityFirst": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "roommatePositiveOnly": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "ReligiousTogether": {
+      "enabled": true,
+      "strict": true,
+      "critical": true,
+      "weight": 10
+    },
+    "roommateMatch": {
+      "enabled": false,
+      "strict": false,
+      "critical": false,
+      "weight": 0
+    },
+    "sameReligion": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 6
+    },
+    "sectorMatching": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 7
+    },
+    "avoidYearMix_1_with_3_4": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    },
+    "avoidAtudaimWithHasmaha": {
+      "enabled": true,
+      "strict": false,
+      "critical": false,
+      "weight": 4
+    }
+  },
+  "expected_metrics": {
+    "allowed_solver_status": [
+      "OPTIMAL",
+      "FEASIBLE"
+    ],
+    "require_optimal": true,
+    "maximum_relative_gap": 0.0
+  },
+  "allocation_expectations": {
+    "unassigned_count": 0,
+    "must_be_assigned": [
+      "F09",
+      "F10",
+      "M09",
+      "M10"
+    ],
+    "must_share_apartment": [
+      [
+        "M04",
+        "M05"
+      ]
+    ],
+    "student_allowed_apartments": {
+      "F09": [
+        "F4"
+      ],
+      "F10": [
+        "F4"
+      ],
+      "M09": [
+        "M4"
+      ],
+      "M10": [
+        "M4"
+      ]
+    },
+    "apartment_allowed_students": {
+      "F4": [
+        "F09",
+        "F10"
+      ],
+      "M4": [
+        "M09",
+        "M10"
+      ]
+    }
+  }
+}
