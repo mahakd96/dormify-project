@@ -193,34 +193,66 @@ def _student_issues(student, seen_ids):
 # Data loading with optional region filter
 # ---------------------------------------------------------------------------
 
-def _load_data(region_id=None):
+def _load_data(region_id=None, include_students=True):
     """
-    Load students, beds, and active assignments.
-    If region_id is provided, filters by accepted_dorm_type__region / bed region.
+    Load beds + occupied_bed_ids always; students + active assignments
+    only when include_students=True (the default - preserves every
+    pre-existing caller's exact prior behavior, including the dict's key
+    set, which is always the same regardless of include_students).
+
+    generate_capacity_report() passes include_students=False: it renders
+    bed/room/building/apartment occupancy only and never reads
+    all_students/active_assignments/assignment_map/assigned_pks/the
+    category-bucket lists - skipping that fetch removes an entirely
+    unused Student+BedAssignment query pair (plus their 5 Python-side
+    category list comprehensions) from every capacity-report generation,
+    with zero effect on any other report (dormify_report,
+    student_actions_report, manual_review_report all keep the
+    include_students=True default, unchanged).
+    (project-quality/performance/GROUP1_BACKEND_PERFORMANCE_AUDIT.md, G1-20.)
     """
-    assignment_qs = (
-        BedAssignment.objects.filter(status=BedAssignment.Status.ACTIVE)
-        .select_related(
-            'student__accepted_dorm_type__region',
-            'bed__room__apartment__building__dorm_type__region',
+    active_assignments  = []
+    assignment_map      = {}
+    assigned_pks        = set()
+    all_students        = []
+    new_students        = []
+    continuing_students  = []
+    transfer_students    = []
+    leaving_students     = []
+    unassigned_students  = []
+
+    if include_students:
+        assignment_qs = (
+            BedAssignment.objects.filter(status=BedAssignment.Status.ACTIVE)
+            .select_related(
+                'student__accepted_dorm_type__region',
+                'bed__room__apartment__building__dorm_type__region',
+            )
         )
-    )
-    student_qs = Student.objects.select_related('accepted_dorm_type__region')
+        student_qs = Student.objects.select_related('accepted_dorm_type__region')
+
+        if region_id:
+            assignment_qs = assignment_qs.filter(
+                bed__room__apartment__building__dorm_type__region_id=region_id
+            )
+            student_qs = student_qs.filter(accepted_dorm_type__region_id=region_id)
+
+        active_assignments = list(assignment_qs)
+        assignment_map = {a.student_id: a for a in active_assignments}
+        assigned_pks   = set(assignment_map.keys())
+        all_students   = list(student_qs.all())
+
+        cat = Student.StudentCategory
+        new_students        = [s for s in all_students if s.category == cat.NEW]
+        continuing_students = [s for s in all_students if s.category == cat.CONTINUING]
+        transfer_students   = [s for s in all_students if s.category == cat.TRANSFER]
+        leaving_students    = [s for s in all_students if s.category == cat.LEAVING]
+        unassigned_students = [s for s in all_students if s.pk not in assigned_pks]
+
     bed_qs = Bed.objects.select_related('room__apartment__building__dorm_type__region')
-
     if region_id:
-        assignment_qs = assignment_qs.filter(
-            bed__room__apartment__building__dorm_type__region_id=region_id
-        )
-        student_qs = student_qs.filter(accepted_dorm_type__region_id=region_id)
         bed_qs = bed_qs.filter(room__apartment__building__dorm_type__region_id=region_id)
-
-    active_assignments = list(assignment_qs)
-    assignment_map = {a.student_id: a for a in active_assignments}
-    assigned_pks   = set(assignment_map.keys())
-
-    all_students = list(student_qs.all())
-    all_beds     = list(bed_qs.all())
+    all_beds = list(bed_qs.all())
 
     occ_qs = BedAssignment.objects.filter(status=BedAssignment.Status.ACTIVE)
     if region_id:
@@ -229,7 +261,6 @@ def _load_data(region_id=None):
         )
     occupied_bed_ids = set(occ_qs.values_list('bed_id', flat=True))
 
-    cat = Student.StudentCategory
     return {
         'active_assignments':   active_assignments,
         'assignment_map':       assignment_map,
@@ -237,11 +268,11 @@ def _load_data(region_id=None):
         'all_students':         all_students,
         'all_beds':             all_beds,
         'occupied_bed_ids':     occupied_bed_ids,
-        'new_students':         [s for s in all_students if s.category == cat.NEW],
-        'continuing_students':  [s for s in all_students if s.category == cat.CONTINUING],
-        'transfer_students':    [s for s in all_students if s.category == cat.TRANSFER],
-        'leaving_students':     [s for s in all_students if s.category == cat.LEAVING],
-        'unassigned_students':  [s for s in all_students if s.pk not in assigned_pks],
+        'new_students':         new_students,
+        'continuing_students':  continuing_students,
+        'transfer_students':    transfer_students,
+        'leaving_students':     leaving_students,
+        'unassigned_students':  unassigned_students,
     }
 
 
@@ -625,8 +656,31 @@ def _build_occupancy_by_apartment(all_beds, occupied_bed_ids):
 # Manual Review Report builders
 # ---------------------------------------------------------------------------
 
-def _build_exceptions_summary_rows(all_students, assignment_map, region_name=None):
-    seen_ids            = {}
+def _compute_student_issues(all_students):
+    """
+    Computes _student_issues() for every student ONCE, in a single pass
+    with one shared seen_ids dict, instead of the 3 separate call sites
+    below (_build_exceptions_summary_rows, _build_all_exceptions_rows,
+    _build_unassigned_with_issues) each independently re-running it with
+    their own fresh seen_ids over the same all_students list.
+
+    Safe: all three original call sites iterated the exact same
+    already-materialized `all_students` list (fetched once by
+    _load_data(), never re-queried or re-ordered between builder calls)
+    in the exact same order, each with a FRESH seen_ids - so a given
+    student's issues list (including whether THAT occurrence is flagged
+    'תעודת זהות כפולה') was always identical across all three calls to
+    begin with; this just computes that one identical result once and
+    reuses it, instead of recomputing it 3 times.
+    (project-quality/performance/GROUP1_BACKEND_PERFORMANCE_AUDIT.md, G1-19.)
+
+    Returns a list of (student, issues) pairs, same order as all_students.
+    """
+    seen_ids = {}
+    return [(student, _student_issues(student, seen_ids)) for student in all_students]
+
+
+def _build_exceptions_summary_rows(student_issues, assignment_map, region_name=None):
     missing_id          = 0
     dup_id              = 0
     missing_name        = 0
@@ -635,8 +689,7 @@ def _build_exceptions_summary_rows(all_students, assignment_map, region_name=Non
     total_exc           = 0
     unassigned_w_issues = 0
 
-    for student in all_students:
-        issues = _student_issues(student, seen_ids)
+    for student, issues in student_issues:
         if issues:
             total_exc += 1
             if student.pk not in assignment_map:
@@ -668,11 +721,9 @@ def _build_exceptions_summary_rows(all_students, assignment_map, region_name=Non
     ]
 
 
-def _build_all_exceptions_rows(all_students, assignment_map):
-    rows     = []
-    seen_ids = {}
-    for student in all_students:
-        issues = _student_issues(student, seen_ids)
+def _build_all_exceptions_rows(student_issues, assignment_map):
+    rows = []
+    for student, issues in student_issues:
         if issues:
             dorm_type = student.accepted_dorm_type
             region    = dorm_type.region if dorm_type else None
@@ -720,12 +771,10 @@ def _build_missing_data_rows(all_students):
     return rows
 
 
-def _build_unassigned_with_issues(all_students, assignment_map):
+def _build_unassigned_with_issues(student_issues, assignment_map):
     """Only unassigned students who ALSO have a data-quality issue."""
-    rows     = []
-    seen_ids = {}
-    for student in all_students:
-        issues = _student_issues(student, seen_ids)
+    rows = []
+    for student, issues in student_issues:
         if issues and student.pk not in assignment_map:
             dorm_type = student.accepted_dorm_type
             region    = dorm_type.region if dorm_type else None
@@ -878,7 +927,12 @@ def generate_student_allocation_report():
 # ---------------------------------------------------------------------------
 
 def generate_capacity_report(region_id=None, region_name=None):
-    d          = _load_data(region_id=region_id)
+    # include_students=False: this report only reads d['all_beds'] and
+    # d['occupied_bed_ids'] below - it never touches d['all_students'] or
+    # any student/assignment-derived key, so the Student+BedAssignment
+    # fetch _load_data() would otherwise do is entirely wasted work here.
+    # (G1-20.)
+    d          = _load_data(region_id=region_id, include_students=False)
     region_lbl = region_name or ('כל האזורים' if not region_id else region_id)
 
     expl_lines = [
@@ -957,14 +1011,22 @@ def generate_manual_review_report(region_id=None, region_name=None):
         'גיליון "לא שובצו עם בעיה"       – לא משובצים שיש להם גם חריגת נתונים.',
     ]
 
+    # Computed once, in a single pass, and reused by the 3 sheets below
+    # that need it (summary counts, full exceptions list, unassigned-with-
+    # issues) - see _compute_student_issues(). _build_duplicate_id_rows
+    # and _build_missing_data_rows compute genuinely different things
+    # (duplicate-ID grouping; a missing-data-only check with no
+    # duplicate-ID component) and are left as their own passes.
+    student_issues = _compute_student_issues(d['all_students'])
+
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         _expl_df(expl_lines).to_excel(writer, sheet_name='הסבר', index=False)
 
-        _to_df(_build_exceptions_summary_rows(d['all_students'], d['assignment_map'], region_lbl)
+        _to_df(_build_exceptions_summary_rows(student_issues, d['assignment_map'], region_lbl)
                ).to_excel(writer, sheet_name='תמצית חריגים', index=False)
 
-        _to_df(_build_all_exceptions_rows(d['all_students'], d['assignment_map'])
+        _to_df(_build_all_exceptions_rows(student_issues, d['assignment_map'])
                ).to_excel(writer, sheet_name='חריגים לבדיקה', index=False)
 
         _to_df(_build_duplicate_id_rows(d['all_students'])
@@ -973,7 +1035,7 @@ def generate_manual_review_report(region_id=None, region_name=None):
         _to_df(_build_missing_data_rows(d['all_students'])
                ).to_excel(writer, sheet_name='נתונים חסרים', index=False)
 
-        _to_df(_build_unassigned_with_issues(d['all_students'], d['assignment_map'])
+        _to_df(_build_unassigned_with_issues(student_issues, d['assignment_map'])
                ).to_excel(writer, sheet_name='לא שובצו עם בעיה', index=False)
 
         book = writer.book
