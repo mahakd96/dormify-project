@@ -1602,3 +1602,426 @@ change in returned values, permissions, or any other endpoint behavior,
 and the already-closed BLD-01/BLD-02/BLD-03 fixes confirmed unaffected.
 This closes all four confirmed Buildings-page N+1 findings from the
 original code inspection.
+
+---
+
+# Analysis API — Baseline
+
+## Date
+2026-08-11
+
+## Branch
+`donia-analysis-performance`
+
+## Scope
+`GET /api/analysis/` (`analysis_data()`, `backend/api/views.py:6282-6745`)
+only — **measurement phase, no production code changed.** Buildings/
+Apartments/Rooms/Beds (all already closed above) were not re-touched.
+The allocation algorithm and allocation tests were **not** touched —
+`analysis_data()` reads `AllocationRun` for its `latest_run` field, but
+this phase never created, modified, or asserted on allocation behavior;
+that logic remains owned by other team members.
+
+## Environment
+
+Identical to every baseline above: local, disposable PostgreSQL 16 via the
+`test_db` Docker Compose service (`dormify_test_db`, already running at
+the start of this phase — confirmed via `docker ps`, not restarted),
+Django's own further-disposable `test_dormify_test` database created/
+destroyed inside it per test run, via the pre-existing local-only
+`.env.test`. The real Azure database was never connected to.
+
+## Measurement method
+
+- New test module: `backend/api/performance_tests/test_analysis_performance.py`,
+  in the same `api/performance_tests/` package as the other four modules.
+- Same `CaptureQueriesContext` + `APIClient` + SQL-shape-masking +
+  `time.perf_counter()` + payload-size technique used throughout this
+  file.
+- Command:
+  ```
+  cd backend
+  ENV_FILE=.env.test python manage.py test api.performance_tests.test_analysis_performance -v 2
+  ```
+- Run 3 times in full for reproducibility — query counts (34 / 46 / 106
+  for N=1/5/25 buildings; 46 / 46 for S=50/500 extra students) were
+  **identical every run**; only timing varied.
+- Cross-check: `ENV_FILE=.env.test python manage.py test api.tests_analysis -v 2`
+  (the pre-existing Analysis scoping/behavior suite) was run alongside —
+  **12/12 passed**, unchanged.
+- `ENV_FILE=.env.test python manage.py check` — no issues (0 silenced).
+
+## Dataset
+
+**Dimension 1 (primary) — building count:** 1 region, 1 dorm type, 1
+`central_admin` user; per building, 2 apartments → 2 rooms/apartment → 2
+beds/room, one `ACTIVE` `BedAssignment` on the first bed of the first
+room of the first apartment per building (identical per-building shape to
+the Buildings baseline, for direct comparability). Measured at **N = 1,
+5, 25 buildings**.
+
+**Dimension 2 (secondary, independently justified) — student volume:**
+`analysis_data()` also runs a Python-side loop over every `Student` row
+(`views.py:6567-6594`, single query via `select_related`, O(students)
+Python work per row) to build `students_by_region`/
+`students_by_region_demand` — a categorically different cost (interpreter
+time, not query count) from the per-building SQL loop, so it was measured
+separately: building count fixed at N=5, **S = 50 vs 500** extra
+unassigned students layered on top (no `BedAssignment`, so orthogonal to
+Dimension 1).
+
+## Endpoint
+
+`GET /api/analysis/?region=<id>` — the exact call `analysisAPI.getData(regionId)`
+makes from `AnalysisPage.js`'s `fetchAnalysis()` on page load, region
+change, and manual Refresh — the *only* network request the Analysis page
+issues (Analyze tab / Group-by / Sort / row-selection are all client-side
+reshaping of the same payload, per the page's own "Data loading" comment).
+
+## Results — Dimension 1 (building count)
+
+| Buildings (N) | Total SQL queries | Distinct query shapes | Queries / building | Server-side time (ms, 3 runs) | Response size (bytes) |
+|---:|---:|---:|---:|---:|---:|
+| 1  | 34  | 34 | 34.00 | 41–49    | 1,324 |
+| 5  | 46  | 34 | 9.20  | 58–60    | 2,292 |
+| 25 | 106 | 34 | 4.24  | 141–156  | 7,162 |
+
+**Marginal queries per additional building:** `(46−34)/(5−1) = 3.00` and
+`(106−46)/(25−5) = 3.00` — identical across both intervals. **Linear fit:**
+`total_queries = 31 + 3 × N` fits all three points exactly (34 = 31+3·1,
+46 = 31+3·5, 106 = 31+3·25) — zero residual, reproduced identically across
+3 full runs.
+
+### Duplicate/repeated query pattern (per-building, all N)
+
+| Shape | Occurrences at N=25 | Source |
+|---|---:|---|
+| `SELECT api_room.capacity FROM api_room JOIN api_apartment JOIN api_building JOIN api_dormtype ...` | ×25 (1/building) | `views.py:6657-6659` — `building_capacity = sum(building_rooms_qs.values_list('capacity', flat=True))` |
+| `SELECT COUNT(*) FROM (SELECT DISTINCT api_bedassignment.bed_id ...)` | ×25 (1/building) | `views.py:6661-6663` — `building_assigned_beds = assignments_qs.filter(bed__room__apartment__building=building).values('bed_id').distinct().count()` |
+| `SELECT COUNT(*) AS __count FROM api_room JOIN api_apartment JOIN api_building JOIN api_dormtype ...` | ×25 (1/building) | `views.py:6689` — `'rooms_count': building_rooms_qs.count()` |
+
+This confirms, by direct measurement, the pre-measurement code-level
+suspicion: for every building in the `occupancy_data` loop
+(`views.py:6648-6698`), building capacity, assigned/occupied beds, and
+room count are each fetched with an independent query, none reused
+between sibling fields in the same iteration — the same shape of N+1
+pattern already fixed for Buildings/Apartments/Rooms/Beds, but **not
+optimized in this phase**.
+
+## Results — Dimension 2 (student volume, buildings fixed at N=5)
+
+| Extra unassigned students (S) | Total SQL queries | Server-side time (ms) | Response size (bytes) |
+|---:|---:|---:|---:|
+| 50  | 46 | 76.87 | 2,297 |
+| 500 | 46 | 80.56 | 2,308 |
+
+Query count is **exactly flat** (Δ=0) across a 10× change in student
+volume — the `students_by_region` loop is confirmed to be a single query
+regardless of row count. The +3.7 ms timing delta is small and within the
+noise band observed for repeated same-N runs in Dimension 1 — **not
+conclusive** on its own; see limitations below.
+
+## PASS/FAIL
+
+**Not applicable — this is a BASELINE measurement.** No optimization has
+been implemented for Analysis in this phase.
+
+## Confirmed bottleneck
+
+The `occupancy_data` per-building loop in `analysis_data()`
+(`backend/api/views.py:6648-6698`) is confirmed, by direct measurement, to
+add exactly 3 SQL queries per building row to `GET /api/analysis/`,
+growing linearly and unboundedly with the number of active buildings in
+scope (`total_queries = 31 + 3N`), with each of the 3 queries individually
+identified to source line (`6657-6659`, `6661-6663`, `6689`). Query count
+was separately confirmed **independent of student volume** (flat at 46
+across a 10× student-count change). **Not optimized in this phase** —
+`analysis_data()` is byte-for-byte unchanged from before this phase.
+
+## Limitations
+
+- No real network/Azure latency measured (`APIClient` only, no HTTP round
+  trip).
+- No real production data volume measured — synthetic, up to 25 buildings
+  / 500 extra students.
+- Frontend render time not measured.
+- The student-volume dimension used only two data points (50, 500) —
+  sufficient to confirm query-count flatness (deterministic) but not to
+  draw a firm conclusion about a timing trend (noisy).
+- No concurrent-load measurement.
+
+## Files created/changed during this baseline measurement
+
+- `backend/api/performance_tests/test_analysis_performance.py` — new.
+- `project-quality/performance/evidence/ANALYSIS_BASELINE_QUERY_COUNTS.txt` — new.
+- `project-quality/performance/evidence/ANALYSIS_BASELINE_TEST_RUN_LOG.txt` — new.
+- `project-quality/performance/PERFORMANCE_OPTIMIZATION_RESULTS.md` — this section.
+- `project-quality/performance/ANALYSIS_BASELINE_SUMMARY.md` — new.
+
+All Buildings/Apartments/Rooms/Beds evidence files and sections above are
+**unmodified**. `analysis_data()`, every other view, every serializer,
+model, migration, React component, Django setting, Docker configuration,
+`.env`/`.env.test`, business rule, permission/role/region-isolation logic,
+and **the allocation algorithm / allocation tests** are byte-for-byte
+unchanged from before this phase.
+
+## Recommendation for the next phase
+
+If a follow-up optimization phase is approved, the confirmed
+3-queries-per-building pattern (`views.py:6657-6659`, `6661-6663`, `6689`)
+is the best-evidenced candidate, using the same DB-side `annotate()`/
+`Subquery` approach already applied to `BuildingViewSet`/`ApartmentViewSet`/
+`RoomViewSet`/`BedViewSet` — computing `building_capacity`,
+`building_assigned_beds`, and `rooms_count` as correlated subqueries
+inside the single `buildings_qs` query instead of once per building row
+in Python. Must not alter the `AllocationRun` (`latest_run`) read path or
+any other allocation-owned logic. Should be re-measured with this same
+test module (new, non-overwriting evidence file) before being considered
+complete.
+
+---
+
+# Analysis API — Optimization Result
+
+## Date
+2026-08-11
+
+## Branch
+`donia-analysis-performance`
+
+## Scope
+Only the confirmed 3-queries-per-building pattern in `analysis_data()`'s
+`occupancy_data` loop. No other part of `analysis_data()` (summary KPIs,
+`students_by_*` distributions, the `students_by_region` Python loop,
+`transfers_by_*`, `pending_requests_by_type`, `latest_run`/`latest_batch`)
+was touched. Buildings/Apartments/Rooms/Beds (already closed above), the
+frontend, pagination, Docker, Azure, migrations, and **the allocation
+algorithm / allocation tests / `AllocationRun`/`latest_run` behavior**
+were **not** touched — per the explicit scope and ownership boundary of
+this phase.
+
+## Baseline (unchanged — see full detail above and in
+`ANALYSIS_BASELINE_SUMMARY.md`)
+
+| N (buildings) | SQL queries (before) |
+|---:|---:|
+| 1  | 34  |
+| 5  | 46  |
+| 25 | 106 |
+
+Scaling: `total_queries = 31 + 3 × N` (marginal cost 3.00 queries/building).
+Query count already confirmed flat with student volume (46 at both S=50
+and S=500, buildings fixed at N=5) — student loop untouched in this phase.
+
+## Root cause (recap)
+
+Three independent per-building queries in the `occupancy_data` loop
+(pre-fix `views.py`): building capacity
+(`sum(building_rooms_qs.values_list('capacity', flat=True))`, was
+`~6657-6659`), assigned/occupied distinct beds
+(`assignments_qs.filter(...).values('bed_id').distinct().count()`, was
+`~6661-6663`), and room count (`building_rooms_qs.count()`, was `~6689`)
+— a second, independent `COUNT` re-querying the same room set already
+evaluated for capacity.
+
+## Implementation (production code changed)
+
+**`backend/api/views.py`** only:
+
+1. Added `Sum` to the existing `django.db.models` import line.
+2. New module-level helper `_annotate_analysis_building_occupancy(buildings_qs, rooms_qs, assignments_qs)`
+   (placed immediately before `analysis_data()`): annotates `_capacity`,
+   `_rooms_count`, `_assigned_beds` onto `buildings_qs`, each as an
+   independent `Coalesce(Subquery(...), 0)` correlated by
+   `OuterRef('pk')`, built directly from the caller's already-filtered
+   `rooms_qs`/`assignments_qs` (same technique as
+   `_annotate_building_inventory_counts`/`_annotate_apartment_inventory_counts`
+   above — one subquery per aggregate, no combined multi-aggregate
+   `annotate()` call, to avoid JOIN multiplication).
+3. `analysis_data()`'s `occupancy_data` loop: wraps `buildings_qs` via the
+   new helper immediately before the `for building in ...` loop; reads
+   `building._capacity`/`building._assigned_beds`/`building._rooms_count`
+   instead of running 3 queries per building; removed the now-unused
+   `building_rooms_qs` local variable. No other line in the loop, and no
+   other function in the file, was changed.
+
+## Why this fixes the N+1
+
+The three per-building values are now computed **inside the single
+`buildings_qs` SQL statement** already issued for the occupancy loop, as
+three independent correlated scalar subquery expressions in that
+statement's `SELECT` clause, instead of as 3 separate round-trip queries
+issued once per building row from Python. Query count is therefore driven
+only by fixed per-request overhead, not by building count `N`.
+
+## Correctness protection
+
+- **`_capacity`** — `rooms_qs.filter(apartment__building=OuterRef('pk'))`,
+  `Sum('capacity')` — identical filter to the original
+  `sum(rooms_qs.filter(apartment__building=building).values_list('capacity', flat=True))`;
+  `rooms_qs` carries its own unchanged `is_active`/apartment-active/
+  building-active/region filters.
+- **`_rooms_count`** — the same filtered `rooms_qs`, `Count('id')`
+  instead of `Sum('capacity')` — identical filter to the original
+  `building_rooms_qs.count()`.
+- **`_assigned_beds`** — `assignments_qs.filter(bed__room__apartment__building=OuterRef('pk'))`,
+  `Count('bed_id', distinct=True)` — identical filter and distinct-bed
+  semantics to the original
+  `assignments_qs.filter(...).values('bed_id').distinct().count()`,
+  preserving `assignments_qs`'s existing `status=ACTIVE` +
+  `bed__room__is_active` + `bed__room__apartment__is_active` +
+  `bed__room__apartment__building__is_active` + region filters exactly —
+  including the fact that (unlike the Buildings-page
+  `BuildingSerializer.get_occupied_beds`) this endpoint's
+  `assignments_qs` **does** exclude assignments on beds in inactive
+  rooms/apartments. That asymmetry-vs-Buildings was preserved, not
+  "fixed."
+- `Coalesce(..., 0)` — a building with zero matching rooms/assignments
+  yields `0`, matching the original `sum()`/`.count()` behavior (never
+  `None`).
+- Verified empirically: new test class `AnalysisOccupancyCorrectnessTests`
+  (`backend/api/performance_tests/test_analysis_performance.py`) builds a
+  fixture with an active apartment/active room (one occupied bed, one bed
+  whose assignment has since **ended**), an **inactive** room holding a
+  bed with a still-**active** assignment, a fully **inactive** second
+  apartment holding an active room with a still-**active** assignment,
+  and a second, completely **empty** building — then:
+  - asserts hand-computed expected values
+    (`rooms_count=1, total_beds=2, assigned=1, available_beds=1,
+    occupancy_rate=50.0`);
+  - re-runs the *original* unoptimized query logic directly against the
+    DB and asserts the live endpoint's values are byte-for-byte equal;
+  - asserts the empty building falls back to all zeroes, not `None`.
+  All three pass.
+- **Response payload proof:** post-fix payload size is **byte-for-byte
+  identical** to the frozen baseline at every measured N (1,324 / 2,292 /
+  7,162 bytes for N=1/5/25, both before and after) — the strongest
+  available signal the JSON contents are unchanged.
+- **Permissions / region isolation / API contract** — none of
+  `analysis_data()`'s existing region-scoping/role logic was changed
+  (only the `occupancy_data` loop's internals); response field
+  names/types/shape unchanged. Confirmed by the full pre-existing
+  `backend/api/tests_analysis.py` suite — **12/12 passed, unchanged**,
+  both before and after this change.
+
+## Before vs After Measurements
+
+| N (buildings) | SQL queries before | SQL queries after | Response time before (ms) | Response time after (ms) | Response size before (bytes) | Response size after (bytes) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1  | 34  | 31 | ~41–49   | ~41–51 | 1,324 | 1,324 |
+| 5  | 46  | 31 | ~52–60   | ~42–49 | 2,292 | 2,292 |
+| 25 | 106 | 31 | ~141–156 | ~46–61 | 7,162 | 7,162 |
+
+(Response-time figures are server-side only, measured via DRF's
+`APIClient` — directional, not a promise of real-world latency. Response
+sizes are exact and byte-identical before/after at every N.)
+
+**Absolute query reduction:** 3 (N=1), 15 (N=5), 75 (N=25).
+**Percentage query reduction:** 8.8% (N=1), 32.6% (N=5), **70.8% (N=25)**.
+
+## Query Scaling — before vs after
+
+- **Before:** `total_queries = 31 + 3 × N` — linear, unbounded growth with
+  building count (marginal cost 3.00 queries/building, confirmed in the
+  baseline phase).
+- **After:** `total_queries = 31` at N=1, N=5, **and** N=25 — **flat,
+  independent of N** (marginal cost 0.00 queries/building, measured
+  directly, reproduced across 2 full test runs). Query count for
+  `GET /api/analysis/` is no longer coupled to the number of buildings
+  returned.
+
+## Tests Run
+
+| Command | Result |
+|---|---|
+| `ENV_FILE=.env.test python manage.py check` | No issues (0 silenced) |
+| `ENV_FILE=.env.test python manage.py test api.tests_analysis -v 2` | **12/12 passed**, unchanged |
+| `ENV_FILE=.env.test python manage.py test api.performance_tests.test_analysis_performance -v 2` | **6/6 passed** (3 correctness tests, 1 flat-scaling regression test, 1 student-volume-independence test, 1 N=1 overhead test) — run 2 full times, query counts identical every run |
+
+No allocation test was run or modified — the production change does not
+touch any allocation-owned code path (see "Confirmation: allocation-owned
+logic untouched" in `ANALYSIS_OPTIMIZATION_SUMMARY.md`).
+
+## Files Changed
+
+**Production application files (1):**
+- `backend/api/views.py` — added `Sum` to the existing `django.db.models`
+  import; added `_annotate_analysis_building_occupancy()` helper (placed
+  immediately before `analysis_data()`); `analysis_data()`'s
+  `occupancy_data` loop now wraps `buildings_qs` via that helper and reads
+  the three annotated attributes instead of running 3 queries per
+  building. No other function in this file, and no other file, was
+  touched.
+
+**Performance tests:**
+- `backend/api/performance_tests/test_analysis_performance.py` — updated:
+  scaling test now asserts flat (not merely records) query count and
+  writes to a new evidence file (`ANALYSIS_AFTER_QUERY_COUNTS.txt`, not
+  the frozen baseline file); added `AnalysisOccupancyCorrectnessTests` (3
+  new tests). Student-volume test unchanged, per scope.
+
+**Documentation / evidence:**
+- `project-quality/performance/evidence/ANALYSIS_AFTER_QUERY_COUNTS.txt` — new.
+- `project-quality/performance/evidence/ANALYSIS_AFTER_TEST_RUN_LOG.txt` — new.
+- `project-quality/performance/PERFORMANCE_OPTIMIZATION_RESULTS.md` — this
+  section added; the Analysis-baseline section and all Buildings/
+  Apartments/Rooms/Beds sections above it left unchanged.
+- `project-quality/performance/ANALYSIS_OPTIMIZATION_SUMMARY.md` — new,
+  upload-ready summary.
+- Baseline evidence files (`ANALYSIS_BASELINE_QUERY_COUNTS.txt`,
+  `ANALYSIS_BASELINE_TEST_RUN_LOG.txt`) — **not modified**.
+
+## Whether permissions/business/API behavior changed
+
+**No.** Permissions, role behavior, region isolation, response field
+names/types/shape, and every business rule are unchanged — verified by
+the unmodified `tests_analysis.py` suite passing 12/12, by 3 new
+correctness tests proving field values identical to the pre-fix
+computation (including every active/inactive/ended-assignment edge case),
+and by byte-identical response payload sizes before/after at every
+measured N.
+
+## Allocation-owned logic — confirmed untouched
+
+`analysis_data()`'s `latest_run` read path (`AllocationRun.objects.all()`,
+its optional region filter, `.select_related('run_by', 'region').order_by('-started_at').first()`)
+was not modified in any way. No allocation algorithm file, allocation
+serializer, allocation view function, or allocation test module was
+opened for editing, run, or touched. The single production file changed
+(`views.py`) had edits confined to one import line and the
+`occupancy_data` loop inside `analysis_data()` only.
+
+## Remaining fixed/base query count — NOT optimized in this phase
+
+`GET /api/analysis/` still issues a **flat 31 queries** per request
+regardless of building count — the ~28+ single aggregate/count/
+values_list queries `analysis_data()` runs once per request (summary KPI
+block, 5 `students_by_*` distributions, `dorm_types_for_region`, the one
+`students_qs.select_related(...)` loop query, `region_name_to_id`,
+`transfers_by_status`/`transfers_by_type`, `pending_requests_by_type`,
+`latest_run`, `latest_batch`/`RegionInbox` lookup, plus DRF auth
+overhead). **Not touched or analyzed in detail in this phase** — flagged
+here as the candidate for the next investigation rather than broadened
+into this change.
+
+## Remaining Limitations
+
+- Only the confirmed 3-queries-per-building pattern was optimized; the
+  remaining flat 31-query base was not analyzed for internal duplicate/
+  consolidation opportunities.
+- Timing measurements remain server-side-only (DRF `APIClient`, no real
+  HTTP/network/Azure layer).
+- Real production data volume/shape was not used — synthetic data only,
+  consistent with the baseline method.
+- No pagination on this endpoint — response size still grows linearly
+  with building count; out of scope and unchanged.
+- No concurrent-load measurement.
+
+## Interpretation
+
+The confirmed per-building N+1 in `analysis_data()`'s `occupancy_data`
+loop is resolved: query count dropped from `31 + 3N` to a flat `31`, a
+70.8% reduction at N=25, with byte-identical response payloads and zero
+observed change in returned values, permissions, or any other endpoint
+behavior — and the allocation algorithm/tests/`AllocationRun` read path
+confirmed untouched.
