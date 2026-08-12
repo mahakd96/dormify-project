@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { allocationAPI, inboxAPI } from '../services/api';
+import { localizeRegionName } from '../utils/locationNames';
 import {
   Play,
   Square,
@@ -1255,11 +1256,7 @@ showToast(
   ];
 
   // ── Region label ─────────────────────────────
-  const regionLabel = summary?.region
-    ? (language === 'he'
-        ? summary.region.name || summary.region.name_en || ''
-        : summary.region.name_en || summary.region.name || '')
-    : null;
+  const regionLabel = summary?.region ? localizeRegionName(summary.region, language) : null;
 
   // ── Render ───────────────────────────────────
   return (

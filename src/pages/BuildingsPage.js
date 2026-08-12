@@ -26,6 +26,7 @@ import {
 import { api, dormInventoryAPI, whatIfAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import BuildingSetupWizard from '../components/BuildingSetupWizard';
+import { localizeRegionName, localizeDormTypeName, localizeById } from '../utils/locationNames';
 
 
 
@@ -782,6 +783,13 @@ export default function BuildingsPage({ language = 'he' }) {
         if (urlDormTypeIdRaw) setSelectedDormTypeId(idOf(urlDormTypeIdRaw));
 
         if (resolvedRegionId) await loadBuildings(resolvedRegionId);
+
+        // Deep link from the Data Analysis page ("View building details"):
+        // ?region=<id>&building=<id> pre-selects the building on arrival.
+        const urlBuildingIdRaw = searchParams.get('building');
+        if (urlBuildingIdRaw) {
+          await selectBuilding(idOf(urlBuildingIdRaw));
+        }
       } catch (err) {
         console.error('ERROR LOADING BUILDINGS PAGE:', err);
         setPageError(err?.message || t.loadError);
@@ -1061,7 +1069,7 @@ export default function BuildingsPage({ language = 'he' }) {
     );
   }
 
-  const dormTypeLabelText = (dt) => (dt ? `${dt.name}${dt.code ? ` (${dt.code})` : ''}` : '');
+  const dormTypeLabelText = (dt) => (dt ? `${localizeDormTypeName(dt, language)}${dt.code ? ` (${dt.code})` : ''}` : '');
 
 
   const editorBuildingCtx =
@@ -1113,9 +1121,15 @@ export default function BuildingsPage({ language = 'he' }) {
   let editorContextLine = '';
   if (editor?.type === 'building') {
     if (editor.mode === 'edit' && editorBuildingCtx) {
-      editorContextLine = [editorBuildingCtx.dorm_type_name, editorBuildingCtx.region_name].filter(Boolean).join(' • ');
+      editorContextLine = [
+        localizeDormTypeName({ code: editorBuildingCtx.dorm_type_code, name: editorBuildingCtx.dorm_type_name }, language),
+        localizeById(editorBuildingCtx.region, editorBuildingCtx.region_name, language),
+      ].filter(Boolean).join(' • ');
     } else if (editor.mode === 'create') {
-      editorContextLine = [selectedDormType?.name, selectedRegion?.name].filter(Boolean).join(' • ');
+      editorContextLine = [
+        selectedDormType ? localizeDormTypeName(selectedDormType, language) : null,
+        selectedRegion ? localizeRegionName(selectedRegion, language) : null,
+      ].filter(Boolean).join(' • ');
     }
   } else if (editor?.type === 'apartment') {
     const buildingLabel = editorApartmentBuildingCtx ? `${t.buildingNumberLabel} ${editorApartmentBuildingCtx.number}` : '';
@@ -1166,13 +1180,17 @@ export default function BuildingsPage({ language = 'he' }) {
         {selectedRegion && (
           <>
             <BreadcrumbChevron size={13} />
-            <span>{selectedRegion.name}</span>
+            <span>{localizeRegionName(selectedRegion, language)}</span>
           </>
         )}
         {(selectedDormType || selectedBuilding) && (
           <>
             <BreadcrumbChevron size={13} />
-            <span>{selectedBuilding ? selectedBuilding.dorm_type_name : selectedDormType?.name}</span>
+            <span>
+              {selectedBuilding
+                ? localizeDormTypeName({ code: selectedBuilding.dorm_type_code, name: selectedBuilding.dorm_type_name }, language)
+                : (selectedDormType ? localizeDormTypeName(selectedDormType, language) : '')}
+            </span>
           </>
         )}
         {selectedBuilding && (
@@ -1219,7 +1237,7 @@ export default function BuildingsPage({ language = 'he' }) {
           <select value={selectedRegionId} disabled={!(isCentralAdmin() || isRegionBoss())} onChange={(e) => selectRegion(e.target.value)}>
             {regions.map((region) => (
               <option key={region.id} value={region.id}>
-                {region.name}
+                {localizeRegionName(region, language)}
               </option>
             ))}
           </select>
@@ -1329,7 +1347,7 @@ export default function BuildingsPage({ language = 'he' }) {
                     <div className="inv-summaryBarTitle">
                       {t.buildingNumberLabel} {selectedBuilding.number}
                     </div>
-                    <div className="inv-summaryBarMeta">{selectedBuilding.dorm_type_name}</div>
+                    <div className="inv-summaryBarMeta">{localizeDormTypeName({ code: selectedBuilding.dorm_type_code, name: selectedBuilding.dorm_type_name }, language)}</div>
                   </div>
                   <StatusBadge active={selectedBuilding.is_active} activeText={t.statusActive} inactiveText={t.statusInactive} />
                 </div>
@@ -1363,7 +1381,7 @@ export default function BuildingsPage({ language = 'he' }) {
 
               {buildingDetailsOpen && (
                 <div className="inv-detailsStrip">
-                  <DetailRow label={t.regionLabel} value={selectedBuilding.region_name} />
+                  <DetailRow label={t.regionLabel} value={localizeById(selectedBuilding.region, selectedBuilding.region_name, language)} />
                   <DetailRow
                     label={t.genderRestrictionLabel}
                     value={genderRestrictionLabels[selectedBuilding.gender_restriction] || t.noRestriction}
@@ -2018,7 +2036,7 @@ export default function BuildingsPage({ language = 'he' }) {
           language={language}
           dormTypesInRegion={dormTypesInRegion}
           defaultDormTypeId={selectedDormTypeId !== 'all' ? selectedDormTypeId : ''}
-          regionName={selectedRegion?.name}
+          regionName={selectedRegion ? localizeRegionName(selectedRegion, language) : ''}
           categoryLabels={categoryLabels}
           apartmentTypeLabels={apartmentTypeLabels}
           genderRestrictionLabels={genderRestrictionLabels}

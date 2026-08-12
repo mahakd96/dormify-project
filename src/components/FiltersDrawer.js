@@ -1,5 +1,6 @@
 import React, { useState, useRef, useMemo } from 'react';
 import { X, Search, ChevronDown, SlidersHorizontal } from 'lucide-react';
+import { localizeGender } from '../utils/genderLabels';
 
 export default function FiltersDrawer({
   isOpen,
@@ -353,8 +354,8 @@ export default function FiltersDrawer({
             >
               <SegmentedButtons
                 options={[
-                  { value: 'male', label: 'Male' },
-                  { value: 'female', label: 'Female' },
+                  { value: 'male', label: localizeGender('male', language) },
+                  { value: 'female', label: localizeGender('female', language) },
                 ]}
                 selected={filters.genders || []}
                 onToggle={(v) => setSingle('genders', v)}

@@ -1,0 +1,144 @@
+Found 3 test(s).
+Creating test database for alias 'default' ('test_dormify_test')...
+Operations to perform:
+  Synchronize unmigrated apps: accounts, corsheaders, messages, rest_framework, rest_framework_simplejwt, staticfiles
+  Apply all migrations: admin, api, auth, contenttypes, sessions
+Synchronizing apps without migrations:
+  Creating tables...
+    Running deferred SQL...
+Running migrations:
+  Applying contenttypes.0001_initial... OK
+  Applying contenttypes.0002_remove_content_type_name... OK
+  Applying auth.0001_initial... OK
+  Applying auth.0002_alter_permission_name_max_length... OK
+  Applying auth.0003_alter_user_email_max_length... OK
+  Applying auth.0004_alter_user_username_opts... OK
+  Applying auth.0005_alter_user_last_login_null... OK
+  Applying auth.0006_require_contenttypes_0002... OK
+  Applying auth.0007_alter_validators_add_error_messages... OK
+  Applying auth.0008_alter_user_username_max_length... OK
+  Applying auth.0009_alter_user_last_name_max_length... OK
+  Applying auth.0010_alter_group_name_max_length... OK
+  Applying auth.0011_update_proxy_permissions... OK
+  Applying auth.0012_alter_user_first_name_max_length... OK
+  Applying api.0001_initial... OK
+  Applying admin.0001_initial... OK
+  Applying admin.0002_logentry_remove_auto_add... OK
+  Applying admin.0003_logentry_add_action_flag_choices... OK
+  Applying api.0002_student_placement_sector_and_more... OK
+  Applying api.0003_studentrequest... OK
+  Applying api.0004_studentrequest_other_description_and_more... OK
+  Applying api.0005_studentrequest_removal_notes_and_more... OK
+  Applying api.0006_studentrequest_student_data_and_more... OK
+  Applying api.0007_studentrequest_priority_and_more... OK
+  Applying api.0003_alter_room_options_room_building... OK
+  Applying api.0004_alter_building_options_alter_room_options_and_more... OK
+  Applying api.0005_alter_student_gender... OK
+  Applying api.0008_merge_20260628_2306... OK
+  Applying api.0005_allocationrun_lifecycle_bedassignment_run_fk... OK
+  Applying api.0009_merge_20260629_1738... OK
+  Applying api.0010_student_accessibility_flag_and_more... OK
+  Applying api.0011_building_gender_restriction... OK
+  Applying api.0010_studentrequest_current_assignment_snapshot_and_more... OK
+  Applying api.0012_merge_20260714_2148... OK
+  Applying api.0013_allocationrun_diagnostics... OK
+  Applying api.0014_assistedallocationaudit... OK
+  Applying sessions.0001_initial... OK
+System check identified no issues (0 silenced).
+test_analysis_query_count_independent_of_student_volume (api.performance_tests.test_analysis_performance.AnalysisPerformanceTests.test_analysis_query_count_independent_of_student_volume)
+Second, independently-justified measurement dimension. ... --- N=5 BUILDINGS + S=50 EXTRA UNASSIGNED STUDENTS: n_buildings=5 extra_unassigned_students=50 ---
+endpoint: GET /api/analysis/?region=perf-region
+user role: central_admin
+occupancy_data_rows_returned: 5
+total_sql_queries: 46
+distinct_query_shapes: 34
+server_side_request_time_ms: 79.20
+response_payload_bytes: 2297
+repeated_query_shapes (occurrence_count x shape, numbers masked as #):
+  x5: SELECT "api_room"."capacity" FROM "api_room" INNER JOIN "api_apartment" ON ("api_room"."apartment_id" = "api_apartment"."id") INNER JOIN "api_building" ON ("api_apartment"."building_id" = "api_building"."id") INNER JOIN "api_dormtype" ON ("
+  x5: SELECT COUNT(*) FROM (SELECT DISTINCT "api_bedassignment"."bed_id" AS "col#" FROM "api_bedassignment" INNER JOIN "api_bed" ON ("api_bedassignment"."bed_id" = "api_bed"."id") INNER JOIN "api_room" ON ("api_bed"."room_id" = "api_room"."id") I
+  x5: SELECT COUNT(*) AS "__count" FROM "api_room" INNER JOIN "api_apartment" ON ("api_room"."apartment_id" = "api_apartment"."id") INNER JOIN "api_building" ON ("api_apartment"."building_id" = "api_building"."id") INNER JOIN "api_dormtype" ON ("
+
+--- N=5 BUILDINGS + S=500 EXTRA UNASSIGNED STUDENTS: n_buildings=5 extra_unassigned_students=500 ---
+endpoint: GET /api/analysis/?region=perf-region
+user role: central_admin
+occupancy_data_rows_returned: 5
+total_sql_queries: 46
+distinct_query_shapes: 34
+server_side_request_time_ms: 78.12
+response_payload_bytes: 2308
+repeated_query_shapes (occurrence_count x shape, numbers masked as #):
+  x5: SELECT "api_room"."capacity" FROM "api_room" INNER JOIN "api_apartment" ON ("api_room"."apartment_id" = "api_apartment"."id") INNER JOIN "api_building" ON ("api_apartment"."building_id" = "api_building"."id") INNER JOIN "api_dormtype" ON ("
+  x5: SELECT COUNT(*) FROM (SELECT DISTINCT "api_bedassignment"."bed_id" AS "col#" FROM "api_bedassignment" INNER JOIN "api_bed" ON ("api_bedassignment"."bed_id" = "api_bed"."id") INNER JOIN "api_room" ON ("api_bed"."room_id" = "api_room"."id") I
+  x5: SELECT COUNT(*) AS "__count" FROM "api_room" INNER JOIN "api_apartment" ON ("api_room"."apartment_id" = "api_apartment"."id") INNER JOIN "api_building" ON ("api_apartment"."building_id" = "api_building"."id") INNER JOIN "api_dormtype" ON ("
+
+--- SCALING SUMMARY (student volume, buildings fixed at N=5) ---
+S=50 extra:  total_queries=46  time_ms=79.20  bytes=2297
+S=500 extra: total_queries=46 time_ms=78.12  bytes=2308
+query_count_delta (S=50 -> S=500): 0
+time_ms_delta (S=50 -> S=500): -1.07
+
+ok
+test_analysis_query_count_scaling_with_building_count (api.performance_tests.test_analysis_performance.AnalysisPerformanceTests.test_analysis_query_count_scaling_with_building_count)
+Core baseline measurement: total SQL query count at N=1, N=5, N=25 ... --- N=1 BUILDINGS: n_buildings=1 extra_unassigned_students=0 ---
+endpoint: GET /api/analysis/?region=perf-region
+user role: central_admin
+occupancy_data_rows_returned: 1
+total_sql_queries: 34
+distinct_query_shapes: 34
+server_side_request_time_ms: 48.63
+response_payload_bytes: 1324
+repeated_query_shapes (occurrence_count x shape, numbers masked as #):
+
+--- N=5 BUILDINGS: n_buildings=5 extra_unassigned_students=0 ---
+endpoint: GET /api/analysis/?region=perf-region
+user role: central_admin
+occupancy_data_rows_returned: 5
+total_sql_queries: 46
+distinct_query_shapes: 34
+server_side_request_time_ms: 58.51
+response_payload_bytes: 2292
+repeated_query_shapes (occurrence_count x shape, numbers masked as #):
+  x5: SELECT "api_room"."capacity" FROM "api_room" INNER JOIN "api_apartment" ON ("api_room"."apartment_id" = "api_apartment"."id") INNER JOIN "api_building" ON ("api_apartment"."building_id" = "api_building"."id") INNER JOIN "api_dormtype" ON ("
+  x5: SELECT COUNT(*) FROM (SELECT DISTINCT "api_bedassignment"."bed_id" AS "col#" FROM "api_bedassignment" INNER JOIN "api_bed" ON ("api_bedassignment"."bed_id" = "api_bed"."id") INNER JOIN "api_room" ON ("api_bed"."room_id" = "api_room"."id") I
+  x5: SELECT COUNT(*) AS "__count" FROM "api_room" INNER JOIN "api_apartment" ON ("api_room"."apartment_id" = "api_apartment"."id") INNER JOIN "api_building" ON ("api_apartment"."building_id" = "api_building"."id") INNER JOIN "api_dormtype" ON ("
+
+--- N=25 BUILDINGS: n_buildings=25 extra_unassigned_students=0 ---
+endpoint: GET /api/analysis/?region=perf-region
+user role: central_admin
+occupancy_data_rows_returned: 25
+total_sql_queries: 106
+distinct_query_shapes: 34
+server_side_request_time_ms: 141.43
+response_payload_bytes: 7162
+repeated_query_shapes (occurrence_count x shape, numbers masked as #):
+  x25: SELECT "api_room"."capacity" FROM "api_room" INNER JOIN "api_apartment" ON ("api_room"."apartment_id" = "api_apartment"."id") INNER JOIN "api_building" ON ("api_apartment"."building_id" = "api_building"."id") INNER JOIN "api_dormtype" ON ("
+  x25: SELECT COUNT(*) FROM (SELECT DISTINCT "api_bedassignment"."bed_id" AS "col#" FROM "api_bedassignment" INNER JOIN "api_bed" ON ("api_bedassignment"."bed_id" = "api_bed"."id") INNER JOIN "api_room" ON ("api_bed"."room_id" = "api_room"."id") I
+  x25: SELECT COUNT(*) AS "__count" FROM "api_room" INNER JOIN "api_apartment" ON ("api_room"."apartment_id" = "api_apartment"."id") INNER JOIN "api_building" ON ("api_apartment"."building_id" = "api_building"."id") INNER JOIN "api_dormtype" ON ("
+
+--- SCALING SUMMARY (building count, N=1/5/25) ---
+N=1:  total_queries=34  time_ms=48.63  bytes=1324
+N=5:  total_queries=46  time_ms=58.51  bytes=2292
+N=25: total_queries=106 time_ms=141.43  bytes=7162
+marginal_queries_per_additional_building (1->5): 3.00
+marginal_queries_per_additional_building (5->25): 3.00
+
+ok
+test_analysis_single_building_baseline_overhead (api.performance_tests.test_analysis_performance.AnalysisPerformanceTests.test_analysis_single_building_baseline_overhead)
+Isolates fixed per-request overhead (auth/permission resolution, ... --- SINGLE BUILDING (N=1): n_buildings=1 extra_unassigned_students=0 ---
+endpoint: GET /api/analysis/?region=perf-region
+user role: central_admin
+occupancy_data_rows_returned: 1
+total_sql_queries: 34
+distinct_query_shapes: 34
+server_side_request_time_ms: 48.47
+response_payload_bytes: 1324
+repeated_query_shapes (occurrence_count x shape, numbers masked as #):
+
+ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 2.417s
+
+OK
+Destroying test database for alias 'default' ('test_dormify_test')...

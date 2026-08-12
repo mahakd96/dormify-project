@@ -7,7 +7,8 @@ import { studentsAPI } from '../services/api';
 // exact same lookup instead of a second implementation. Self-contained
 // styling (does not depend on a host page's CSS variables) so it renders
 // correctly regardless of which page embeds it.
-const StudentSearch = ({ onPick, filter, placeholder }) => {
+const StudentSearch = ({ onPick, filter, placeholder, language = 'he' }) => {
+  const isHe = language === 'he';
   const [q, setQ] = useState('');
   const [res, setRes] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -37,7 +38,7 @@ const StudentSearch = ({ onPick, filter, placeholder }) => {
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder={placeholder || 'חיפוש...'}
+          placeholder={placeholder || (isHe ? 'חיפוש...' : 'Search...')}
         />
         {loading && <Loader2 size={13} className="shared-ss-spin" />}
         {q && !loading && (
@@ -63,7 +64,7 @@ const StudentSearch = ({ onPick, filter, placeholder }) => {
                   <span className="shared-ss-id">{s.student_id}</span>
                 </div>
                 <span className={`shared-ss-pill ${s.is_assigned ? 'is-assigned' : 'is-unassigned'}`}>
-                  {s.is_assigned ? 'משובץ' : 'לא משובץ'}
+                  {isHe ? (s.is_assigned ? 'משובץ' : 'לא משובץ') : (s.is_assigned ? 'Assigned' : 'Unassigned')}
                 </span>
               </button>
             );
@@ -71,7 +72,7 @@ const StudentSearch = ({ onPick, filter, placeholder }) => {
         </div>
       )}
       {q.length >= 2 && !loading && res.length === 0 && (
-        <div className="shared-ss-empty">לא נמצאו תוצאות</div>
+        <div className="shared-ss-empty">{isHe ? 'לא נמצאו תוצאות' : 'No results found'}</div>
       )}
 
       <style>{`
@@ -103,7 +104,7 @@ const StudentSearch = ({ onPick, filter, placeholder }) => {
         .shared-ss-row {
           width: 100%; display: flex; align-items: center; gap: 10px;
           padding: 9px 12px; border: none; background: none; cursor: pointer;
-          text-align: right; font-family: inherit;
+          text-align: start; font-family: inherit;
         }
         .shared-ss-row:hover { background: #f8f9fb; }
         .shared-ss-ava {
@@ -113,7 +114,7 @@ const StudentSearch = ({ onPick, filter, placeholder }) => {
         }
         .shared-ss-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
         .shared-ss-name { font-size: 14px; font-weight: 600; color: #172b4d; }
-        .shared-ss-id { font-size: 12px; color: #97a0af; direction: ltr; text-align: right; }
+        .shared-ss-id { font-size: 12px; color: #97a0af; direction: ltr; text-align: end; }
         .shared-ss-pill {
           font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px;
           flex-shrink: 0;

@@ -838,12 +838,25 @@ class StudentSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
 
+    def _current_bed_cached(self, obj):
+        # Student.current_bed is an uncached @property that runs a fresh
+        # BedAssignment query on every access - get_current_bed_id and
+        # get_current_bed_label both used to call it independently,
+        # issuing the identical query twice per detail/create/update
+        # response. Cache the result on the instance for the lifetime of
+        # this serialization instead (DRF calls both methods on the same
+        # obj), so it runs once. Same underlying query/semantics, just
+        # not repeated. (G1-15.)
+        if not hasattr(obj, '_cached_current_bed'):
+            obj._cached_current_bed = obj.current_bed
+        return obj._cached_current_bed
+
     def get_current_bed_id(self, obj):
-        bed = obj.current_bed
+        bed = self._current_bed_cached(obj)
         return bed.id if bed else None
 
     def get_current_bed_label(self, obj):
-        bed = obj.current_bed
+        bed = self._current_bed_cached(obj)
         return bed.label if bed else None
 
     def validate(self, attrs):
@@ -1307,17 +1320,44 @@ class StudentRequestSerializer(serializers.ModelSerializer):
     def get_current_bed(self, obj):
         if not obj.student_id:
             return None
-        bed = obj.student.current_bed
+        # get_queryset() prefetches at most the one ACTIVE BedAssignment per
+        # student as student.prefetched_current_assignment_list (a
+        # unique_active_assignment_per_student DB constraint guarantees
+        # there is never more than one) - read that first, with zero extra
+        # queries. Falls back to the original property (which issues its
+        # own query) when the object wasn't built through get_queryset()
+        # (e.g. a freshly-created StudentRequest serialized straight from
+        # perform_create()), or when the cache was deliberately invalidated
+        # after a mutation (see StudentRequestViewSet.approve()).
+        prefetched = getattr(obj.student, 'prefetched_current_assignment_list', None)
+        if prefetched is not None:
+            bed = prefetched[0].bed if prefetched else None
+        else:
+            bed = obj.student.current_bed
         return bed.label if bed else None
 
     def get_placement_history(self, obj):
         if not obj.student_id:
             return []
         history = []
-        assignments = obj.student.bed_assignments.select_related(
-            'bed__room__apartment__building',
-            'bed__room__apartment__building__dorm_type__region',
-        ).order_by('-assigned_at')[:10]
+        # Same annotation-first-with-fallback pattern as get_current_bed:
+        # student.prefetched_placement_history_all holds this student's 10
+        # most-recent bed_assignments (any status, DB-bounded via
+        # _top10_bed_assignment_history_qs() - see
+        # project-quality/performance/GROUP1_PLACEMENT_HISTORY_VERIFICATION.md),
+        # already ordered '-assigned_at' and select_related, fetched once
+        # regardless of how many StudentRequest rows are on this page. The
+        # [:10] slice below is now a defensive no-op (the DB query already
+        # returns at most 10) kept for safety and to match the fallback
+        # path exactly.
+        prefetched = getattr(obj.student, 'prefetched_placement_history_all', None)
+        if prefetched is not None:
+            assignments = prefetched[:10]
+        else:
+            assignments = obj.student.bed_assignments.select_related(
+                'bed__room__apartment__building',
+                'bed__room__apartment__building__dorm_type__region',
+            ).order_by('-assigned_at')[:10]
         for a in assignments:
             room = a.bed.room
             history.append({

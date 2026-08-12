@@ -120,24 +120,12 @@ class Command(BaseCommand):
                 "Use best-effort mode for a gap-accepted run."
             )
 
-        self.print_active_database()
         self.ensure_local_test_database()
 
         base_dir = Path(settings.BASE_DIR)
         tests_dir = base_dir / "canada_algorithm_tests"
         case_dir = tests_dir / case_name
 
-        self.stdout.write("=" * 78)
-        self.stdout.write(f"Running allocation test case: {case_name}")
-        self.stdout.write(f"Case path: {case_dir}")
-        self.stdout.write(f"Solver time limit for this run: {max_seconds:g} seconds")
-        self.stdout.write(f"Solve mode: {solve_mode}")
-        self.stdout.write(f"Maximum relative gap: {max_relative_gap:.6%}")
-        self.stdout.write(
-            "Persist FEASIBLE on timeout: "
-            f"{'YES' if persist_feasible_on_timeout else 'NO'}"
-        )
-        self.stdout.write("=" * 78)
 
         if not case_dir.exists():
             raise CommandError(f"Case folder does not exist: {case_dir}")
@@ -150,9 +138,7 @@ class Command(BaseCommand):
         ]
         for file_name in required_files:
             file_path = case_dir / file_name
-            if file_path.exists():
-                self.stdout.write(self.style.SUCCESS(f"FOUND: {file_name}"))
-            else:
+            if not file_path.exists():
                 raise CommandError(f"Missing required file: {file_name}")
 
         students_rows = self.read_csv(case_dir / "students.csv")
@@ -163,18 +149,6 @@ class Command(BaseCommand):
         expected_metrics = case_config.get("expected_metrics", {})
         allocation_expectations = case_config.get("allocation_expectations", {})
 
-        self.stdout.write(self.style.SUCCESS("Case structure is valid."))
-        self.stdout.write("")
-        self.stdout.write("=" * 78)
-        self.stdout.write("CSV and expectation data loaded")
-        self.stdout.write("=" * 78)
-        self.stdout.write(f"Students rows: {len(students_rows)}")
-        self.stdout.write(f"Apartments rows: {len(apartments_rows)}")
-        self.stdout.write(f"Rooms rows: {len(rooms_rows)}")
-        self.stdout.write(
-            f"Machine-readable allocation expectations: "
-            f"{'YES' if allocation_expectations else 'NO (generic hard checks only)'}"
-        )
 
         self.clear_test_data()
 
@@ -187,21 +161,7 @@ class Command(BaseCommand):
             dorm_type=housing_objects["dorm_type"],
         )
 
-        self.stdout.write("")
-        self.stdout.write("=" * 78)
-        self.stdout.write("Data loaded into LOCAL test DB")
-        self.stdout.write("=" * 78)
-        self.stdout.write(f"Region: {housing_objects['region'].id}")
-        self.stdout.write(f"DormType: {housing_objects['dorm_type'].name}")
-        self.stdout.write(f"Building: {housing_objects['building'].number}")
-        self.stdout.write(f"Apartments created: {Apartment.objects.count()}")
-        self.stdout.write(f"Rooms created: {Room.objects.count()}")
-        self.stdout.write(f"Beds created: {Bed.objects.count()}")
-        self.stdout.write(f"Students created: {Student.objects.count()}")
-        self.stdout.write(
-            "Active assignments before algorithm: "
-            f"{BedAssignment.objects.filter(status=BedAssignment.Status.ACTIVE).count()}"
-        )
+
 
         with self.temporary_solver_fixture_attributes(
             students_rows=students_rows,
@@ -301,7 +261,6 @@ class Command(BaseCommand):
             )
 
         data["constraints_config"] = constraints
-        self.stdout.write(f"Using case configuration from: {json_path.name}")
         return data
 
     def parse_bool(self, value):
@@ -335,11 +294,6 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
 
     def clear_test_data(self):
-        self.stdout.write("")
-        self.stdout.write("=" * 78)
-        self.stdout.write("Clearing local test DB data")
-        self.stdout.write("=" * 78)
-
         BedAssignment.objects.all().delete()
         Student.objects.all().delete()
         Bed.objects.all().delete()
@@ -349,13 +303,8 @@ class Command(BaseCommand):
         DormType.objects.all().delete()
         Region.objects.all().delete()
 
-        self.stdout.write(self.style.SUCCESS("Local test DB cleaned."))
-
     def load_housing_data(self, apartments_rows, rooms_rows):
-        self.stdout.write("")
-        self.stdout.write("=" * 78)
-        self.stdout.write("Loading housing data into LOCAL test DB")
-        self.stdout.write("=" * 78)
+
 
         region = Region.objects.create(
             id="canada_test",
@@ -451,9 +400,7 @@ class Command(BaseCommand):
                 Bed.objects.create(room=room, label=label[:20])
                 beds_created += 1
 
-        self.stdout.write(self.style.SUCCESS(f"Apartments loaded: {len(apartment_by_code)}"))
-        self.stdout.write(self.style.SUCCESS(f"Rooms loaded: {rooms_created}"))
-        self.stdout.write(self.style.SUCCESS(f"Beds loaded: {beds_created}"))
+
 
         return {
             "region": region,
@@ -462,11 +409,6 @@ class Command(BaseCommand):
         }
 
     def load_students_data(self, students_rows, dorm_type):
-        self.stdout.write("")
-        self.stdout.write("=" * 78)
-        self.stdout.write("Loading students into LOCAL test DB")
-        self.stdout.write("=" * 78)
-
         created_count = 0
         for row in students_rows:
             student_id = row.get("student_id", "").strip()
@@ -563,7 +505,6 @@ class Command(BaseCommand):
             Student.objects.create(**student_kwargs)
             created_count += 1
 
-        self.stdout.write(self.style.SUCCESS(f"Students loaded: {created_count}"))
 
     @contextmanager
     def temporary_solver_fixture_attributes(self, students_rows, apartments_rows):
@@ -601,25 +542,16 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
 
     def run_algorithm(
-        self,
-        constraints_config,
-        max_seconds,
-        solve_mode,
-        max_relative_gap,
-        persist_feasible_on_timeout,
-        log_search_progress,
+            self,
+            constraints_config,
+            max_seconds,
+            solve_mode,
+            max_relative_gap,
+            persist_feasible_on_timeout,
+            log_search_progress,
     ):
-        self.stdout.write("")
-        self.stdout.write("=" * 78)
-        self.stdout.write("Running allocation algorithm")
-        self.stdout.write("=" * 78)
-
         students_qs = Student.objects.all().order_by("student_id")
         rooms_qs = Room.objects.all().order_by("name")
-
-        self.stdout.write(f"Students sent to solver: {students_qs.count()}")
-        self.stdout.write(f"Rooms sent to solver: {rooms_qs.count()}")
-        self.stdout.write(f"Beds before solver: {Bed.objects.count()}")
 
         results = allocation_solver.run_improved_ortools_allocation(
             students=students_qs,
@@ -631,16 +563,6 @@ class Command(BaseCommand):
             persist_feasible_on_timeout=persist_feasible_on_timeout,
             log_search_progress=log_search_progress,
         )
-
-        self.stdout.write("")
-        self.stdout.write("=" * 78)
-        self.stdout.write("Algorithm results")
-        self.stdout.write("=" * 78)
-        for key, value in results.items():
-            if key == "proposed_assignments":
-                self.stdout.write(f"proposed_assignments: {len(value)} assignment(s)")
-            else:
-                self.stdout.write(f"{key}: {value}")
 
         return results
 
@@ -1567,6 +1489,8 @@ class Command(BaseCommand):
                 f"{'Religion':<16}"
                 f"{'Religious Req.':<17}"
                 f"{'Priority':<10}"
+                f"{'Year Group':<12}"
+                f"{'Study Status':<16}"
                 f"{'Roommates':<24}"
                 f"{'Room':<15}"
             )
@@ -1599,7 +1523,34 @@ class Command(BaseCommand):
                     if self.parse_bool(row.get("is_priority", "False"))
                     else "NO"
                 )
+                academic_points = self.parse_int(
+                    row.get("academic_points_total", "0"),
+                    0,
+                )
 
+                if 0 <= academic_points <= 40:
+                    year_group = "Year 1"
+                elif academic_points >= 60:
+                    year_group = "Year 3/4"
+                else:
+                    year_group = "Other"
+
+                study_statuses = []
+
+                for index in range(1, 5):
+                    status = row.get(
+                        f"special_status_{index}",
+                        ""
+                    ).strip()
+
+                    if status:
+                        study_statuses.append(status)
+
+                study_status = (
+                    ", ".join(study_statuses)
+                    if study_statuses
+                    else "-"
+                )
                 roommate_requests = []
                 for index in range(1, 6):
                     roommate_id = row.get(
@@ -1622,6 +1573,8 @@ class Command(BaseCommand):
                     f"{religion:<16}"
                     f"{religious_request:<17}"
                     f"{priority:<10}"
+                    f"{year_group:<12}"
+                    f"{study_status:<16}"
                     f"{roommate_text:<24}"
                     f"{assignment['room_code']:<15}"
                 )
