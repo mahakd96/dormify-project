@@ -16,14 +16,19 @@ import {
 // Selecting a bed only calls onSelectBed - it never assigns. The parent
 // page renders the confirm panel from the selection this returns.
 
-const STATUS_CFG = {
+const STATUS_CFG_HE = {
   recommended: { label: 'מומלץ', color: '#15803d', bg: '#dcfce7', border: '#86efac' },
   possible: { label: 'אפשרי', color: '#1d4ed8', bg: '#dbeafe', border: '#93c5fd' },
   override_required: { label: 'דורש חריגה', color: '#b45309', bg: '#fef3c7', border: '#fcd34d' },
 };
+const STATUS_CFG_EN = {
+  recommended: { label: 'Recommended', color: '#15803d', bg: '#dcfce7', border: '#86efac' },
+  possible: { label: 'Possible', color: '#1d4ed8', bg: '#dbeafe', border: '#93c5fd' },
+  override_required: { label: 'Requires override', color: '#b45309', bg: '#fef3c7', border: '#fcd34d' },
+};
 
-function StatusPill({ status }) {
-  const cfg = STATUS_CFG[status] || STATUS_CFG.possible;
+function StatusPill({ status, isHe }) {
+  const cfg = (isHe ? STATUS_CFG_HE : STATUS_CFG_EN)[status] || (isHe ? STATUS_CFG_HE : STATUS_CFG_EN).possible;
   return (
     <span className="acb-pill" style={{ background: cfg.bg, color: cfg.color, border: `1px solid ${cfg.border}` }}>
       {cfg.label}
@@ -64,7 +69,7 @@ function ApartmentReasonLine({ apartment }) {
   );
 }
 
-function BedRow({ building, apartment, room, bed, selected, onSelect }) {
+function BedRow({ building, apartment, room, bed, selected, onSelect, isHe }) {
   const selectable = bed.is_selectable && !bed.is_occupied;
   return (
     <button
@@ -75,18 +80,18 @@ function BedRow({ building, apartment, room, bed, selected, onSelect }) {
     >
       <span className={`acb-radio${selected ? ' acb-radio-on' : ''}`} aria-hidden="true" />
       <BedDouble size={13} />
-      <span className="acb-bed-label">מיטה {bed.bed_label}</span>
+      <span className="acb-bed-label">{isHe ? `מיטה ${bed.bed_label}` : `Bed ${bed.bed_label}`}</span>
       {bed.is_occupied ? (
-        <span className="acb-bed-status acb-bed-status-occ">תפוסה{bed.occupant_name ? ` · ${bed.occupant_name}` : ''}</span>
+        <span className="acb-bed-status acb-bed-status-occ">{isHe ? 'תפוסה' : 'Occupied'}{bed.occupant_name ? ` · ${bed.occupant_name}` : ''}</span>
       ) : (
-        <span className="acb-bed-status acb-bed-status-free">פנויה</span>
+        <span className="acb-bed-status acb-bed-status-free">{isHe ? 'פנויה' : 'Free'}</span>
       )}
       {selected && <CheckCircle2 size={14} className="acb-check" />}
     </button>
   );
 }
 
-function RoomBlock({ building, apartment, room, selectedBedId, onSelect }) {
+function RoomBlock({ building, apartment, room, selectedBedId, onSelect, isHe }) {
   const [open, setOpen] = useState(false);
   if (room.capacity === 1) {
     const bed = (room.beds || [])[0];
@@ -101,12 +106,12 @@ function RoomBlock({ building, apartment, room, selectedBedId, onSelect }) {
       >
         <span className={`acb-radio${selected ? ' acb-radio-on' : ''}`} aria-hidden="true" />
         <DoorOpen size={12} />
-        <span className="acb-room-name">חדר {room.room_name}</span>
-        <span className="acb-dim">מקום יחיד</span>
+        <span className="acb-room-name">{isHe ? `חדר ${room.room_name}` : `Room ${room.room_name}`}</span>
+        <span className="acb-dim">{isHe ? 'מקום יחיד' : 'Single place'}</span>
         {selectable ? (
-          <span className="acb-bed-status acb-bed-status-free">פנוי</span>
+          <span className="acb-bed-status acb-bed-status-free">{isHe ? 'פנוי' : 'Free'}</span>
         ) : (
-          <span className="acb-bed-status acb-bed-status-occ">תפוס{bed?.occupant_name ? ` · ${bed.occupant_name}` : ''}</span>
+          <span className="acb-bed-status acb-bed-status-occ">{isHe ? 'תפוס' : 'Occupied'}{bed?.occupant_name ? ` · ${bed.occupant_name}` : ''}</span>
         )}
         {selected && <CheckCircle2 size={14} className="acb-check" />}
       </button>
@@ -118,8 +123,8 @@ function RoomBlock({ building, apartment, room, selectedBedId, onSelect }) {
     <div className={`acb-room-multi${containsSelection ? ' acb-room-has-selection' : ''}`}>
       <button type="button" className="acb-room-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         <DoorOpen size={12} />
-        <span className="acb-room-name">חדר {room.room_name}</span>
-        <span className="acb-dim">{room.available_beds_count} מתוך {room.capacity} מיטות פנויות</span>
+        <span className="acb-room-name">{isHe ? `חדר ${room.room_name}` : `Room ${room.room_name}`}</span>
+        <span className="acb-dim">{isHe ? `${room.available_beds_count} מתוך ${room.capacity} מיטות פנויות` : `${room.available_beds_count} of ${room.capacity} beds free`}</span>
         {open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
       </button>
       {open && (
@@ -127,7 +132,7 @@ function RoomBlock({ building, apartment, room, selectedBedId, onSelect }) {
           {(room.beds || []).map((bed) => (
             <BedRow
               key={bed.bed_id} building={building} apartment={apartment} room={room} bed={bed}
-              selected={bed.bed_id === selectedBedId} onSelect={onSelect}
+              selected={bed.bed_id === selectedBedId} onSelect={onSelect} isHe={isHe}
             />
           ))}
         </div>
@@ -136,16 +141,16 @@ function RoomBlock({ building, apartment, room, selectedBedId, onSelect }) {
   );
 }
 
-function ApartmentBlock({ building, apartment, selectedBedId, onSelect }) {
+function ApartmentBlock({ building, apartment, selectedBedId, onSelect, isHe, t }) {
   const [open, setOpen] = useState(false);
   const containsSelection = (apartment.rooms || []).some((r) => (r.beds || []).some((b) => b.bed_id === selectedBedId));
   return (
     <div className={`acb-apartment${containsSelection ? ' acb-apartment-has-selection' : ''}`}>
       <button type="button" className="acb-apartment-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <span className="acb-apt-title">דירה {apartment.apartment_number}</span>
-        <span className="acb-dim">{(apartment.residents || []).length} דיירים</span>
-        <StatusPill status={apartment.assisted_status} />
-        <span className="acb-free">{apartment.available_bed_count} פנויות</span>
+        <span className="acb-apt-title">{isHe ? `דירה ${apartment.apartment_number}` : `Apt ${apartment.apartment_number}`}</span>
+        <span className="acb-dim">{(apartment.residents || []).length} {t.residentsWord}</span>
+        <StatusPill status={apartment.assisted_status} isHe={isHe} />
+        <span className="acb-free">{apartment.available_bed_count} {t.freeWord}</span>
         {open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
       </button>
       {!open && <ApartmentReasonLine apartment={apartment} />}
@@ -154,7 +159,7 @@ function ApartmentBlock({ building, apartment, selectedBedId, onSelect }) {
           <ApartmentReasonLine apartment={apartment} />
           {(apartment.residents || []).length > 0 && (
             <div className="acb-residents">
-              <span className="acb-residents-title">דיירים קיימים:</span>
+              <span className="acb-residents-title">{t.existingResidents}</span>
               {apartment.residents.map((r) => (
                 <span key={r.id} className="acb-resident-chip"><User size={10} /> {r.full_name}</span>
               ))}
@@ -163,7 +168,7 @@ function ApartmentBlock({ building, apartment, selectedBedId, onSelect }) {
           {(apartment.rooms || []).map((room) => (
             <RoomBlock
               key={room.room_id} building={building} apartment={apartment} room={room}
-              selectedBedId={selectedBedId} onSelect={onSelect}
+              selectedBedId={selectedBedId} onSelect={onSelect} isHe={isHe}
             />
           ))}
         </div>
@@ -172,17 +177,17 @@ function ApartmentBlock({ building, apartment, selectedBedId, onSelect }) {
   );
 }
 
-function BuildingCard({ building, selectedBedId, onSelect, defaultOpen }) {
+function BuildingCard({ building, selectedBedId, onSelect, defaultOpen, isHe, t }) {
   const [open, setOpen] = useState(!!defaultOpen);
   return (
     <div className="acb-building">
       <button type="button" className="acb-building-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         <Building2 size={15} />
-        <span className="acb-building-title">בניין {building.building_number ?? building.building_name}</span>
+        <span className="acb-building-title">{isHe ? `בניין ${building.building_number ?? building.building_name}` : `Building ${building.building_number ?? building.building_name}`}</span>
         <span className="acb-dim">
-          {building.apartment_count} דירות · {building.room_count} חדרים · {building.available_bed_count} מיטות פנויות
+          {building.apartment_count} {t.apartmentsWord} · {building.room_count} {t.roomsWord} · {building.available_bed_count} {t.availableBedsWord}
         </span>
-        <StatusPill status={building.assisted_status} />
+        <StatusPill status={building.assisted_status} isHe={isHe} />
         {open ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
       </button>
       {open && (
@@ -190,7 +195,7 @@ function BuildingCard({ building, selectedBedId, onSelect, defaultOpen }) {
           {(building.apartments || []).map((a) => (
             <ApartmentBlock
               key={a.apartment_id} building={building} apartment={a}
-              selectedBedId={selectedBedId} onSelect={onSelect}
+              selectedBedId={selectedBedId} onSelect={onSelect} isHe={isHe} t={t}
             />
           ))}
         </div>
@@ -199,12 +204,30 @@ function BuildingCard({ building, selectedBedId, onSelect, defaultOpen }) {
   );
 }
 
-export default function AssistedCandidateBrowser({ candidates, selectedBedId, onSelectBed }) {
+export default function AssistedCandidateBrowser({ candidates, selectedBedId, onSelectBed, language = 'he' }) {
+  const isHe = language === 'he';
   const [tier, setTier] = useState('all');
   const [search, setSearch] = useState('');
 
   const buildings = candidates?.buildings || [];
   const counts = candidates?.assisted_status_counts || { recommended: 0, possible: 0, override_required: 0 };
+
+  const t = {
+    residentsWord: isHe ? 'דיירים' : 'residents',
+    freeWord: isHe ? 'פנויות' : 'free',
+    buildingsWord: isHe ? 'בניינים' : 'buildings',
+    apartmentsWord: isHe ? 'דירות' : 'apartments',
+    roomsWord: isHe ? 'חדרים' : 'rooms',
+    availableBedsWord: isHe ? 'מיטות פנויות' : 'available beds',
+    existingResidents: isHe ? 'דיירים קיימים:' : 'Current residents:',
+    searchPlaceholder: isHe ? 'חיפוש בניין / דירה / חדר...' : 'Search building / apartment / room...',
+    noResultsForFilter: isHe ? 'אין תוצאות עבור הסינון הנוכחי' : 'No results for the current filter',
+    noBedsFound: isHe ? 'לא נמצאו מיטות פנויות בסוג המעונות שאליו הסטודנט/ית התקבל/ה' : "No available beds were found in the student's accepted dorm type",
+    filterAll: (n) => (isHe ? `הכול (${n})` : `All (${n})`),
+    filterRecommended: (n) => (isHe ? `מומלץ (${n})` : `Recommended (${n})`),
+    filterPossible: (n) => (isHe ? `אפשרי (${n})` : `Possible (${n})`),
+    filterOverride: (n) => (isHe ? `דורש חריגה (${n})` : `Requires override (${n})`),
+  };
 
   const filtered = useMemo(() => {
     let list = buildings;
@@ -233,7 +256,7 @@ export default function AssistedCandidateBrowser({ candidates, selectedBedId, on
     return (
       <div className="acb-empty">
         <AlertTriangle size={24} />
-        <p>לא נמצאו מיטות פנויות בסוג המעונות שאליו הסטודנט/ית התקבל/ה</p>
+        <p>{t.noBedsFound}</p>
       </div>
     );
   }
@@ -243,10 +266,10 @@ export default function AssistedCandidateBrowser({ candidates, selectedBedId, on
       <div className="acb-toolbar">
         <div className="acb-filters">
           {[
-            ['all', `הכול (${candidates.total_valid_beds})`],
-            ['recommended', `מומלץ (${counts.recommended})`],
-            ['possible', `אפשרי (${counts.possible})`],
-            ['override_required', `דורש חריגה (${counts.override_required})`],
+            ['all', t.filterAll(candidates.total_valid_beds)],
+            ['recommended', t.filterRecommended(counts.recommended)],
+            ['possible', t.filterPossible(counts.possible)],
+            ['override_required', t.filterOverride(counts.override_required)],
           ].map(([key, label]) => (
             <button
               key={key} type="button"
@@ -260,18 +283,18 @@ export default function AssistedCandidateBrowser({ candidates, selectedBedId, on
         </div>
         <div className="acb-search">
           <Search size={13} />
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="חיפוש בניין / דירה / חדר..." />
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t.searchPlaceholder} />
         </div>
       </div>
 
       <div className="acb-summary">
-        {candidates.total_buildings} בניינים · {candidates.total_apartments} דירות · {candidates.total_rooms} חדרים · {candidates.total_valid_beds} מיטות פנויות
+        {candidates.total_buildings} {t.buildingsWord} · {candidates.total_apartments} {t.apartmentsWord} · {candidates.total_rooms} {t.roomsWord} · {candidates.total_valid_beds} {t.availableBedsWord}
       </div>
 
       {filtered.length === 0 ? (
         <div className="acb-empty acb-empty-inline">
           <AlertTriangle size={20} />
-          <p>אין תוצאות עבור הסינון הנוכחי</p>
+          <p>{t.noResultsForFilter}</p>
         </div>
       ) : (
         <div className="acb-buildings">
@@ -279,6 +302,7 @@ export default function AssistedCandidateBrowser({ candidates, selectedBedId, on
             <BuildingCard
               key={b.building_id} building={b} selectedBedId={selectedBedId} onSelect={onSelectBed}
               defaultOpen={filtered.length === 1 || (i === 0 && !!selectedBedId)}
+              isHe={isHe} t={t}
             />
           ))}
         </div>

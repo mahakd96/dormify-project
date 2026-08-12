@@ -102,7 +102,7 @@ function AppContent() {
         <Route path="/buildings" element={<BuildingsPage language={language} />} />
         <Route path="/students" element={<StudentsPage language={language} />} />
         <Route path="/upload" element={<UploadPage language={language} />} />
-        <Route path="/assisted-allocation" element={<AssistedAllocationPage />} />
+        <Route path="/assisted-allocation" element={<AssistedAllocationPage language={language} />} />
         {/* Old Accessibility / Special Requests page - preserved as an alias */}
         <Route path="/priority" element={<Navigate to="/assisted-allocation" replace />} />
         <Route path="/allocation" element={<AllocationPage language={language} />} />

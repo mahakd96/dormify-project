@@ -77,7 +77,7 @@ function Sidebar({ collapsed, onToggle, language }) {
       items: [
         { path: '/upload', icon: Upload, label: language === 'he' ? 'העלאת קובץ' : 'Upload File', show: canUploadExcel() },
         { path: '/students', icon: Users, label: language === 'he' ? 'סטודנטים' : 'Students', show: true },
-        { path: '/assisted-allocation', icon: Star, label: language === 'he' ? 'שיבוץ מסייע' : 'Assisted Allocation', show: canAssistAllocation() },
+        { path: '/assisted-allocation', icon: Star, label: language === 'he' ? 'שיבוץ ידני' : 'Manual Allocation', show: canAssistAllocation() },
       ],
     },
     {
