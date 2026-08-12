@@ -15,7 +15,7 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.exceptions import PermissionDenied as DRFPermissionDenied
 
 from django.utils import timezone
-from django.db import transaction
+from django.db import transaction, IntegrityError
 from django.http import HttpResponse
 from django.db.models import (
     Q, Count, Sum, Prefetch, OuterRef, Subquery, IntegerField, Case, When, Value, F, BooleanField, Exists,
@@ -1846,10 +1846,22 @@ class TransferViewSet(viewsets.ModelViewSet):
             if not target_bed:
                 raise DRFValidationError('אין מיטה פנויה בחדר היעד')
 
+            # NOTE (G2 implementation, Transfer.movement_type bug):
+            # Transfer has no movement_type field of its own - it is
+            # only ever stored on the related MovementRequest created
+            # just below (transfer.movement_request.movement_type).
+            # Passing movement_type=... into serializer.save() here used
+            # to raise TypeError: Transfer() got unexpected keyword
+            # arguments: 'movement_type', crashing every single Transfer
+            # creation unconditionally (confirmed via direct
+            # reproduction: Transfer(movement_type='room') raises
+            # TypeError). See
+            # project-quality/concurrency/GROUP2_CONCURRENCY_LOAD_AUDIT.md
+            # (INCIDENTAL-1) and
+            # GROUP2_CONCURRENCY_LOAD_IMPLEMENTATION_REPORT.md.
             transfer = serializer.save(
                 requested_by=self.request.user,
                 from_room=from_room,
-                movement_type=movement_type
             )
 
             movement_request = MovementRequest(
@@ -1897,15 +1909,40 @@ class TransferViewSet(viewsets.ModelViewSet):
 
         try:
             with transaction.atomic():
+                # G2-01-equivalent fix (Transfer race): the PENDING check
+                # above is a fast, unlocked pre-check for the common
+                # (non-racing) case - it can go stale between then and
+                # here. select_for_update() re-fetches and locks THIS
+                # SAME ROW; status is re-verified under that lock, which
+                # is the authoritative check a second, concurrent
+                # approve() call for the SAME transfer cannot slip past
+                # (it blocks on this select_for_update() until the
+                # winning request's transaction commits, then sees the
+                # already-updated status).
+                locked_transfer = Transfer.objects.select_for_update().get(pk=transfer.pk)
+                if locked_transfer.status != Transfer.Status.PENDING:
+                    return Response({
+                        'error': 'הבקשה כבר טופלה'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
                 transfer.status = Transfer.Status.APPROVED
                 transfer.reviewed_by = request.user
                 transfer.reviewed_at = timezone.now()
                 transfer.save()
 
                 student = transfer.student
+                # movement_type lives on the related MovementRequest, not
+                # on Transfer itself (see perform_create() above) - falls
+                # back to the regular TRANSFER assignment type when there
+                # is no linked MovementRequest, matching this fallback's
+                # original intent for any non-PHASE2 movement_type.
+                movement_type = (
+                    transfer.movement_request.movement_type
+                    if transfer.movement_request_id else None
+                )
                 assignment_type = (
                     BedAssignment.AssignmentType.PHASE2
-                    if transfer.movement_type == MovementRequest.MovementType.PHASE2
+                    if movement_type == MovementRequest.MovementType.PHASE2
                     else BedAssignment.AssignmentType.TRANSFER
                 )
 
@@ -1934,6 +1971,13 @@ class TransferViewSet(viewsets.ModelViewSet):
             return Response({
                 'error': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
+        except IntegrityError:
+            # Defensive backstop (G2-02-equivalent): a legitimate
+            # concurrent-write conflict surfaces as a clean 4xx, never an
+            # unhandled 500.
+            return Response({
+                'error': 'הבקשה כבר טופלה או שהתרחשה התנגשות נתונים - נא לרענן ולנסות שוב.'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['put'])
     def reject(self, request, pk=None):
@@ -1956,19 +2000,31 @@ class TransferViewSet(viewsets.ModelViewSet):
                     'error': 'אין הרשאה לדחות בקשה זו'
                 }, status=status.HTTP_403_FORBIDDEN)
 
-        transfer.status = Transfer.Status.REJECTED
-        transfer.reviewed_by = request.user
-        transfer.reviewed_at = timezone.now()
-        transfer.rejection_reason = request.data.get('reason', '')
-        transfer.save()
+        with transaction.atomic():
+            # Same lock-and-recheck pattern as approve() above - also
+            # closes a pre-existing gap where reject() previously had NO
+            # transaction.atomic() at all, so a failure between
+            # transfer.save() and movement_request.save() could leave
+            # inconsistent state.
+            locked_transfer = Transfer.objects.select_for_update().get(pk=transfer.pk)
+            if locked_transfer.status != Transfer.Status.PENDING:
+                return Response({
+                    'error': 'הבקשה כבר טופלה'
+                }, status=status.HTTP_400_BAD_REQUEST)
 
-        if transfer.movement_request:
-            transfer.movement_request.status = MovementRequest.Status.REJECTED
-            transfer.movement_request.approved_by = request.user
-            transfer.movement_request.reviewed_at = timezone.now()
-            transfer.movement_request.completed_at = None
-            transfer.movement_request.full_clean()
-            transfer.movement_request.save()
+            transfer.status = Transfer.Status.REJECTED
+            transfer.reviewed_by = request.user
+            transfer.reviewed_at = timezone.now()
+            transfer.rejection_reason = request.data.get('reason', '')
+            transfer.save()
+
+            if transfer.movement_request:
+                transfer.movement_request.status = MovementRequest.Status.REJECTED
+                transfer.movement_request.approved_by = request.user
+                transfer.movement_request.reviewed_at = timezone.now()
+                transfer.movement_request.completed_at = None
+                transfer.movement_request.full_clean()
+                transfer.movement_request.save()
 
         return Response({
             'message': 'הבקשה נדחתה',
@@ -2992,6 +3048,18 @@ def find_matching_room_options(
 
 
 def _create_student_from_request_data(data):
+    """
+    G2-02 note: the exists()-then-create() below is still a check-then-act
+    shape - two concurrent ADD_STUDENT approvals proposing the same new
+    student_id can both pass this exists() check before either commits.
+    That race is intentionally NOT closed here with a lock (there is no
+    row to lock - the student doesn't exist yet); Student.student_id's
+    real DB-level unique=True constraint is the actual backstop, and the
+    resulting IntegrityError from student.save() below is caught by the
+    caller (StudentRequestViewSet.approve()'s except IntegrityError
+    clause) and converted into a clean 4xx - see
+    project-quality/concurrency/GROUP2_CONCURRENCY_LOAD_IMPLEMENTATION_REPORT.md.
+    """
     if not data:
         raise ValueError('לא סופקו פרטי סטודנט חדש עבור בקשה זו.')
 
@@ -3488,6 +3556,23 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
 
         try:
             with transaction.atomic():
+                # G2-01 fix: the PENDING check above is a fast, unlocked
+                # pre-check for the common (non-racing) case - it can go
+                # stale between then and here. select_for_update()
+                # re-fetches and locks THIS SAME ROW; status is
+                # re-verified under that lock, which is the authoritative
+                # check a second, concurrent approve() call for the SAME
+                # request cannot slip past (it blocks on this
+                # select_for_update() until the winning request's
+                # transaction commits, then sees the already-updated
+                # status). req itself (from get_queryset(), with all its
+                # select_related/prefetch chains) is deliberately left
+                # untouched and reused below for the response - only this
+                # lightweight locked copy is used for the status recheck.
+                locked_req = StudentRequest.objects.select_for_update().get(pk=req.pk)
+                if locked_req.status != StudentRequest.Status.PENDING:
+                    return Response({'error': 'הבקשה כבר טופלה'}, status=status.HTTP_400_BAD_REQUEST)
+
                 if req.request_type in (StudentRequest.RequestType.ROOM, StudentRequest.RequestType.APARTMENT):
                     if not req.student:
                         raise ValueError('לא נבחר סטודנט עבור בקשה זו')
@@ -3573,6 +3658,19 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
         except (ValueError, ValidationError) as e:
             message = '; '.join(e.messages) if isinstance(e, ValidationError) and hasattr(e, 'messages') else str(e)
             return Response({'error': message}, status=status.HTTP_400_BAD_REQUEST)
+        except IntegrityError:
+            # G2-02 fix: _create_student_from_request_data() (below) does
+            # a check-then-create on Student.student_id - the DB's real
+            # unique constraint is the final backstop against a duplicate
+            # row, but without this handler a legitimate concurrent-write
+            # conflict (two different ADD_STUDENT requests racing to
+            # create the same new student_id) surfaced as an unhandled
+            # 500 instead of a clean, deterministic 4xx. The
+            # transaction.atomic() block above has already rolled back
+            # any partial write from this attempt.
+            return Response({
+                'error': 'הבקשה לא אושרה עקב התנגשות נתונים - ייתכן שסטודנט עם ת.ז זו כבר נוצר או שהבקשה כבר טופלה. נא לרענן ולנסות שוב.',
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         # req.student may have just gained/lost a BedAssignment above (new
         # assignment, ended assignment, or a swap) - req itself came from
@@ -3605,11 +3703,19 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
         if not _user_can_review_request(request.user, req):
             return Response({'error': 'אין הרשאה לדחות בקשה זו'}, status=status.HTTP_403_FORBIDDEN)
 
-        req.status = StudentRequest.Status.REJECTED
-        req.reviewed_by = request.user
-        req.reviewed_at = timezone.now()
-        req.rejection_reason = request.data.get('reason', '')
-        req.save()
+        with transaction.atomic():
+            # Same lock-and-recheck pattern as approve() above - also
+            # closes a pre-existing gap where reject() previously had NO
+            # transaction.atomic() at all.
+            locked_req = StudentRequest.objects.select_for_update().get(pk=req.pk)
+            if locked_req.status != StudentRequest.Status.PENDING:
+                return Response({'error': 'הבקשה כבר טופלה'}, status=status.HTTP_400_BAD_REQUEST)
+
+            req.status = StudentRequest.Status.REJECTED
+            req.reviewed_by = request.user
+            req.reviewed_at = timezone.now()
+            req.rejection_reason = request.data.get('reason', '')
+            req.save()
 
         return Response({
             'message': 'הבקשה נדחתה',
