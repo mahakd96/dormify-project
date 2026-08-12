@@ -30,3 +30,4 @@ ortools==9.10.4067
 bcrypt==4.1.2
 
 psycopg2-binary
+requests>=2.31,<3
