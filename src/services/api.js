@@ -179,7 +179,7 @@ export const authAPI = {
 
       return data;
     } catch (err) {
-      throw new Error(getErrorMessage(err, "Login failed"));
+      throwApiError(err, "Login failed");
     }
   },
 
