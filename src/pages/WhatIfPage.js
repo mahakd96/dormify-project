@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, whatIfAPI } from "../services/api";
+import { localizeById, localizeLocationText } from "../utils/locationNames";
+import { localizeGender } from "../utils/genderLabels";
 import {
   Search,
   Building2,
@@ -14,13 +16,245 @@ import {
   X,
 } from "lucide-react";
 
-const TARGET_OPTIONS = [
-  { key: "building", label: "Buildings", icon: Building2 },
-  { key: "apartment", label: "Apartments", icon: Layers },
-  { key: "room", label: "Rooms", icon: DoorOpen },
-];
+const WhatIfPage = ({ language = "he" }) => {
+  const t = {
+    he: {
+      eyebrow: "תכנון תרחישים",
+      title: 'ניתוח "מה אם" וניהול זמינות',
+      subtitle:
+        "הדמיה ויישום שינויי זמינות עבור בניינים, דירות או חדרים בודדים לפני הרצת אלגוריתם השיבוץ.",
+      refreshData: "רענון נתונים",
 
-const WhatIfPage = () => {
+      targetLabels: { building: "בניינים", apartment: "דירות", room: "חדרים" },
+      buildingLabel: "בניין",
+      apartmentLabel: "דירה",
+      roomLabel: "חדר",
+      noDormType: "ללא סוג מעונות",
+      noRegion: "ללא אזור",
+      capacity: "קיבולת",
+      availableBeds: "מיטות פנויות",
+
+      selectTargetType: "בחירת סוג היעד",
+      selectTargetTypeDesc:
+        "בחרו האם שינוי הזמינות משפיע על בניינים שלמים, דירות או חדרים נבחרים.",
+      searchPlaceholder: {
+        building: "חיפוש בניין, סוג מעונות או אזור...",
+        apartment: "חיפוש מספר דירה, בניין או אזור...",
+        room: "חיפוש חדר, דירה, בניין או אזור...",
+      },
+      showing: "מוצגים",
+      of: "מתוך",
+      selectAllVisible: "בחירת כל המוצגים",
+      clearSelection: "ניקוי הבחירה",
+      loadingData: "טוען נתונים...",
+      noItemsFound: "לא נמצאו פריטים.",
+      statusActive: "פעיל",
+      statusInactive: "לא פעיל",
+
+      scenarioSettings: "הגדרות תרחיש",
+      action: "פעולה",
+      actionInactivate: "השבתה",
+      actionReactivate: "הפעלה מחדש",
+      reason: "סיבה",
+      reasonRenovation: "שיפוץ",
+      reasonMaintenance: "תחזוקה",
+      reasonSafety: "בעיית בטיחות",
+      reasonAdmin: "שמור לשימוש מנהלי",
+      reasonOther: "אחר",
+      selectedPrefix: (label) => `${label} שנבחרו`,
+      noItemsSelected: "טרם נבחרו פריטים.",
+      runImpactAnalysis: "הרצת ניתוח השפעה",
+      runningAnalysis: "מריץ ניתוח...",
+      simulationNote: "הדמיה אינה משנה את מסד הנתונים. יישום הוא פעולה נפרדת.",
+      applying: "מיישם...",
+      applyInactivation: "יישום השבתה במסד הנתונים",
+      applyReactivation: "יישום הפעלה מחדש במסד הנתונים",
+
+      impactSummary: "סיכום השפעה",
+      impactSummaryDesc: "תצוגה זו מציגה את ההשלכות הצפויות של שינוי הזמינות שנבחר.",
+      affectedStudents: "סטודנטים מושפעים",
+      males: "גברים",
+      females: "נשים",
+      needTransfer: "דורשים העברה",
+      lostApartments: "דירות שאבדו",
+      lostRooms: "חדרים שאבדו",
+      lostCapacity: "קיבולת שאבדה",
+      lostBeds: "מיטות שאבדו",
+
+      beforeAfter: "לפני מול אחרי",
+      beforeAfterDesc: "השוואה בין הנתונים הנוכחיים לתוצאה המדומה.",
+      metric: "מדד",
+      before: "לפני",
+      after: "אחרי",
+      activeBuildings: "בניינים פעילים",
+      totalRooms: 'סה"כ חדרים',
+      totalCapacity: 'סה"כ קיבולת',
+      assignedStudents: "סטודנטים משובצים",
+      unassignedStudents: "סטודנטים לא משובצים",
+      occupancyRate: "אחוז תפוסה",
+
+      affectedStudentsDesc: "סטודנטים בעלי שיבוץ מיטה פעיל בתוך היעד הנבחר כרגע.",
+      colStudentId: "מספר סטודנט",
+      colName: "שם",
+      colGender: "מגדר",
+      colReligious: "דתיות",
+      colRequestedReligion: "דת מבוקשת",
+      colBuilding: "בניין",
+      colApartment: "דירה",
+      colRoom: "חדר",
+      colBed: "מיטה",
+      colStatus: "סטטוס",
+      noAffectedStudents: "לא נמצאו סטודנטים מושפעים.",
+      statusNeedsTransfer: "דורש העברה",
+
+      confirmTitle: "אישור שינוי אמיתי במסד הנתונים",
+      confirmDangerText: "זו אינה הדמיה. פעולה זו תעדכן את מסד הנתונים האמיתי.",
+      confirmTargetType: "סוג יעד",
+      confirmSelectedItems: "פריטים נבחרים",
+      inactivationNoun: "השבתה",
+      reactivationNoun: "הפעלה מחדש",
+      warningInactivate:
+        "הבניינים, הדירות או החדרים שנבחרו יסומנו כלא פעילים. שיבוץ עתידי יתעלם מהם. סטודנטים המשובצים כיום עשויים לדרוש העברה או שיבוץ מחדש ידני.",
+      warningReactivate:
+        "הבניינים, הדירות או החדרים שנבחרו יופעלו מחדש ועשויים להיות זמינים שוב לשיבוץ עתידי.",
+      confirmLabelPrefix: "הקלידו",
+      confirmLabelSuffix: "לאישור:",
+      confirmPlaceholder: "הקלידו APPLY",
+      cancel: "ביטול",
+      confirmApply: "אישור יישום",
+
+      selectAtLeastOne: "נא לבחור לפחות פריט אחד.",
+      pleaseRunImpactFirst: "נא להריץ ניתוח השפעה לפני יישום שינוי אמיתי במסד הנתונים.",
+      pleaseTypeApply: "נא להקליד APPLY לאישור השינוי האמיתי במסד הנתונים.",
+      simulationFailed: "הדמיה נכשלה",
+      confirmFailed: "האישור נכשל",
+      failedToLoadBuildings: "טעינת נתוני הבניינים נכשלה",
+      failedToLoadType: (label) => `טעינת נתוני ${label} נכשלה`,
+      doneMessage: (actionLabel, count, created, skipped) =>
+        `בוצע. פעולה: ${actionLabel}. סטודנטים מושפעים: ${count}. בקשות שנוצרו: ${created}. בקשות קיימות שדולגו: ${skipped}.`,
+    },
+    en: {
+      eyebrow: "Scenario Planning",
+      title: "What-If & Availability Control",
+      subtitle:
+        "Simulate and apply availability changes for buildings, apartments, or individual rooms before running the allocation algorithm.",
+      refreshData: "Refresh Data",
+
+      targetLabels: { building: "Buildings", apartment: "Apartments", room: "Rooms" },
+      buildingLabel: "Building",
+      apartmentLabel: "Apartment",
+      roomLabel: "Room",
+      noDormType: "No dorm type",
+      noRegion: "No region",
+      capacity: "Capacity",
+      availableBeds: "Available beds",
+
+      selectTargetType: "Select Target Type",
+      selectTargetTypeDesc:
+        "Choose whether the availability change affects full buildings, apartments, or selected rooms.",
+      searchPlaceholder: {
+        building: "Search building, dorm type, or region...",
+        apartment: "Search apartment number, building, or region...",
+        room: "Search room, apartment number, building, or region...",
+      },
+      showing: "Showing",
+      of: "of",
+      selectAllVisible: "Select all visible",
+      clearSelection: "Clear selection",
+      loadingData: "Loading data...",
+      noItemsFound: "No items found.",
+      statusActive: "Active",
+      statusInactive: "Inactive",
+
+      scenarioSettings: "Scenario Settings",
+      action: "Action",
+      actionInactivate: "Inactivate",
+      actionReactivate: "Reactivate",
+      reason: "Reason",
+      reasonRenovation: "Renovation",
+      reasonMaintenance: "Maintenance",
+      reasonSafety: "Safety issue",
+      reasonAdmin: "Reserved for administrative use",
+      reasonOther: "Other",
+      selectedPrefix: (label) => `Selected ${label}`,
+      noItemsSelected: "No items selected yet.",
+      runImpactAnalysis: "Run Impact Analysis",
+      runningAnalysis: "Running Analysis...",
+      simulationNote: "Simulation does not change the database. Apply is a separate action.",
+      applying: "Applying...",
+      applyInactivation: "Apply Inactivation to Database",
+      applyReactivation: "Apply Reactivation to Database",
+
+      impactSummary: "Impact Summary",
+      impactSummaryDesc: "This shows the expected consequences of the selected availability change.",
+      affectedStudents: "Affected Students",
+      males: "Men",
+      females: "Women",
+      needTransfer: "Need Transfer",
+      lostApartments: "Lost Apartments",
+      lostRooms: "Lost Rooms",
+      lostCapacity: "Lost Capacity",
+      lostBeds: "Lost Beds",
+
+      beforeAfter: "Before vs After",
+      beforeAfterDesc: "Comparison between the current data and the simulated result.",
+      metric: "Metric",
+      before: "Before",
+      after: "After",
+      activeBuildings: "Active Buildings",
+      totalRooms: "Total Rooms",
+      totalCapacity: "Total Capacity",
+      assignedStudents: "Assigned Students",
+      unassignedStudents: "Unassigned Students",
+      occupancyRate: "Occupancy Rate",
+
+      affectedStudentsDesc: "Students who currently have an active bed assignment inside the selected target.",
+      colStudentId: "Student ID",
+      colName: "Name",
+      colGender: "Gender",
+      colReligious: "Religious",
+      colRequestedReligion: "Requested Religion",
+      colBuilding: "Building",
+      colApartment: "Apartment",
+      colRoom: "Room",
+      colBed: "Bed",
+      colStatus: "Status",
+      noAffectedStudents: "No affected students found.",
+      statusNeedsTransfer: "Needs transfer",
+
+      confirmTitle: "Confirm Real Database Change",
+      confirmDangerText: "This is not a simulation. This action will update the real database.",
+      confirmTargetType: "Target Type",
+      confirmSelectedItems: "Selected Items",
+      inactivationNoun: "Inactivation",
+      reactivationNoun: "Reactivation",
+      warningInactivate:
+        "The selected buildings, apartments, or rooms will be marked as inactive. Future allocation will ignore them. Students currently assigned there may require transfer or manual reassignment.",
+      warningReactivate:
+        "The selected buildings, apartments, or rooms will be reactivated and may become available again for future allocation.",
+      confirmLabelPrefix: "Type",
+      confirmLabelSuffix: "to confirm:",
+      confirmPlaceholder: "Type APPLY",
+      cancel: "Cancel",
+      confirmApply: "Confirm Apply",
+
+      selectAtLeastOne: "Please select at least one item.",
+      pleaseRunImpactFirst: "Please run the impact analysis before applying a real database change.",
+      pleaseTypeApply: "Please type APPLY to confirm the real database change.",
+      simulationFailed: "Simulation failed",
+      confirmFailed: "Confirm failed",
+      failedToLoadBuildings: "Failed to load buildings data",
+      failedToLoadType: (label) => `Failed to load ${label.toLowerCase()} data`,
+      doneMessage: (actionLabel, count, created, skipped) =>
+        `Done. Action: ${actionLabel}. Affected students: ${count}. Created requests: ${created}. Skipped existing requests: ${skipped}.`,
+    },
+  }[language] || {};
+
+  const TARGET_OPTIONS = [
+    { key: "building", label: t.targetLabels.building, icon: Building2 },
+    { key: "apartment", label: t.targetLabels.apartment, icon: Layers },
+    { key: "room", label: t.targetLabels.room, icon: DoorOpen },
+  ];
   const [buildings, setBuildings] = useState([]);
   const [apartments, setApartments] = useState([]);
   const [rooms, setRooms] = useState([]);
@@ -83,7 +317,7 @@ const WhatIfPage = () => {
     const buildingsData = await getAllPages("/api/buildings/");
     setBuildings(Array.isArray(buildingsData) ? buildingsData : buildingsData?.results || []);
   } catch (err) {
-    setError(err.message || "Failed to load buildings data");
+    setError(err.message || t.failedToLoadBuildings);
   } finally {
     setLoadingData(false);
   }
@@ -118,7 +352,7 @@ const WhatIfPage = () => {
       setRooms(Array.isArray(roomsData) ? roomsData : roomsData?.results || []);
     }
   } catch (err) {
-    setError(err.message || `Failed to load ${type} data`);
+    setError(err.message || t.failedToLoadType(t.targetLabels[type] || type));
   } finally {
     setLoadingData(false);
   }
@@ -132,26 +366,44 @@ const WhatIfPage = () => {
 
   const getItemTitle = (item) => {
     if (targetType === "building") {
-      return `Building ${item.number}`;
+      return `${t.buildingLabel} ${item.number}`;
     }
 
     if (targetType === "apartment") {
-      return `Building ${item.building_number} / Apartment ${item.number}`;
+      return `${t.buildingLabel} ${item.building_number} / ${t.apartmentLabel} ${item.number}`;
     }
 
-    return `Building ${item.building_number} / Apartment ${item.apartment_number} / Room ${item.name}`;
+    return `${t.buildingLabel} ${item.building_number} / ${t.apartmentLabel} ${item.apartment_number} / ${t.roomLabel} ${item.name}`;
   };
 
+  // dorm_type_name/region_name/dorm_type are real data coming straight from
+  // the backend (Region/DormType names) - localized via the project's
+  // existing location-name mechanism (src/utils/locationNames.js), the
+  // same one AnalysisPage/MapPage already use, rather than being left
+  // untranslated or re-translated ad hoc here.
   const getItemSubtitle = (item) => {
     if (targetType === "building") {
-      return `${item.dorm_type_name || "No dorm type"} · ${item.region_name || "No region"}`;
+      const dormType = item.dorm_type_name
+        ? localizeById(item.dorm_type_code, item.dorm_type_name, language)
+        : t.noDormType;
+      const region = item.region_name
+        ? localizeById(item.region, item.region_name, language)
+        : t.noRegion;
+      return `${dormType} · ${region}`;
     }
 
     if (targetType === "apartment") {
-      return `${item.dorm_type || "No dorm type"} · ${item.region_name || "No region"} · Capacity ${item.apartment_capacity ?? 0}`;
+      const dormType = item.dorm_type ? localizeLocationText(item.dorm_type, language) : t.noDormType;
+      const region = item.region_name
+        ? localizeById(item.region, item.region_name, language)
+        : t.noRegion;
+      return `${dormType} · ${region} · ${t.capacity} ${item.apartment_capacity ?? 0}`;
     }
 
-    return `${item.region_name || "No region"} · Capacity ${item.capacity ?? 0} · Available beds ${item.available_beds ?? 0}`;
+    const region = item.region_name
+      ? localizeById(item.region, item.region_name, language)
+      : t.noRegion;
+    return `${region} · ${t.capacity} ${item.capacity ?? 0} · ${t.availableBeds} ${item.available_beds ?? 0}`;
   };
 
   const filteredItems = useMemo(() => {
@@ -234,7 +486,7 @@ const WhatIfPage = () => {
 
   const runSimulation = async () => {
     if (selectedIds.length === 0) {
-      setError("Please select at least one item.");
+      setError(t.selectAtLeastOne);
       return;
     }
 
@@ -253,7 +505,7 @@ const WhatIfPage = () => {
 
       setResult(data);
     } catch (err) {
-      setError(err.message || "Simulation failed");
+      setError(err.message || t.simulationFailed);
     } finally {
       setLoadingSimulation(false);
     }
@@ -261,12 +513,12 @@ const WhatIfPage = () => {
 
   const openApplyConfirmation = () => {
     if (selectedIds.length === 0) {
-      setError("Please select at least one item.");
+      setError(t.selectAtLeastOne);
       return;
     }
 
     if (!result) {
-      setError("Please run the impact analysis before applying a real database change.");
+      setError(t.pleaseRunImpactFirst);
       return;
     }
 
@@ -283,12 +535,12 @@ const WhatIfPage = () => {
 
   const confirmAvailabilityChange = async () => {
     if (selectedIds.length === 0) {
-      setError("Please select at least one item.");
+      setError(t.selectAtLeastOne);
       return;
     }
 
     if (confirmText !== "APPLY") {
-      setError("Please type APPLY to confirm the real database change.");
+      setError(t.pleaseTypeApply);
       return;
     }
 
@@ -305,15 +557,21 @@ const WhatIfPage = () => {
         confirm_apply: true,
       });
 
+      const appliedActionLabel = data.action === "reactivate" ? t.reactivationNoun : t.inactivationNoun;
       setConfirmMessage(
-        `Done. Action: ${data.action}. Affected students: ${data.affected_students_count}. Created requests: ${data.created_requests}. Skipped existing requests: ${data.skipped_existing_requests}.`
+        t.doneMessage(
+          appliedActionLabel,
+          data.affected_students_count,
+          data.created_requests,
+          data.skipped_existing_requests
+        )
       );
 
       setShowApplyConfirm(false);
       setConfirmText("");
       await loadAllData();
     } catch (err) {
-      setError(err.message || "Confirm failed");
+      setError(err.message || t.confirmFailed);
     } finally {
       setLoadingConfirm(false);
     }
@@ -324,30 +582,22 @@ const WhatIfPage = () => {
   const after = result?.analysis_after || {};
   const affectedStudents = result?.affected_students || [];
 
-  const selectedTargetLabel =
-    targetType === "building"
-      ? "Buildings"
-      : targetType === "apartment"
-      ? "Apartments"
-      : "Rooms";
+  const selectedTargetLabel = t.targetLabels[targetType];
 
-  const selectedActionLabel = action === "inactivate" ? "Inactivation" : "Reactivation";
+  const selectedActionLabel = action === "inactivate" ? t.inactivationNoun : t.reactivationNoun;
 
   return (
     <div className="whatif-page">
       <div className="page-header">
         <div>
-          <p className="eyebrow">Scenario Planning</p>
-          <h1>What-If & Availability Control</h1>
-          <p className="subtitle">
-            Simulate and apply availability changes for buildings, apartments,
-            or individual rooms before running the allocation algorithm.
-          </p>
+          <p className="eyebrow">{t.eyebrow}</p>
+          <h1>{t.title}</h1>
+          <p className="subtitle">{t.subtitle}</p>
         </div>
 
         <button className="refresh-btn" onClick={() => loadDataForTargetType(targetType, true)}>
           <RefreshCw size={16} />
-          Refresh Data
+          {t.refreshData}
         </button>
       </div>
 
@@ -366,21 +616,18 @@ const WhatIfPage = () => {
       )}
 
       <div className="top-cards">
-        <InfoCard icon={<Building2 size={22} />} label="Buildings" value={buildings.length} />
-        <InfoCard icon={<Layers size={22} />} label="Apartments" value={apartments.length} />
-        <InfoCard icon={<DoorOpen size={22} />} label="Rooms" value={rooms.length} />
-        <InfoCard icon={<CheckCircle size={22} />} label={`Selected ${selectedTargetLabel}`} value={selectedIds.length} />
+        <InfoCard icon={<Building2 size={22} />} label={t.targetLabels.building} value={buildings.length} />
+        <InfoCard icon={<Layers size={22} />} label={t.targetLabels.apartment} value={apartments.length} />
+        <InfoCard icon={<DoorOpen size={22} />} label={t.targetLabels.room} value={rooms.length} />
+        <InfoCard icon={<CheckCircle size={22} />} label={t.selectedPrefix(selectedTargetLabel)} value={selectedIds.length} />
       </div>
 
       <div className="main-grid">
         <section className="panel">
           <div className="panel-header">
             <div>
-              <h2>Select Target Type</h2>
-              <p>
-                Choose whether the availability change affects full buildings,
-                apartments, or selected rooms.
-              </p>
+              <h2>{t.selectTargetType}</h2>
+              <p>{t.selectTargetTypeDesc}</p>
             </div>
           </div>
 
@@ -407,32 +654,26 @@ const WhatIfPage = () => {
             <input
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
-              placeholder={
-                targetType === "building"
-                  ? "Search building, dorm type, or region..."
-                  : targetType === "apartment"
-                  ? "Search apartment number, building, or region..."
-                  : "Search room, apartment number, building, or region..."
-              }
+              placeholder={t.searchPlaceholder[targetType]}
             />
           </div>
 
           <div className="buildings-meta">
             <span>
-              Showing <strong>{filteredItems.length}</strong> of{" "}
+              {t.showing} <strong>{filteredItems.length}</strong> {t.of}{" "}
               <strong>{currentItems.length}</strong> {selectedTargetLabel.toLowerCase()}
             </span>
 
             <div className="meta-actions">
               {filteredItems.length > 0 && (
                 <button className="link-btn" onClick={selectAllVisible}>
-                  Select all visible
+                  {t.selectAllVisible}
                 </button>
               )}
 
               {selectedIds.length > 0 && (
                 <button className="link-btn" onClick={clearSelection}>
-                  Clear selection
+                  {t.clearSelection}
                 </button>
               )}
             </div>
@@ -440,9 +681,9 @@ const WhatIfPage = () => {
 
           <div className="buildings-list">
             {loadingData ? (
-              <div className="empty-state">Loading data...</div>
+              <div className="empty-state">{t.loadingData}</div>
             ) : filteredItems.length === 0 ? (
-              <div className="empty-state">No items found.</div>
+              <div className="empty-state">{t.noItemsFound}</div>
             ) : (
               filteredItems.map((item) => {
                 const selected = selectedIds.includes(item.id);
@@ -472,7 +713,7 @@ const WhatIfPage = () => {
                     </div>
 
                     <div className={`building-status ${isInactive ? "inactive" : ""}`}>
-                      {isInactive ? "Inactive" : "Active"}
+                      {isInactive ? t.statusInactive : t.statusActive}
                     </div>
                   </button>
                 );
@@ -482,9 +723,9 @@ const WhatIfPage = () => {
         </section>
 
         <section className="panel sticky-panel">
-          <h2>Scenario Settings</h2>
+          <h2>{t.scenarioSettings}</h2>
 
-          <label className="field-label">Action</label>
+          <label className="field-label">{t.action}</label>
           <select
             value={action}
             onChange={(event) => {
@@ -496,30 +737,30 @@ const WhatIfPage = () => {
             }}
             className="select-input"
           >
-            <option value="inactivate">Inactivate</option>
-            <option value="reactivate">Reactivate</option>
+            <option value="inactivate">{t.actionInactivate}</option>
+            <option value="reactivate">{t.actionReactivate}</option>
           </select>
 
-          <label className="field-label">Reason</label>
+          <label className="field-label">{t.reason}</label>
           <select
             value={reason}
             onChange={(event) => setReason(event.target.value)}
             className="select-input"
           >
-            <option value="Renovation">Renovation</option>
-            <option value="Maintenance">Maintenance</option>
-            <option value="Safety issue">Safety issue</option>
+            <option value="Renovation">{t.reasonRenovation}</option>
+            <option value="Maintenance">{t.reasonMaintenance}</option>
+            <option value="Safety issue">{t.reasonSafety}</option>
             <option value="Reserved for administrative use">
-              Reserved for administrative use
+              {t.reasonAdmin}
             </option>
-            <option value="Other">Other</option>
+            <option value="Other">{t.reasonOther}</option>
           </select>
 
           <div className="selected-box">
-            <h3>Selected {selectedTargetLabel}</h3>
+            <h3>{t.selectedPrefix(selectedTargetLabel)}</h3>
 
             {selectedItems.length === 0 ? (
-              <p>No items selected yet.</p>
+              <p>{t.noItemsSelected}</p>
             ) : (
               selectedItems.map((item) => (
                 <div className="selected-building" key={item.id}>
@@ -535,12 +776,10 @@ const WhatIfPage = () => {
             onClick={runSimulation}
             disabled={loadingSimulation || selectedIds.length === 0}
           >
-            {loadingSimulation ? "Running Analysis..." : "Run Impact Analysis"}
+            {loadingSimulation ? t.runningAnalysis : t.runImpactAnalysis}
           </button>
 
-          <p className="note">
-            Simulation does not change the database. Apply is a separate action.
-          </p>
+          <p className="note">{t.simulationNote}</p>
 
           {result && (
             <button
@@ -549,10 +788,10 @@ const WhatIfPage = () => {
               disabled={loadingConfirm}
             >
               {loadingConfirm
-                ? "Applying..."
+                ? t.applying
                 : action === "inactivate"
-                ? "Apply Inactivation to Database"
-                : "Apply Reactivation to Database"}
+                ? t.applyInactivation
+                : t.applyReactivation}
             </button>
           )}
         </section>
@@ -562,49 +801,45 @@ const WhatIfPage = () => {
         <>
           <section className="results-section">
             <div className="section-title">
-              <h2>Impact Summary</h2>
-              <p>
-                This shows the expected consequences of the selected availability change.
-              </p>
+              <h2>{t.impactSummary}</h2>
+              <p>{t.impactSummaryDesc}</p>
             </div>
 
             <div className="summary-grid">
-              <ResultCard icon={<Users size={22} />} title="Affected Students" value={summary.affected_students_count} />
-              <ResultCard title="Males" value={summary.male_count} />
-              <ResultCard title="Females" value={summary.female_count} />
-              <ResultCard title="Need Transfer" value={summary.students_without_valid_placement} />
-              <ResultCard icon={<Home size={22} />} title="Lost Apartments" value={summary.lost_apartments} />
-              <ResultCard title="Lost Rooms" value={summary.lost_rooms} />
-              <ResultCard title="Lost Capacity" value={summary.lost_capacity} />
-              <ResultCard icon={<BedDouble size={22} />} title="Lost Beds" value={summary.lost_beds} />
+              <ResultCard icon={<Users size={22} />} title={t.affectedStudents} value={summary.affected_students_count} />
+              <ResultCard title={t.males} value={summary.male_count} />
+              <ResultCard title={t.females} value={summary.female_count} />
+              <ResultCard title={t.needTransfer} value={summary.students_without_valid_placement} />
+              <ResultCard icon={<Home size={22} />} title={t.lostApartments} value={summary.lost_apartments} />
+              <ResultCard title={t.lostRooms} value={summary.lost_rooms} />
+              <ResultCard title={t.lostCapacity} value={summary.lost_capacity} />
+              <ResultCard icon={<BedDouble size={22} />} title={t.lostBeds} value={summary.lost_beds} />
             </div>
           </section>
 
           <section className="results-section">
             <div className="section-title">
-              <h2>Before vs After</h2>
-              <p>
-                Comparison between the current data and the simulated result.
-              </p>
+              <h2>{t.beforeAfter}</h2>
+              <p>{t.beforeAfterDesc}</p>
             </div>
 
             <div className="modern-table-wrapper">
               <table className="modern-table">
                 <thead>
                   <tr>
-                    <th>Metric</th>
-                    <th>Before</th>
-                    <th>After</th>
+                    <th>{t.metric}</th>
+                    <th>{t.before}</th>
+                    <th>{t.after}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <AnalysisRow label="Active Buildings" before={before.total_buildings} after={after.total_buildings} />
-                  <AnalysisRow label="Total Rooms" before={before.total_rooms} after={after.total_rooms} />
-                  <AnalysisRow label="Total Capacity" before={before.total_capacity} after={after.total_capacity} />
-                  <AnalysisRow label="Assigned Students" before={before.assigned_students} after={after.assigned_students} />
-                  <AnalysisRow label="Unassigned Students" before={before.unassigned_students} after={after.unassigned_students} />
-                  <AnalysisRow label="Available Beds" before={before.available_beds} after={after.available_beds} />
-                  <AnalysisRow label="Occupancy Rate" before={`${before.occupancy_rate || 0}%`} after={`${after.occupancy_rate || 0}%`} />
+                  <AnalysisRow label={t.activeBuildings} before={before.total_buildings} after={after.total_buildings} />
+                  <AnalysisRow label={t.totalRooms} before={before.total_rooms} after={after.total_rooms} />
+                  <AnalysisRow label={t.totalCapacity} before={before.total_capacity} after={after.total_capacity} />
+                  <AnalysisRow label={t.assignedStudents} before={before.assigned_students} after={after.assigned_students} />
+                  <AnalysisRow label={t.unassignedStudents} before={before.unassigned_students} after={after.unassigned_students} />
+                  <AnalysisRow label={t.availableBeds} before={before.available_beds} after={after.available_beds} />
+                  <AnalysisRow label={t.occupancyRate} before={`${before.occupancy_rate || 0}%`} after={`${after.occupancy_rate || 0}%`} />
                 </tbody>
               </table>
             </div>
@@ -612,33 +847,31 @@ const WhatIfPage = () => {
 
           <section className="results-section">
             <div className="section-title">
-              <h2>Affected Students</h2>
-              <p>
-                Students who currently have an active bed assignment inside the selected target.
-              </p>
+              <h2>{t.affectedStudents}</h2>
+              <p>{t.affectedStudentsDesc}</p>
             </div>
 
             <div className="modern-table-wrapper">
               <table className="modern-table">
                 <thead>
                   <tr>
-                    <th>Student ID</th>
-                    <th>Name</th>
-                    <th>Gender</th>
-                    <th>Religious</th>
-                    <th>Requested Religion</th>
-                    <th>Building</th>
-                    <th>Apartment</th>
-                    <th>Room</th>
-                    <th>Bed</th>
-                    <th>Status</th>
+                    <th>{t.colStudentId}</th>
+                    <th>{t.colName}</th>
+                    <th>{t.colGender}</th>
+                    <th>{t.colReligious}</th>
+                    <th>{t.colRequestedReligion}</th>
+                    <th>{t.colBuilding}</th>
+                    <th>{t.colApartment}</th>
+                    <th>{t.colRoom}</th>
+                    <th>{t.colBed}</th>
+                    <th>{t.colStatus}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {affectedStudents.length === 0 ? (
                     <tr>
                       <td colSpan="10" className="empty-table-cell">
-                        No affected students found.
+                        {t.noAffectedStudents}
                       </td>
                     </tr>
                   ) : (
@@ -646,15 +879,17 @@ const WhatIfPage = () => {
                       <tr key={student.assignment_id}>
                         <td>{student.student_id}</td>
                         <td>{student.full_name}</td>
-                        <td>{student.gender}</td>
-                        <td>{student.religious}</td>
-                        <td>{student.requested_religion}</td>
+                        <td>{localizeGender(student.gender, language) || student.gender_display}</td>
+                        <td>{student.religious_display || student.religious}</td>
+                        <td>{student.requested_religion_display || student.requested_religion}</td>
                         <td>{student.current_building_number}</td>
                         <td>{student.current_apartment_number}</td>
                         <td>{student.current_room_name}</td>
                         <td>{student.current_bed_label}</td>
                         <td>
-                          <span className="status-pill">{student.status}</span>
+                          <span className="status-pill">
+                            {student.status === "needs_transfer" ? t.statusNeedsTransfer : student.status}
+                          </span>
                         </td>
                       </tr>
                     ))
@@ -682,55 +917,42 @@ const WhatIfPage = () => {
               <AlertTriangle size={28} />
             </div>
 
-            <h2>Confirm Real Database Change</h2>
+            <h2>{t.confirmTitle}</h2>
 
-            <p className="danger-text">
-              This is not a simulation. This action will update the real database.
-            </p>
+            <p className="danger-text">{t.confirmDangerText}</p>
 
             <div className="confirm-summary">
               <div>
-                <span>Action</span>
+                <span>{t.action}</span>
                 <strong>{selectedActionLabel}</strong>
               </div>
               <div>
-                <span>Target Type</span>
+                <span>{t.confirmTargetType}</span>
                 <strong>{selectedTargetLabel}</strong>
               </div>
               <div>
-                <span>Selected Items</span>
+                <span>{t.confirmSelectedItems}</span>
                 <strong>{selectedIds.length}</strong>
               </div>
               <div>
-                <span>Affected Students</span>
+                <span>{t.affectedStudents}</span>
                 <strong>{summary.affected_students_count ?? 0}</strong>
               </div>
             </div>
 
             <div className="warning-box">
-              {action === "inactivate" ? (
-                <>
-                  The selected buildings, apartments, or rooms will be marked as inactive.
-                  Future allocation will ignore them. Students currently assigned there may
-                  require transfer or manual reassignment.
-                </>
-              ) : (
-                <>
-                  The selected buildings, apartments, or rooms will be reactivated and may
-                  become available again for future allocation.
-                </>
-              )}
+              {action === "inactivate" ? t.warningInactivate : t.warningReactivate}
             </div>
 
             <label className="confirm-label">
-              Type <strong>APPLY</strong> to confirm:
+              {t.confirmLabelPrefix} <strong>APPLY</strong> {t.confirmLabelSuffix}
             </label>
 
             <input
               className="confirm-input"
               value={confirmText}
               onChange={(event) => setConfirmText(event.target.value)}
-              placeholder="Type APPLY"
+              placeholder={t.confirmPlaceholder}
               autoFocus
             />
 
@@ -741,7 +963,7 @@ const WhatIfPage = () => {
                 onClick={closeApplyConfirmation}
                 disabled={loadingConfirm}
               >
-                Cancel
+                {t.cancel}
               </button>
 
               <button
@@ -750,7 +972,7 @@ const WhatIfPage = () => {
                 onClick={confirmAvailabilityChange}
                 disabled={confirmText !== "APPLY" || loadingConfirm}
               >
-                {loadingConfirm ? "Applying..." : "Confirm Apply"}
+                {loadingConfirm ? t.applying : t.confirmApply}
               </button>
             </div>
           </div>
@@ -1003,7 +1225,7 @@ const WhatIfPage = () => {
           gap: 10px;
           max-height: 510px;
           overflow-y: auto;
-          padding-right: 4px;
+          padding-inline-end: 4px;
         }
 
         .building-row {
@@ -1017,7 +1239,7 @@ const WhatIfPage = () => {
           gap: 12px;
           align-items: center;
           cursor: pointer;
-          text-align: left;
+          text-align: start;
           font-family: inherit;
           transition: all 0.2s ease;
         }
@@ -1223,7 +1445,7 @@ const WhatIfPage = () => {
         }
 
         .modern-table th {
-          text-align: left;
+          text-align: start;
           background: #f8fafc;
           color: #475569;
           font-size: 13px;
@@ -1278,7 +1500,7 @@ const WhatIfPage = () => {
         .confirm-close {
           position: absolute;
           top: 16px;
-          right: 16px;
+          inset-inline-end: 16px;
           border: none;
           background: #f1f5f9;
           color: #64748b;
