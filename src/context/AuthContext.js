@@ -201,8 +201,13 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   const login = useCallback(async (email, password) => {
+    // Deliberately does not touch the shared `loading` flag: that flag
+    // gates the initial "is there a valid session" check on app boot
+    // (see the init() effect above), and App.js's /login route unmounts
+    // LoginPage while it's true. Toggling it here would unmount LoginPage
+    // mid-submit on every attempt, wiping its error state and typed
+    // fields. Per-submit loading is LoginPage's own local isLoading state.
     setError(null);
-    setLoading(true);
 
     try {
       const data = await authAPI.login(email, password);
@@ -216,17 +221,22 @@ export const AuthProvider = ({ children }) => {
       setUser(nextUser);
       localStorage.setItem("dormify_user", JSON.stringify(nextUser));
 
-      setLoading(false);
       return { success: true, user: nextUser };
     } catch (err) {
-      const msg =
-        err?.response?.data?.detail ||
-        err?.message ||
-        "אימייל או סיסמה שגויים";
+      let msg;
+
+      if (err?.status === 401 || err?.status === 400) {
+        // Never reveal whether the email exists or only the password is
+        // wrong - always show the same generic message for auth failures.
+        msg = "כתובת האימייל או הסיסמה שגויים";
+      } else if (!err?.status) {
+        msg = "לא ניתן להתחבר למערכת כרגע. נסו שוב מאוחר יותר";
+      } else {
+        msg = "אירעה שגיאה לא צפויה. נסו שוב מאוחר יותר";
+      }
 
       setUser(null);
       setError(msg);
-      setLoading(false);
       return { success: false, error: msg };
     }
   }, []);

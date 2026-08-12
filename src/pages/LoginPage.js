@@ -1,7 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Mail, Lock, Eye, EyeOff, AlertCircle } from 'lucide-react';
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function LoginPage() {
   const [email, setEmail] = useState('');
@@ -15,18 +17,35 @@ function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
 
-  const demoAccounts = useMemo(
-    () => [
-      { email: 'admin@technion.ac.il', password: 'admin123', role: 'מנהל מרכזי' },
-      { email: 'canada@technion.ac.il', password: 'canadaboss123', role: 'מנהל אזור קנדה' },
-        { email: 'canadaem@technion.ac.il', password: 'canada123456', role: 'עובד' },
-    ],
-    []
-  );
+  const handleEmailChange = (e) => {
+    setEmail(e.target.value);
+    if (error) setError('');
+  };
+
+  const handlePasswordChange = (e) => {
+    setPassword(e.target.value);
+    if (error) setError('');
+  };
+
+  const validate = () => {
+    const trimmedEmail = email.trim();
+
+    if (!trimmedEmail) return 'יש להזין כתובת אימייל';
+    if (!EMAIL_PATTERN.test(trimmedEmail)) return 'כתובת האימייל אינה תקינה';
+    if (!password) return 'יש להזין סיסמה';
+
+    return '';
+  };
 
   const handleSubmit = async (e) => {
     e?.preventDefault();
     if (isLoading) return;
+
+    const validationError = validate();
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
 
     setError('');
     setIsLoading(true);
@@ -38,11 +57,11 @@ function LoginPage() {
       if (result?.success) {
         navigate('/dashboard', { replace: true });
       } else {
-        setError(result?.error || 'התחברות נכשלה. בדוק/י פרטים ונסה/י שוב.');
+        setError(result?.error || 'כתובת האימייל או הסיסמה שגויים');
+        setIsLoading(false);
       }
     } catch (err) {
-      setError('שגיאה לא צפויה. נסו שוב בעוד רגע.');
-    } finally {
+      setError('אירעה שגיאה לא צפויה. נסו שוב מאוחר יותר');
       setIsLoading(false);
     }
   };
@@ -72,7 +91,7 @@ function LoginPage() {
             <p>נא להזין את פרטי ההתחברות שלך</p>
           </div>
 
-          <form className="login-form" onSubmit={handleSubmit}>
+          <form className="login-form" onSubmit={handleSubmit} noValidate>
             {error && (
               <div className="error-alert" role="alert">
                 <AlertCircle size={18} />
@@ -88,10 +107,9 @@ function LoginPage() {
                   id="email"
                   type="email"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  onChange={handleEmailChange}
                   placeholder="your.email@technion.ac.il"
                   autoComplete="email"
-                  required
                 />
               </div>
             </div>
@@ -104,10 +122,9 @@ function LoginPage() {
                   id="password"
                   type={showPassword ? 'text' : 'password'}
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={handlePasswordChange}
                   placeholder="הכנס את הסיסמה שלך"
                   autoComplete="current-password"
-                  required
                 />
                 <button
                   type="button"
@@ -123,30 +140,6 @@ function LoginPage() {
             <button className="submit-btn" type="submit" disabled={isLoading}>
               {isLoading ? 'מתחבר...' : 'התחבר'}
             </button>
-
-            <div className="demo-section">
-              <div className="demo-header">
-                <span className="demo-badge">דמו</span>
-                <span className="demo-info">בחר חשבון למילוי אוטומטי</span>
-              </div>
-
-              <div className="demo-accounts">
-                {demoAccounts.map((account, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    className="demo-account"
-                    onClick={() => {
-                      setEmail(account.email);
-                      setPassword(account.password);
-                    }}
-                  >
-                    <span className="account-role">{account.role}</span>
-                    <span className="account-email">{account.email}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
           </form>
         </div>
       </div>
@@ -331,67 +324,6 @@ function LoginPage() {
         }
 
         .submit-btn:disabled{ opacity:0.7; cursor:not-allowed; }
-
-        .demo-section{
-          margin-top:16px;
-          padding-top:24px;
-          border-top:1px solid #e2e8f0;
-        }
-
-        .demo-header{
-          display:flex;
-          align-items:center;
-          gap:12px;
-          margin-bottom:16px;
-        }
-
-        .demo-badge{
-          background:#004e89;
-          color:white;
-          padding:4px 12px;
-          border-radius:6px;
-          font-size:12px;
-          font-weight:600;
-        }
-
-        .demo-info{
-          font-size:13px;
-          color:#64748b;
-        }
-
-        .demo-accounts{
-          display:flex;
-          flex-direction:column;
-          gap:10px;
-        }
-
-        .demo-account{
-          background:#f8fafc;
-          border:2px solid #e2e8f0;
-          border-radius:10px;
-          padding:12px 16px;
-          display:flex;
-          flex-direction:column;
-          align-items:flex-start;
-          gap:4px;
-          cursor:pointer;
-          transition: all 0.2s ease;
-          text-align:right;
-        }
-
-        .account-role{
-          font-size:14px;
-          font-weight:600;
-          color:#0f172a;
-        }
-
-        .account-email{
-          font-size:13px;
-          color:#64748b;
-          direction:ltr;
-          text-align:left;
-          width:100%;
-        }
 
         @media (max-width: 1024px){
           .login-wrapper{ flex-direction:column; }
