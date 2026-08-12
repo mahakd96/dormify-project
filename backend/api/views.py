@@ -7144,6 +7144,17 @@ def _what_if_format_student_from_assignment(assignment):
         'category': student.category,
         'housing_type': student.housing_type,
 
+        # Same get_FOO_display() convention StudentSerializer already
+        # exposes as gender_display/requested_religion_display/
+        # religious_display (see serializers.py) - added here so the
+        # What-If "Affected Students" table can show the same human-
+        # readable labels used everywhere else in the app instead of the
+        # raw enum codes above (project-quality/ui/
+        # UI_FIXES_DASHBOARD_WHATIF_REPORT.md).
+        'gender_display': student.get_gender_display() if student.gender else '',
+        'requested_religion_display': student.get_requested_religion_display(),
+        'religious_display': student.get_religious_display(),
+
         'is_priority': student.is_priority,
         'priority_reason': student.priority_reason,
 
@@ -8275,10 +8286,57 @@ def home_dashboard(request):
     assigned_students = allocatable_qs.filter(assigned_room__isnull=False).count()
     unassigned_students = allocatable_qs.filter(assigned_room__isnull=True).count()
 
-    total_capacity = sum(rooms_qs.values_list('capacity', flat=True))
-    occupied_beds = active_assignments_qs.values('bed_id').distinct().count()
+    # total_capacity/occupied_beds AND the admin-only per-region breakdown
+    # used by the "High-occupancy regions" attention card both come out of
+    # these same 2 queries - reshaped to also carry a region_id column
+    # (GROUP BY / an extra .values() field) rather than running 2 more
+    # queries to get a per-region breakdown, to stay within the query-count
+    # budget already established for this endpoint (see
+    # performance_tests/test_home_dashboard_performance.py's
+    # test_query_count_after_fix_central_admin, <=16 total queries - this
+    # trades a scalar SELECT for a GROUP BY / row-fetching one, exactly the
+    # "Assignments"/"Rooms" consolidation trade-off already used elsewhere
+    # in this endpoint and in analysis_data() above).
+    region_capacity = {}
+    region_occupied_beds = {}
+    if region is None:
+        room_rows = rooms_qs.values('apartment__building__dorm_type__region_id').annotate(
+            cap=Sum('capacity')
+        )
+        total_capacity = 0
+        for row in room_rows:
+            cap = row['cap'] or 0
+            total_capacity += cap
+            region_capacity[row['apartment__building__dorm_type__region_id']] = cap
+
+        assignment_rows = active_assignments_qs.values(
+            'bed__room__apartment__building__dorm_type__region_id', 'bed_id'
+        ).distinct()
+        region_bed_ids = {}
+        for row in assignment_rows:
+            region_bed_ids.setdefault(
+                row['bed__room__apartment__building__dorm_type__region_id'], set()
+            ).add(row['bed_id'])
+        occupied_beds = sum(len(beds) for beds in region_bed_ids.values())
+        region_occupied_beds = {rid: len(beds) for rid, beds in region_bed_ids.items()}
+    else:
+        total_capacity = sum(rooms_qs.values_list('capacity', flat=True))
+        occupied_beds = active_assignments_qs.values('bed_id').distinct().count()
+
     available_beds = max(total_capacity - occupied_beds, 0)
     occupancy_rate = round((occupied_beds / total_capacity) * 100) if total_capacity else 0
+
+    # ---- High-occupancy regions (central-admin "High-occupancy regions"
+    # attention card) - threshold = occupancy >= 90%, using the per-region
+    # capacity/occupied numbers computed above (no extra query). ----
+    HIGH_OCCUPANCY_THRESHOLD = 90
+    regions_high_occupancy_count = 0
+    for region_id, capacity in region_capacity.items():
+        if not region_id or capacity <= 0:
+            continue
+        occupied = region_occupied_beds.get(region_id, 0)
+        if (occupied / capacity) * 100 >= HIGH_OCCUPANCY_THRESHOLD:
+            regions_high_occupancy_count += 1
 
     priority_students_pending = 0
     if is_admin:
@@ -8550,12 +8608,30 @@ def home_dashboard(request):
         })
 
     if is_admin and pending_inbox_count > 0:
+        # NOTE: this item is intentionally NOT rendered by the frontend
+        # dashboard anymore (see HomePage.js) - the Central Admin "regions
+        # with unviewed new data" card was replaced by the clickable
+        # 'regions-high-occupancy' card below (project-quality/ui/
+        # UI_FIXES_DASHBOARD_WHATIF_REPORT.md). It is kept here, unchanged,
+        # purely so this endpoint keeps returning pending_inbox_count for
+        # backend regression coverage (see the G1-06 consolidated-groupby
+        # correctness test in performance_tests/test_home_dashboard_performance.py,
+        # which has no other way to observe this system-wide number).
         attention_items.append({
             'id': 'regions-pending-review', 'severity': 'warning', 'icon': 'inbox', 'count': pending_inbox_count,
             'title_he': 'אזורים עם נתונים חדשים שטרם נצפו', 'title_en': 'Regions with unviewed new data',
             'description_he': f'{pending_inbox_count} אזורים טרם צפו בנתוני הסטודנטים החדשים שלהם',
             'description_en': f'{pending_inbox_count} regions have not yet viewed their new student data',
             'route': None,
+        })
+
+    if is_admin and regions_high_occupancy_count > 0:
+        attention_items.append({
+            'id': 'regions-high-occupancy', 'severity': 'warning', 'icon': 'percent', 'count': regions_high_occupancy_count,
+            'title_he': 'אזורים בתפוסה גבוהה', 'title_en': 'High-occupancy regions',
+            'description_he': f'{regions_high_occupancy_count} אזורים נמצאים בתפוסה של 90% ומעלה',
+            'description_en': f'{regions_high_occupancy_count} regions are at 90% occupancy or higher',
+            'route': '/analysis',
         })
 
     if is_admin and regions_with_failed_latest > 0:
