@@ -4,6 +4,7 @@ import {
   FileSpreadsheet, RefreshCw, Users,
 } from 'lucide-react';
 import { reportsAPI, regionsAPI } from '../services/api';
+import { localizeRegionName } from '../utils/locationNames';
 
 // Hidden from the Reports region filter — not a real dorm report region.
 const _isExcludedRegion = r =>
@@ -313,7 +314,7 @@ function ReportsPage({ language }) {
           >
             <option value="">{regionsLoading ? t.loadingRegions : t.allRegions}</option>
             {regions.map(r => (
-              <option key={r.id} value={r.id}>{r.name}</option>
+              <option key={r.id} value={r.id}>{localizeRegionName(r, language)}</option>
             ))}
           </select>
         </div>

@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import FiltersDrawer from '../components/FiltersDrawer';
 import BedMatchPicker, { assignActionLabel, mergeBuildings } from '../components/BedMatchPicker';
 import { studentsAPI, requestsAPI, regionsAPI, api } from '../services/api';
+import { localizeRegionName, localizeDormTypeName } from '../utils/locationNames';
+import { localizeGender } from '../utils/genderLabels';
 import { useAuth } from '../context/AuthContext';
 import {
   Search, Star, X, Users, Phone, Mail, Home, MapPin,
@@ -249,8 +251,8 @@ function StudentsPage({ language }) {
       category: 'קטגוריה',
       reason: 'הערות',
       selectGender: 'בחר מגדר',
-      male: 'זכר',
-      female: 'נקבה',
+      male: localizeGender('male', 'he'),
+      female: localizeGender('female', 'he'),
       notSpecified: 'לא צוין',
       jewish: 'יהודי',
       muslims: 'מוסלמי',
@@ -365,8 +367,8 @@ function StudentsPage({ language }) {
       category: 'Category',
       reason: 'Notes',
       selectGender: 'Select gender',
-      male: 'Male',
-      female: 'Female',
+      male: localizeGender('male', 'en'),
+      female: localizeGender('female', 'en'),
       notSpecified: 'Not specified',
       jewish: 'Jewish',
       muslims: 'Muslims',
@@ -422,7 +424,7 @@ function StudentsPage({ language }) {
 
   const getRegionName = (regionId) => {
     const region = filterOptions?.regions?.find((r) => String(r.id) === String(regionId));
-    return region?.name || regionId;
+    return region ? localizeRegionName(region, language) : regionId;
   };
 
   const getBuildingName = (buildingId) => {
@@ -1104,9 +1106,7 @@ const submitEditStudent = async () => {
             <div className="active-filter-chips">
               {activeFilters.genders.map((v) => (
                 <span key={v} className="filter-chip">
-                  {language === 'he'
-                    ? (v === 'male' ? 'זכר' : v === 'female' ? 'נקבה' : v)
-                    : (v === 'male' ? 'Male' : v === 'female' ? 'Female' : v)}
+                  {localizeGender(v, language) || v}
                   <button onClick={() => setActiveFilters(f => ({ ...f, genders: f.genders.filter(x => x !== v) }))}><X size={12} /></button>
                 </span>
               ))}
@@ -1359,7 +1359,7 @@ const submitEditStudent = async () => {
             <div className="card">
               <div className="card-header"><div className="card-icon personal"><User size={18} /></div><h3>{t.personal}</h3></div>
               <div className="card-body">
-                <div className="info-row"><span className="info-key">⚥ {t.gender}</span><span className="info-val">{selectedStudent.gender_display || '—'}</span></div>
+                <div className="info-row"><span className="info-key">⚥ {t.gender}</span><span className="info-val">{localizeGender(selectedStudent.gender, language) || '—'}</span></div>
                 <div className="info-row"><span className="info-key"><Star size={15} /> {t.religion}</span><span className="info-val">{selectedStudent.requested_religion_display || '—'}</span></div>
                 <div className="info-row"><span className="info-key"><Tag size={15} /> {t.category}</span><span className="info-val">{selectedStudent.category_display || '—'}</span></div>
               </div>
@@ -1513,7 +1513,7 @@ const submitEditStudent = async () => {
                                   setReqError('');
                                 }}>
                                 <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                  <MapPin size={13} /> {r.name}
+                                  <MapPin size={13} /> {localizeRegionName(r, language)}
                                 </span>
                                 <span style={{ fontSize: 11, opacity: 0.7 }}>
                                   {isCurrent ? (language === 'he' ? 'האזור הנוכחי' : 'current region') : ''}
@@ -1705,7 +1705,7 @@ const submitEditStudent = async () => {
                 >
                   <option value="">{t.selectRegion}</option>
                   {addStudentRegions.map((r) => (
-                    <option key={r.id} value={r.id}>{r.name}</option>
+                    <option key={r.id} value={r.id}>{localizeRegionName(r, language)}</option>
                   ))}
                 </select>
                 {addStudentFieldErrors.region && (
@@ -1760,7 +1760,7 @@ const submitEditStudent = async () => {
                   {isCentralAdmin() && !addStudentForm.region ? t.selectRegionFirst : t.selectDormType}
                 </option>
                 {addStudentDormTypeOptions().map((dt) => (
-                  <option key={dt.id} value={dt.id}>{dt.name}</option>
+                  <option key={dt.id} value={dt.id}>{localizeDormTypeName(dt, language)}</option>
                 ))}
               </select>
               {addStudentFieldErrors.accepted_dorm_type && (
@@ -1935,7 +1935,7 @@ const submitEditStudent = async () => {
                 <select value={editStudentForm.region} onChange={(e) => handleEditStudentChange('region', e.target.value)}>
                   <option value="">{t.selectRegion}</option>
                   {addStudentRegions.map((r) => (
-                    <option key={r.id} value={r.id}>{r.name}</option>
+                    <option key={r.id} value={r.id}>{localizeRegionName(r, language)}</option>
                   ))}
                 </select>
                 {editStudentFieldErrors.region && (
@@ -1984,7 +1984,7 @@ const submitEditStudent = async () => {
                   {isCentralAdmin() && !editStudentForm.region ? t.selectRegionFirst : t.selectDormType}
                 </option>
                 {editStudentDormTypeOptions().map((dt) => (
-                  <option key={dt.id} value={dt.id}>{dt.name}</option>
+                  <option key={dt.id} value={dt.id}>{localizeDormTypeName(dt, language)}</option>
                 ))}
               </select>
               {editStudentFieldErrors.accepted_dorm_type && (
@@ -2077,7 +2077,7 @@ const submitEditStudent = async () => {
           >
             {(filterOptions?.regions || []).map((r) => (
               <option key={r.id} value={r.id}>
-                {r.name}
+                {localizeRegionName(r, language)}
                 {String(r.id) === String(assignBedStudent.region_id) ? ' (אזור הבית של הסטודנט/ית)' : ''}
               </option>
             ))}

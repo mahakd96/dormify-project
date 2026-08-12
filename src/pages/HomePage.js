@@ -20,7 +20,14 @@ const ICONS = {
   'arrow-left-right': ArrowLeftRight,
   'file-text': FileText,
   'check-circle': CheckCircle,
+  percent: Percent,
 };
+
+// The API still returns 'regions-pending-review' (kept server-side for
+// backend regression coverage - see views.py's home_dashboard), but it isn't
+// clickable and isn't useful enough for Central Admin, so it's replaced here
+// by the 'regions-high-occupancy' card instead of being rendered.
+const ATTENTION_IDS_HIDDEN_FROM_UI = new Set(['regions-pending-review']);
 
 const WORKFLOW_LABELS = {
   upload: { he: 'העלאת קובץ', en: 'File upload' },
@@ -113,7 +120,14 @@ function HomePage({ language }) {
 
   const t = {
     he: {
-      userName: user?.name || user?.first_name || 'משתמש',
+      // The large hero heading reads as a role-oriented welcome for every
+      // role, instead of the stored account/user name - the smaller
+      // hero-pill badge below it still shows the actual role_display
+      // untouched (e.g. "מנהל מרכזי").
+      userName: isCentralAdmin() ? 'מרכז הניהול שלך'
+        : isRegionBoss() ? 'מרכז האזור שלך'
+        : isEmployee() ? 'סביבת העבודה שלך'
+        : (user?.name || user?.first_name || 'משתמש'),
       requiresAttention: 'דורש טיפול',
       noAttention: 'אין נושאים דחופים כרגע',
       noAttentionSub: 'כל תהליכי השיבוץ מתנהלים כרגיל ואין פעולות ממתינות.',
@@ -140,7 +154,10 @@ function HomePage({ language }) {
       occupied: 'פנויות כעת',
     },
     en: {
-      userName: user?.name || user?.first_name || 'User',
+      userName: isCentralAdmin() ? 'Your Management Center'
+        : isRegionBoss() ? 'Your Regional Center'
+        : isEmployee() ? 'Your Workspace'
+        : (user?.name || user?.first_name || 'User'),
       requiresAttention: 'Requires Attention',
       noAttention: 'No urgent issues right now',
       noAttentionSub: 'All allocation processes are on track — nothing is waiting on you.',
@@ -652,7 +669,9 @@ function WorkflowStrip({ workflow, language }) {
 }
 
 function AttentionSection({ items, language, navigate, t, ChevronIcon }) {
-  const list = Array.isArray(items) ? items : [];
+  const list = (Array.isArray(items) ? items : []).filter(
+    (item) => !ATTENTION_IDS_HIDDEN_FROM_UI.has(item.id)
+  );
   return (
     <div className={`attention-section ${list.length > 0 ? 'has-items' : 'all-clear'}`}>
       <div className="attention-header">

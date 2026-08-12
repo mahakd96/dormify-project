@@ -16,9 +16,11 @@ from rest_framework.exceptions import PermissionDenied as DRFPermissionDenied
 
 from django.utils import timezone
 from django.db import transaction
+from django.http import HttpResponse
 from django.db.models import (
-    Q, Count, Prefetch, OuterRef, Subquery, IntegerField, Case, When, Value, F, BooleanField, Exists,
+    Q, Count, Sum, Prefetch, OuterRef, Subquery, IntegerField, Case, When, Value, F, BooleanField, Exists,
 )
+from django.db.models.expressions import RawSQL
 from django.db.models.functions import Coalesce, Greatest
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
@@ -1582,6 +1584,14 @@ class StudentViewSet(viewsets.ModelViewSet):
                     to_attr='prefetched_active_assignments',
                 )
             )
+        else:
+            # StudentSerializer.batch_id (source='batch.id') is only read
+            # outside the list action (StudentListSerializer has no batch
+            # field) - added here only, so the list query's JOIN shape is
+            # completely unchanged. Previously a lazy per-response query
+            # on every detail/create/update.
+            # (project-quality/performance/GROUP1_BACKEND_PERFORMANCE_AUDIT.md, G1-16.)
+            queryset = queryset.select_related('batch')
 
         user = self.request.user
         region_value = self.request.query_params.get('region')
@@ -1797,7 +1807,10 @@ class TransferViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = Transfer.objects.select_related(
-            'student', 'from_room', 'to_room', 'requested_by', 'reviewed_by'
+            'student',
+            'from_room', 'from_room__apartment', 'from_room__apartment__building',
+            'to_room', 'to_room__apartment', 'to_room__apartment__building',
+            'requested_by', 'requested_by__region', 'reviewed_by',
         )
 
         if not self.request.user.is_central_admin:
@@ -3071,6 +3084,44 @@ def _assignment_snapshot(student):
     }
 
 
+def _top10_bed_assignment_history_qs():
+    """
+    BedAssignment queryset bounded to each student's 10 most-recent rows
+    (by assigned_at desc, id desc as a deterministic tiebreak), used as the
+    queryset for the placement_history Prefetch below.
+
+    Verified (project-quality/performance/GROUP1_PLACEMENT_HISTORY_VERIFICATION.md):
+    prefetching this relation with an ordinary (unbounded) queryset and
+    slicing to [:10] in Python - the original Group 1 fix - stays flat at 5
+    queries per page, but loads ALL of every relevant student's historical
+    BedAssignment rows into the app server (measured 10x overfetch at 100
+    rows/student; grows unboundedly with each student's lifetime history,
+    not with page size). Django's ORM cannot filter on a Window()
+    annotation directly ("Window is disallowed in the filter clause"), so a
+    plain .annotate(rank=Window(RowNumber(), ...)).filter(rank__lte=10)
+    isn't possible - a small raw ROW_NUMBER() subquery, referenced via
+    pk__in=RawSQL(...), is the standard/smallest way to express a bounded
+    "top N per group" query. Prefetch() then appends its own
+    student_id__in=[...] filter on top of this (restricting to only the
+    students on the current page), so the query stays a single flat
+    statement, correct, and bounded to exactly 10 rows/student.
+    """
+    table = BedAssignment._meta.db_table
+    top10_ids_sql = (
+        f'SELECT id FROM ('
+        f'SELECT id, ROW_NUMBER() OVER ('
+        f'PARTITION BY student_id ORDER BY assigned_at DESC, id DESC'
+        f') AS rn FROM {table}'
+        f') ranked WHERE rn <= 10'
+    )
+    return BedAssignment.objects.filter(
+        pk__in=RawSQL(top10_ids_sql, ()),
+    ).select_related(
+        'bed__room__apartment__building',
+        'bed__room__apartment__building__dorm_type__region',
+    ).order_by('-assigned_at', '-id')
+
+
 class StudentRequestViewSet(viewsets.ModelViewSet):
     serializer_class = StudentRequestSerializer
     permission_classes = [IsAuthenticated]
@@ -3084,6 +3135,39 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
             'target_room__apartment__building__dorm_type__region',
             'swap_with_student', 'target_region',
             'requested_by', 'requested_by__region', 'reviewed_by',
+            'source_region',
+        ).prefetch_related(
+            # destination_regions is read twice per row by
+            # StudentRequestSerializer (the declared PrimaryKeyRelatedField
+            # AND get_destination_region_names()) - a plain
+            # prefetch_related here means Django's M2M prefetch cache
+            # satisfies both .all() calls from one query instead of two per
+            # row, with zero serializer code change (both call sites do a
+            # bare .all(), which transparently reads the prefetch cache).
+            'destination_regions',
+            # current_bed and placement_history each used to run their own
+            # BedAssignment query per row (see
+            # project-quality/performance/GROUP1_BACKEND_PERFORMANCE_AUDIT.md,
+            # G1-09). They need DIFFERENT slices of the same
+            # student.bed_assignments relation (current_bed: at most the
+            # one ACTIVE assignment; placement_history: the most recent 10
+            # regardless of status) - two separate Prefetch() objects on
+            # the same lookup path, distinguished by to_attr, so Django
+            # runs exactly one query per slice (flat, not per-row) instead
+            # of collapsing them into one query that couldn't serve both
+            # shapes correctly.
+            Prefetch(
+                'student__bed_assignments',
+                queryset=BedAssignment.objects.filter(
+                    status=BedAssignment.Status.ACTIVE,
+                ).select_related('bed', 'bed__room'),
+                to_attr='prefetched_current_assignment_list',
+            ),
+            Prefetch(
+                'student__bed_assignments',
+                queryset=_top10_bed_assignment_history_qs(),
+                to_attr='prefetched_placement_history_all',
+            ),
         )
 
         user = self.request.user
@@ -3489,6 +3573,20 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
         except (ValueError, ValidationError) as e:
             message = '; '.join(e.messages) if isinstance(e, ValidationError) and hasattr(e, 'messages') else str(e)
             return Response({'error': message}, status=status.HTTP_400_BAD_REQUEST)
+
+        # req.student may have just gained/lost a BedAssignment above (new
+        # assignment, ended assignment, or a swap) - req itself came from
+        # get_queryset(), so req.student may still be carrying the
+        # PRE-approval prefetched_current_assignment_list/
+        # prefetched_placement_history_all caches (see get_queryset()).
+        # Drop them so the response below reflects what was just
+        # committed, not a stale pre-approval snapshot - the serializer's
+        # getattr(..., None) fallback then re-queries fresh, exactly like
+        # the original (pre-optimization) behavior always did.
+        if req.student_id:
+            for cache_attr in ('prefetched_current_assignment_list', 'prefetched_placement_history_all'):
+                if hasattr(req.student, cache_attr):
+                    delattr(req.student, cache_attr)
 
         return Response({
             'message': 'הבקשה אושרה בהצלחה',
@@ -6277,6 +6375,80 @@ def allocation_summary(request):
         'latest_run': latest_run,
     }, status=status.HTTP_200_OK)
 
+def _annotate_analysis_building_occupancy(buildings_qs, rooms_qs, assignments_qs):
+    """
+    Queryset-level replacement for the three per-building queries
+    analysis_data()'s occupancy_data loop used to run once per building row
+    (confirmed baseline finding: 3 extra SQL queries per building,
+    `total_queries = 31 + 3*N`, see
+    project-quality/performance/ANALYSIS_BASELINE_SUMMARY.md):
+
+      - building_capacity: sum(building_rooms_qs.values_list('capacity', flat=True))
+      - building_assigned_beds: assignments_qs.filter(...).values('bed_id').distinct().count()
+      - rooms_count: building_rooms_qs.count()
+
+    Same technique already used and verified for Buildings (BLD-01) /
+    Apartments (BLD-02) / Rooms (BLD-03) / Beds (BLD-04) via
+    _annotate_building_inventory_counts / _annotate_apartment_inventory_counts
+    above: each aggregate is an INDEPENDENT correlated subquery (Subquery +
+    OuterRef, grouped by the target FK), not several Count()/Sum()
+    annotations combined in one annotate() call on joined relations - this
+    deliberately avoids the classic Django multi-aggregate JOIN-
+    multiplication trap, where combining e.g. a Sum() over rooms and a
+    Count() over assignments in the same annotate() would silently inflate
+    both by the cross-joined row count of the other relation. Each subquery
+    below is independently grouped/evaluated per building and runs inside
+    the single `buildings_qs` SQL statement, so results are mathematically
+    identical to running the original three queries once per building -
+    just computed once, in one round trip, instead of 3*N times.
+
+    `rooms_qs` and `assignments_qs` are passed in exactly as
+    analysis_data() already built them (including its is_active and
+    region scoping) - this function only adds the
+    `apartment__building=OuterRef('pk')` /
+    `bed__room__apartment__building=OuterRef('pk')` correlation on top,
+    reproducing `building_rooms_qs = rooms_qs.filter(apartment__building=building)`
+    and `assignments_qs.filter(bed__room__apartment__building=building)`
+    field-for-field. Filtering semantics are therefore preserved exactly,
+    with no re-interpretation of what counts as "active"/in-region:
+    - _capacity: sum of Room.capacity for rooms matching the caller's
+      rooms_qs (active room, active apartment, active building, optional
+      region) under this building. NULL (no matching rooms) -> 0, matching
+      the original `sum(empty values_list)` which is 0, never None.
+    - _rooms_count: count of that same room set - same filter as
+      _capacity, count instead of sum, matching the original
+      `building_rooms_qs.count()` using the identical `building_rooms_qs`.
+    - _assigned_beds: distinct bed count from the caller's assignments_qs
+      (ACTIVE status, active room/apartment/building, optional region)
+      under this building - matches the original
+      `.values('bed_id').distinct().count()` exactly, including the
+      distinct-bed semantics.
+    """
+    capacity_and_rooms_sq = rooms_qs.filter(
+        apartment__building=OuterRef('pk'),
+    ).order_by().values('apartment__building').annotate(
+        cap=Sum('capacity'),
+    ).values('cap')
+
+    rooms_count_sq = rooms_qs.filter(
+        apartment__building=OuterRef('pk'),
+    ).order_by().values('apartment__building').annotate(
+        c=Count('id'),
+    ).values('c')
+
+    assigned_beds_sq = assignments_qs.filter(
+        bed__room__apartment__building=OuterRef('pk'),
+    ).order_by().values('bed__room__apartment__building').annotate(
+        c=Count('bed_id', distinct=True),
+    ).values('c')
+
+    return buildings_qs.annotate(
+        _capacity=Coalesce(Subquery(capacity_and_rooms_sq, output_field=IntegerField()), 0),
+        _rooms_count=Coalesce(Subquery(rooms_count_sq, output_field=IntegerField()), 0),
+        _assigned_beds=Coalesce(Subquery(assigned_beds_sq, output_field=IntegerField()), 0),
+    )
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def analysis_data(request):
@@ -6367,9 +6539,24 @@ def analysis_data(request):
     # =========================
     total_students = students_qs.count()
 
-    # Real assigned students come from active BedAssignment,
-    # not from Student.assigned_room.
-    assigned_students = assignments_qs.values('student_id').distinct().count()
+    # Real assigned students come from active BedAssignment, not from
+    # Student.assigned_room. assigned_students / assigned_student_ids /
+    # assigned_beds used to be 3 separate queries against the same
+    # assignments_qs (2 COUNT DISTINCT + this raw fetch) - consolidated
+    # into one fetch of (student_id, bed_id) pairs. This costs nothing
+    # extra over the original: assigned_student_ids already had to pull
+    # every matching row into memory (it's reused below, unchanged, by
+    # the students-by-region loop), so adding bed_id to that same fetch
+    # replaces 2 redundant COUNT queries with zero additional data
+    # transfer - not a "fetch more to save queries" trade-off.
+    # (project-quality/performance/ANALYSIS_FIXED_QUERY_INSPECTION.md,
+    # "Assignments" consolidation candidate; validated at N=2,000
+    # assignments in api/performance_tests/test_analysis_performance.py.)
+    assignment_student_bed_pairs = list(
+        assignments_qs.values('student_id', 'bed_id')
+    )
+    assigned_student_ids = {row['student_id'] for row in assignment_student_bed_pairs}
+    assigned_students = len(assigned_student_ids)
     unassigned_students = max(total_students - assigned_students, 0)
 
     # Priority KPIs must be scoped to the same "automatic allocation
@@ -6384,8 +6571,17 @@ def analysis_data(request):
 
     priority_students = allocatable_students_qs.filter(is_priority=True).count()
 
-    total_capacity = sum(rooms_qs.values_list('capacity', flat=True))
-    assigned_beds = assignments_qs.values('bed_id').distinct().count()
+    # total_capacity/total_rooms used to be sum(values_list('capacity'))
+    # (fetches every matching room's capacity into Python) plus a second,
+    # independent .count() query over the same rooms_qs - now a single
+    # DB-side aggregate() computes both, with NO room rows transferred to
+    # Python at all (strictly less data movement than before, not merely
+    # fewer round trips). ("Rooms" consolidation candidate.)
+    room_aggregate = rooms_qs.aggregate(total_capacity=Sum('capacity'), total_rooms=Count('id'))
+    total_capacity = room_aggregate['total_capacity'] or 0
+    total_rooms = room_aggregate['total_rooms'] or 0
+
+    assigned_beds = len({row['bed_id'] for row in assignment_student_bed_pairs})
     available_beds = max(total_capacity - assigned_beds, 0)
 
     occupancy_rate = 0
@@ -6393,21 +6589,43 @@ def analysis_data(request):
         occupancy_rate = round((assigned_beds / total_capacity) * 100, 2)
 
     total_buildings = buildings_qs.count()
-    all_buildings_count = Building.objects.count()
-    inactive_buildings_count = Building.objects.filter(is_active=False).count()
 
+    # all_buildings_count/inactive_buildings_count used to be computed
+    # unconditionally (system-wide) and then immediately discarded and
+    # recomputed region-scoped whenever `region` was set - 2 wasted
+    # queries on every region-scoped request (any non-admin user, or an
+    # admin who picked a region - the common case). Now computed exactly
+    # once, in whichever shape is actually needed. (Finding "C" - pure
+    # dead-code elimination, not a trade-off.)
     if region:
         all_buildings_count = Building.objects.filter(
             dorm_type__region=region
         ).count()
-
         inactive_buildings_count = Building.objects.filter(
             dorm_type__region=region,
             is_active=False
         ).count()
-    total_rooms = rooms_qs.count()
-    total_transfers = transfers_qs.count()
-    pending_transfers = transfers_qs.filter(status=Transfer.Status.PENDING).count()
+    else:
+        all_buildings_count = Building.objects.count()
+        inactive_buildings_count = Building.objects.filter(is_active=False).count()
+
+    # transfers_by_status's grouped counts already contain everything
+    # total_transfers/pending_transfers need (every Transfer row falls
+    # into exactly one status group) - computed here once and reused
+    # both for these two summary numbers AND for the
+    # 'transfers_by_status' response field further below (no second,
+    # regrouped query). ("Transfers" consolidation candidate.)
+    transfers_by_status = list(
+        transfers_qs
+        .values('status')
+        .annotate(count=Count('id'))
+        .order_by('status')
+    )
+    total_transfers = sum(row['count'] for row in transfers_by_status)
+    pending_transfers = next(
+        (row['count'] for row in transfers_by_status if row['status'] == Transfer.Status.PENDING),
+        0,
+    )
 
     latest_run = runs_qs.select_related('run_by', 'region').order_by('-started_at').first()
 
@@ -6421,7 +6639,22 @@ def analysis_data(request):
             Q(student__accepted_dorm_type__region_id=region.id) |
             Q(target_room__apartment__building__dorm_type__region_id=region.id)
         ).distinct()
-    pending_requests = requests_qs.count()
+
+    # Pending requests broken down by type, for the Data Analysis page's
+    # "Special requests" analysis. requests_qs is ALREADY filtered to
+    # status=PENDING only, so this grouped query's counts already sum to
+    # exactly what pending_requests needs - one query instead of two.
+    # ("Requests" consolidation candidate; requests_qs's region-scoping
+    # joins are all forward FK (many-to-one), so .distinct() cannot
+    # affect these per-request_type group counts - see
+    # ANALYSIS_FIXED_QUERY_INSPECTION.md for the join-structure proof.)
+    pending_requests_by_type = list(
+        requests_qs
+        .values('request_type')
+        .annotate(count=Count('id'))
+        .order_by('-count')
+    )
+    pending_requests = sum(row['count'] for row in pending_requests_by_type)
 
     priority_unassigned_students = allocatable_students_qs.filter(
         is_priority=True
@@ -6544,6 +6777,12 @@ def analysis_data(request):
 
     students_by_region_counts = {}
 
+    # Assigned/unassigned split per region, used by the Data Analysis page's
+    # "Demand / waiting students" analysis. Built in the same single-query
+    # loop as students_by_region above, so it costs nothing extra beyond the
+    # assigned_student_ids set already computed above (no N+1).
+    students_by_region_demand = {}
+
     for student in students_qs.select_related(
             'accepted_dorm_type',
             'accepted_dorm_type__region',
@@ -6566,6 +6805,29 @@ def analysis_data(request):
 
         students_by_region_counts[region_name] = students_by_region_counts.get(region_name, 0) + 1
 
+        demand_bucket = students_by_region_demand.setdefault(
+            region_name, {'total': 0, 'assigned': 0}
+        )
+        demand_bucket['total'] += 1
+        if student.id in assigned_student_ids:
+            demand_bucket['assigned'] += 1
+
+    region_name_to_id = {r.name: r.id for r in Region.objects.all()}
+
+    unassigned_by_region = [
+        {
+            'region': region_name,
+            'region_id': region_name_to_id.get(region_name, ''),
+            'total_students': bucket['total'],
+            'assigned_students': bucket['assigned'],
+            'unassigned_students': max(bucket['total'] - bucket['assigned'], 0),
+        }
+        for region_name, bucket in sorted(
+            students_by_region_demand.items(),
+            key=lambda item: item[0]
+        )
+    ]
+
     students_by_region = [
         {
             'region': region_name,
@@ -6580,13 +6842,9 @@ def analysis_data(request):
     # =========================
     # Transfers distributions
     # =========================
-    transfers_by_status = list(
-        transfers_qs
-        .values('status')
-        .annotate(count=Count('id'))
-        .order_by('status')
-    )
-
+    # transfers_by_status was already computed earlier (Summary numbers
+    # section) and reused here unchanged - see the "Transfers"
+    # consolidation candidate comment above.
     transfers_by_type = list(
         transfers_qs
         .values('movement_request__movement_type')
@@ -6602,22 +6860,23 @@ def analysis_data(request):
     # =========================
     occupancy_data = []
 
-    for building in buildings_qs.order_by(
+    # _capacity/_rooms_count/_assigned_beds are computed once, inside this
+    # single query, via correlated subqueries - see
+    # _annotate_analysis_building_occupancy for the exact filter-for-filter
+    # equivalence to the original per-building queries this replaces
+    # (confirmed baseline: 3 extra SQL queries per building,
+    # `total_queries = 31 + 3*N`).
+    occupancy_buildings_qs = _annotate_analysis_building_occupancy(
+        buildings_qs, rooms_qs, assignments_qs
+    )
+
+    for building in occupancy_buildings_qs.order_by(
         'dorm_type__region__name',
         'dorm_type__name',
         'number'
     ):
-        building_rooms_qs = rooms_qs.filter(
-            apartment__building=building
-        )
-
-        building_capacity = sum(
-            building_rooms_qs.values_list('capacity', flat=True)
-        )
-
-        building_assigned_beds = assignments_qs.filter(
-            bed__room__apartment__building=building
-        ).values('bed_id').distinct().count()
+        building_capacity = building._capacity
+        building_assigned_beds = building._assigned_beds
 
         building_available_beds = max(
             building_capacity - building_assigned_beds,
@@ -6643,7 +6902,7 @@ def analysis_data(request):
             'region': dorm_region.name if dorm_region else '',
             'region_id': dorm_region.id if dorm_region else '',
 
-            'rooms_count': building_rooms_qs.count(),
+            'rooms_count': building._rooms_count,
 
             # Names expected by AnalysisPage
             'total_beds': building_capacity,
@@ -6689,11 +6948,13 @@ def analysis_data(request):
         'students_by_category': students_by_category,
         'students_by_housing': students_by_housing,
         'students_by_region': students_by_region,
+        'unassigned_by_region': unassigned_by_region,
 
         'occupancy_data': occupancy_data,
 
         'transfers_by_status': transfers_by_status,
         'transfers_by_type': transfers_by_type,
+        'pending_requests_by_type': pending_requests_by_type,
 
         'latest_run': AllocationRunSerializer(latest_run).data if latest_run else None,
         'latest_batch': ImportBatchSerializer(latest_batch).data if latest_batch else None,
@@ -6776,6 +7037,17 @@ def _what_if_format_student_from_assignment(assignment):
         'placement_sector': student.placement_sector,
         'category': student.category,
         'housing_type': student.housing_type,
+
+        # Same get_FOO_display() convention StudentSerializer already
+        # exposes as gender_display/requested_religion_display/
+        # religious_display (see serializers.py) - added here so the
+        # What-If "Affected Students" table can show the same human-
+        # readable labels used everywhere else in the app instead of the
+        # raw enum codes above (project-quality/ui/
+        # UI_FIXES_DASHBOARD_WHATIF_REPORT.md).
+        'gender_display': student.get_gender_display() if student.gender else '',
+        'requested_religion_display': student.get_requested_religion_display(),
+        'religious_display': student.get_religious_display(),
 
         'is_priority': student.is_priority,
         'priority_reason': student.priority_reason,
@@ -7908,10 +8180,57 @@ def home_dashboard(request):
     assigned_students = allocatable_qs.filter(assigned_room__isnull=False).count()
     unassigned_students = allocatable_qs.filter(assigned_room__isnull=True).count()
 
-    total_capacity = sum(rooms_qs.values_list('capacity', flat=True))
-    occupied_beds = active_assignments_qs.values('bed_id').distinct().count()
+    # total_capacity/occupied_beds AND the admin-only per-region breakdown
+    # used by the "High-occupancy regions" attention card both come out of
+    # these same 2 queries - reshaped to also carry a region_id column
+    # (GROUP BY / an extra .values() field) rather than running 2 more
+    # queries to get a per-region breakdown, to stay within the query-count
+    # budget already established for this endpoint (see
+    # performance_tests/test_home_dashboard_performance.py's
+    # test_query_count_after_fix_central_admin, <=16 total queries - this
+    # trades a scalar SELECT for a GROUP BY / row-fetching one, exactly the
+    # "Assignments"/"Rooms" consolidation trade-off already used elsewhere
+    # in this endpoint and in analysis_data() above).
+    region_capacity = {}
+    region_occupied_beds = {}
+    if region is None:
+        room_rows = rooms_qs.values('apartment__building__dorm_type__region_id').annotate(
+            cap=Sum('capacity')
+        )
+        total_capacity = 0
+        for row in room_rows:
+            cap = row['cap'] or 0
+            total_capacity += cap
+            region_capacity[row['apartment__building__dorm_type__region_id']] = cap
+
+        assignment_rows = active_assignments_qs.values(
+            'bed__room__apartment__building__dorm_type__region_id', 'bed_id'
+        ).distinct()
+        region_bed_ids = {}
+        for row in assignment_rows:
+            region_bed_ids.setdefault(
+                row['bed__room__apartment__building__dorm_type__region_id'], set()
+            ).add(row['bed_id'])
+        occupied_beds = sum(len(beds) for beds in region_bed_ids.values())
+        region_occupied_beds = {rid: len(beds) for rid, beds in region_bed_ids.items()}
+    else:
+        total_capacity = sum(rooms_qs.values_list('capacity', flat=True))
+        occupied_beds = active_assignments_qs.values('bed_id').distinct().count()
+
     available_beds = max(total_capacity - occupied_beds, 0)
     occupancy_rate = round((occupied_beds / total_capacity) * 100) if total_capacity else 0
+
+    # ---- High-occupancy regions (central-admin "High-occupancy regions"
+    # attention card) - threshold = occupancy >= 90%, using the per-region
+    # capacity/occupied numbers computed above (no extra query). ----
+    HIGH_OCCUPANCY_THRESHOLD = 90
+    regions_high_occupancy_count = 0
+    for region_id, capacity in region_capacity.items():
+        if not region_id or capacity <= 0:
+            continue
+        occupied = region_occupied_beds.get(region_id, 0)
+        if (occupied / capacity) * 100 >= HIGH_OCCUPANCY_THRESHOLD:
+            regions_high_occupancy_count += 1
 
     priority_students_pending = 0
     if is_admin:
@@ -7951,16 +8270,44 @@ def home_dashboard(request):
     pending_inbox_count = 0
     viewed_inbox_count = 0
     if region is not None:
-        latest_inbox = RegionInbox.objects.select_related('batch').filter(
+        # 'region' added to select_related: RegionInboxSerializer.region_name
+        # (source='region.name') was previously issuing a lazy per-request
+        # fetch here whenever latest_inbox was not None - now covered.
+        # (project-quality/performance/GROUP1_BACKEND_PERFORMANCE_AUDIT.md, G1-08.)
+        latest_inbox = RegionInbox.objects.select_related('batch', 'region').filter(
             region=region
         ).order_by('-created_at').first()
         pending_inbox_count = 1 if latest_inbox and latest_inbox.status == RegionInbox.Status.PENDING else 0
         viewed_inbox_count = 1 if latest_inbox and latest_inbox.status == RegionInbox.Status.VIEWED else 0
     else:
-        pending_inbox_count = RegionInbox.objects.filter(status=RegionInbox.Status.PENDING).count()
-        viewed_inbox_count = RegionInbox.objects.filter(status=RegionInbox.Status.VIEWED).count()
+        # Two independent .count() queries over the same table consolidated
+        # into one GROUP BY - safe because both counts are simple, disjoint
+        # status filters over the exact same unscoped RegionInbox table.
+        # (G1-06.)
+        inbox_status_counts = {
+            row['status']: row['c']
+            for row in RegionInbox.objects.values('status').annotate(c=Count('id'))
+        }
+        pending_inbox_count = inbox_status_counts.get(RegionInbox.Status.PENDING, 0)
+        viewed_inbox_count = inbox_status_counts.get(RegionInbox.Status.VIEWED, 0)
 
     # ---- Allocation runs ----
+    # run_qs is evaluated 4 separate times below/further down (active_run,
+    # latest_run, has_completed_run, and the recent_activity [:3] slice) -
+    # flagged in the Group 1 audit (G1-07) as a possible consolidation
+    # candidate. NOT consolidated here: each has a genuinely different
+    # filter (active-like status / no filter / completed-like status /
+    # most-recent-3), and has_completed_run in particular means "has ANY
+    # run, ever, of this shape" - answering that from a bounded recent-N
+    # window would silently return a wrong answer if more than N
+    # non-completed runs exist before the most recent completed one
+    # (explicitly the technique this fix must NOT use, per
+    # GROUP1_BACKEND_PERFORMANCE_AUDIT.md's implementation instructions).
+    # Each of these 4 queries is already a single, simple,
+    # appropriately-scoped lookup (an indexed .first()/.exists()/sliced
+    # query, not a table scan) - the measured benefit of forcing them into
+    # fewer round trips does not clear the bar for the correctness risk it
+    # would introduce. Left unchanged.
     run_qs = AllocationRun.objects.select_related('region', 'run_by')
     if region is not None:
         run_qs = run_qs.filter(region=region)
@@ -8155,12 +8502,30 @@ def home_dashboard(request):
         })
 
     if is_admin and pending_inbox_count > 0:
+        # NOTE: this item is intentionally NOT rendered by the frontend
+        # dashboard anymore (see HomePage.js) - the Central Admin "regions
+        # with unviewed new data" card was replaced by the clickable
+        # 'regions-high-occupancy' card below (project-quality/ui/
+        # UI_FIXES_DASHBOARD_WHATIF_REPORT.md). It is kept here, unchanged,
+        # purely so this endpoint keeps returning pending_inbox_count for
+        # backend regression coverage (see the G1-06 consolidated-groupby
+        # correctness test in performance_tests/test_home_dashboard_performance.py,
+        # which has no other way to observe this system-wide number).
         attention_items.append({
             'id': 'regions-pending-review', 'severity': 'warning', 'icon': 'inbox', 'count': pending_inbox_count,
             'title_he': 'אזורים עם נתונים חדשים שטרם נצפו', 'title_en': 'Regions with unviewed new data',
             'description_he': f'{pending_inbox_count} אזורים טרם צפו בנתוני הסטודנטים החדשים שלהם',
             'description_en': f'{pending_inbox_count} regions have not yet viewed their new student data',
             'route': None,
+        })
+
+    if is_admin and regions_high_occupancy_count > 0:
+        attention_items.append({
+            'id': 'regions-high-occupancy', 'severity': 'warning', 'icon': 'percent', 'count': regions_high_occupancy_count,
+            'title_he': 'אזורים בתפוסה גבוהה', 'title_en': 'High-occupancy regions',
+            'description_he': f'{regions_high_occupancy_count} אזורים נמצאים בתפוסה של 90% ומעלה',
+            'description_en': f'{regions_high_occupancy_count} regions are at 90% occupancy or higher',
+            'route': '/analysis',
         })
 
     if is_admin and regions_with_failed_latest > 0:

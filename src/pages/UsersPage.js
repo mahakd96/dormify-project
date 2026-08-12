@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 
 import { useAuth } from '../context/AuthContext';
+import { localizeRegionName, localizeById } from '../utils/locationNames';
 
 import {
   AlertCircle,
@@ -291,17 +292,7 @@ function UsersPage({ language = 'he' }) {
 
   function getRegionName(staffUser) {
     if (staffUser.regionName || staffUser.regionNameEn) {
-      if (isHebrew) {
-        return (
-          staffUser.regionName ||
-          staffUser.regionNameEn
-        );
-      }
-
-      return (
-        staffUser.regionNameEn ||
-        staffUser.regionName
-      );
+      return localizeById(staffUser.regionId, staffUser.regionName || staffUser.regionNameEn, language);
     }
 
     const region = regions.find(
@@ -314,15 +305,7 @@ function UsersPage({ language = 'he' }) {
       return t.allRegions;
     }
 
-    if (isHebrew) {
-      return region.name;
-    }
-
-    return (
-      region.nameEn ||
-      region.name_en ||
-      region.name
-    );
+    return localizeRegionName(region, language);
   }
 
   function getRoleBadge(role) {
@@ -664,11 +647,7 @@ function UsersPage({ language = 'he' }) {
                   key={region.id}
                   value={region.id}
                 >
-                  {isHebrew
-                    ? region.name
-                    : region.nameEn ||
-                      region.name_en ||
-                      region.name}
+                  {localizeRegionName(region, language)}
                 </option>
               ))}
             </select>
@@ -960,11 +939,7 @@ function UsersPage({ language = 'he' }) {
                         key={region.id}
                         value={region.id}
                       >
-                        {isHebrew
-                          ? region.name
-                          : region.nameEn ||
-                            region.name_en ||
-                            region.name}
+                        {localizeRegionName(region, language)}
                       </option>
                     ))}
                   </select>
