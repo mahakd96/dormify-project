@@ -37,14 +37,18 @@ const RECOMMENDATION_CFG = {
   unavailable: { color: '#b91c1c', bg: '#fee2e2', border: '#fca5a5' },
 };
 
-const GENDER_LABEL = { male: 'זכרים', female: 'נקבות', mixed: 'מעורב' };
+const GENDER_LABEL_HE = { male: 'זכרים', female: 'נקבות', mixed: 'מעורב' };
+const GENDER_LABEL_EN = { male: 'Male', female: 'Female', mixed: 'Mixed' };
 
 // UI-side display overrides for backend warning codes. The CODE comes from
 // the server (real matching result); only the wording is adjusted here.
-const WARNING_DISPLAY = {
+const WARNING_DISPLAY_HE = {
   religion_conflict: 'אזהרה: דירה עם דיירים מדתות שונות — ניתן לשיבוץ, אך קיימת שונות דתית בדירה',
 };
-const warningLabel = (r) => WARNING_DISPLAY[r.code] || r.label;
+const WARNING_DISPLAY_EN = {
+  religion_conflict: 'Warning: apartment with residents of different religions — assignment is allowed, but the apartment has religious variety',
+};
+const warningLabel = (r, isHe) => (isHe ? WARNING_DISPLAY_HE : WARNING_DISPLAY_EN)[r.code] || r.label;
 
 // FUTURE WORK (documented, intentionally NOT implemented yet): a layered
 // advanced scoring pass on top of the current hard-constraints + reasons
@@ -107,12 +111,20 @@ export function mergeBuildings(prev = [], next = []) {
 }
 
 // Full-path confirm-button label, e.g.
-// "שבץ למיטה 1 בחדר 2, דירה 3, בניין 105".
-export function assignActionLabel(sel) {
-  if (!sel) return 'אשר ושבץ';
-  const path = `בחדר ${sel.room}, דירה ${sel.apartment}, בניין ${sel.building}`;
-  if (sel.single_bed_room) return `שבץ למקום היחיד ${path}`;
-  return `שבץ למיטה ${sel.bed_display || bedDisplayLabel(sel.bed_label)} ${path}`;
+// "שבץ למיטה 1 בחדר 2, דירה 3, בניין 105" / "Assign to bed 1 in room 2, apt 3, building 105".
+// `language` defaults to 'he' so existing Hebrew-only callers (StudentsPage)
+// keep their current behavior unchanged.
+export function assignActionLabel(sel, language = 'he') {
+  const isHe = language === 'he';
+  if (!sel) return isHe ? 'אשר ושבץ' : 'Confirm & assign';
+  if (isHe) {
+    const path = `בחדר ${sel.room}, דירה ${sel.apartment}, בניין ${sel.building}`;
+    if (sel.single_bed_room) return `שבץ למקום היחיד ${path}`;
+    return `שבץ למיטה ${sel.bed_display || bedDisplayLabel(sel.bed_label)} ${path}`;
+  }
+  const path = `in room ${sel.room}, apt ${sel.apartment}, building ${sel.building}`;
+  if (sel.single_bed_room) return `Assign to the single place ${path}`;
+  return `Assign to bed ${sel.bed_display || bedDisplayLabel(sel.bed_label)} ${path}`;
 }
 
 function ReasonList({ items, icon: Icon, tone }) {
@@ -256,13 +268,13 @@ function RoomRow({ building, apartment, room, expanded, onToggle, selectedBedId,
 }
 
 function ApartmentRow({ building, apartment, expanded, onToggle, expandedRooms, onToggleRoom, selectedBedId, onSelect, isHe, t }) {
-  const genderLabel = GENDER_LABEL[apartment.apartment_gender] || apartment.apartment_gender;
+  const genderLabel = (isHe ? GENDER_LABEL_HE : GENDER_LABEL_EN)[apartment.apartment_gender] || apartment.apartment_gender;
   const residents = apartment.residents || [];
   // Compact "why is this recommended" line, shown even when collapsed -
   // built ONLY from the real backend reason labels (matched_reasons /
   // warnings), never invented client-side.
   const reasonSummary = (apartment.matched_reasons || []).slice(0, 2).map((r) => r.label);
-  const firstWarning = (apartment.warnings || [])[0] ? warningLabel(apartment.warnings[0]) : null;
+  const firstWarning = (apartment.warnings || [])[0] ? warningLabel(apartment.warnings[0], isHe) : null;
   return (
     <div className="bmp-apartment">
       <button type="button" className="bmp-apartment-head" onClick={onToggle} aria-expanded={expanded}
@@ -293,9 +305,9 @@ function ApartmentRow({ building, apartment, expanded, onToggle, expandedRooms, 
           {(apartment.matched_reasons?.length > 0 || apartment.warnings?.length > 0 || apartment.historical_reasons?.length > 0) && (
             <div className="bmp-apt-reasons">
               <ReasonList items={apartment.matched_reasons} icon={CheckCircle2} tone="good" />
-              <ReasonList items={(apartment.warnings || []).map((w) => ({ ...w, label: warningLabel(w) }))} icon={AlertTriangle} tone="warn" />
+              <ReasonList items={(apartment.warnings || []).map((w) => ({ ...w, label: warningLabel(w, isHe) }))} icon={AlertTriangle} tone="warn" />
               {apartment.warnings?.length > 0 && (
-                <span className="bmp-warn-allowed">שיבוץ מותר עם אזהרה</span>
+                <span className="bmp-warn-allowed">{isHe ? 'שיבוץ מותר עם אזהרה' : 'Assignment allowed with a warning'}</span>
               )}
               <ReasonList items={apartment.historical_reasons} icon={History} tone="history" />
             </div>
@@ -449,6 +461,10 @@ export default function BedMatchPicker({
   const recommendedCount = (c.best_match || 0) + (c.empty ?? c.fully_empty ?? 0);
 
   const t = {
+    sectionTitle: isHe ? 'אפשרויות שיבוץ זמינות' : 'Available assignment options',
+    sectionSub: isHe ? 'בחרי בניין, דירה, חדר ומיטה המתאימים לסטודנט' : 'Choose a building, apartment, room and bed that fit the student',
+    buildingsWord: isHe ? 'בניינים' : 'buildings',
+    availableBedsWord: isHe ? 'מיטות פנויות' : 'available beds',
     recommended: isHe ? `מומלצות (${recommendedCount})` : `Recommended (${recommendedCount})`,
     withRoommate: isHe ? `עם השותף המבוקש (${c.with_roommate || 0})` : `With requested roommate (${c.with_roommate || 0})`,
     withWarnings: isHe ? `עם אזהרות (${c.with_warnings || 0})` : `With warnings (${c.with_warnings || 0})`,
@@ -579,9 +595,9 @@ showAllInstead: isHe ? 'הצגת בניינים אפשריים' : 'Show availabl
     <div className="bmp-root">
 <div className="bmp-section-head">
   <div>
-    <h3 className="bmp-section-title">אפשרויות שיבוץ זמינות</h3>
+    <h3 className="bmp-section-title">{t.sectionTitle}</h3>
     <p className="bmp-section-sub">
-      בחרי בניין, דירה, חדר ומיטה המתאימים לסטודנט
+      {t.sectionSub}
     </p>
   </div>
 </div>
@@ -591,7 +607,7 @@ showAllInstead: isHe ? 'הצגת בניינים אפשריים' : 'Show availabl
           <Building2 size={16}/>
           <div>
             <strong>{totalBuildings}</strong>
-            <span>בניינים</span>
+            <span>{t.buildingsWord}</span>
           </div>
         </div>
 
@@ -599,7 +615,7 @@ showAllInstead: isHe ? 'הצגת בניינים אפשריים' : 'Show availabl
           <DoorOpen size={16}/>
           <div>
             <strong>{totalApartments}</strong>
-            <span>דירות</span>
+            <span>{t.apartmentsWord}</span>
           </div>
         </div>
 
@@ -607,7 +623,7 @@ showAllInstead: isHe ? 'הצגת בניינים אפשריים' : 'Show availabl
           <Home size={16}/>
           <div>
             <strong>{totalRooms}</strong>
-            <span>חדרים</span>
+            <span>{t.roomsWord}</span>
           </div>
         </div>
 
@@ -615,7 +631,7 @@ showAllInstead: isHe ? 'הצגת בניינים אפשריים' : 'Show availabl
           <BedDouble size={16}/>
           <div>
             <strong>{totalValidBeds}</strong>
-            <span>מיטות פנויות</span>
+            <span>{t.availableBedsWord}</span>
           </div>
         </div>
       </div>
@@ -705,8 +721,8 @@ showAllInstead: isHe ? 'הצגת בניינים אפשריים' : 'Show availabl
             <span className="bmp-selection-subtitle">{t.warningsTitle}</span>
             {sel.warnings.length > 0 ? (
               <>
-                <ReasonList items={sel.warnings.map((w) => ({ ...w, label: warningLabel(w) }))} icon={AlertTriangle} tone="warn" />
-                <span className="bmp-warn-allowed">שיבוץ מותר עם אזהרה</span>
+                <ReasonList items={sel.warnings.map((w) => ({ ...w, label: warningLabel(w, isHe) }))} icon={AlertTriangle} tone="warn" />
+                <span className="bmp-warn-allowed">{isHe ? 'שיבוץ מותר עם אזהרה' : 'Assignment allowed with a warning'}</span>
               </>
             ) : (
               <span className="bmp-selection-none">{t.noWarnings}</span>

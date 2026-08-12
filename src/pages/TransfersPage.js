@@ -3,6 +3,7 @@ import { studentsAPI, requestsAPI, regionsAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import BedMatchPicker, { assignActionLabel, mergeBuildings } from '../components/BedMatchPicker';
 import StudentSearch from '../components/StudentSearch';
+import { localizeGender } from '../utils/genderLabels';
 import {
   Search, X, Plus, Loader2, Check, AlertTriangle,
   Home, DoorOpen, FileText, MapPin, Building2, BedDouble,
@@ -50,6 +51,248 @@ const STATUS_CFG = {
   approved: { color:'green', labelHe:'אושרה',  labelEn:'Approved', Icon: CheckCircle },
   rejected: { color:'rose',  labelHe:'נדחתה',  labelEn:'Rejected', Icon: XCircle     },
 };
+
+// ── Localization ─────────────────────────────────────────────
+// Single translation dictionary for the whole page and every wizard/panel
+// it renders - follows the same per-page t={he:{...},en:{...}} pattern used
+// elsewhere in Dormify (see HomePage.js / WhatIfPage.js). Built once from
+// the current language and threaded down as a prop rather than re-derived
+// per component, so every string on this page stays in one place.
+function buildT(isHe) {
+  const p = (he, en) => (isHe ? he : en);
+  const loc3 = (b, a, r) => p(`בניין ${b} · דירה ${a} · חדר ${r}`, `Building ${b} · Apt ${a} · Room ${r}`);
+  const loc3WithRegion = (region, b, a, r) => p(
+    `${region ? `${region} · ` : ''}בניין ${b} · דירה ${a} · חדר ${r}`,
+    `${region ? `${region} · ` : ''}Building ${b} · Apt ${a} · Room ${r}`
+  );
+  return {
+    // ── Top bar ──
+    pageTitle: p('בקשות מעבר', 'Transfer Requests'),
+    pageSubtitle: p('ניהול ואישור בקשות שינוי מגורים של סטודנטים', 'Manage and approve student housing change requests'),
+    refresh: p('רענון', 'Refresh'),
+    newRequest: p('בקשה חדשה', 'New Request'),
+
+    // ── Stat cards ──
+    statTotal: p('סה"כ', 'Total'),
+    statPending: p('ממתינות', 'Pending'),
+    statApproved: p('אושרו', 'Approved'),
+    statRejected: p('נדחו', 'Rejected'),
+
+    // ── List toolbar ──
+    searchPlaceholder: p('חיפוש...', 'Search...'),
+    tabAll: p('הכל', 'All'),
+    tabPending: p('ממתינות', 'Pending'),
+    tabApproved: p('אושרו', 'Approved'),
+    tabRejected: p('נדחו', 'Rejected'),
+    requestTypeLabel: p('סוג בקשה', 'Request Type'),
+    regionLabel: p('אזור', 'Region'),
+    allRegions: p('כל האזורים', 'All Regions'),
+    regionFilterTitle: p('סינון לפי אזור', 'Filter by region'),
+    requestsCount: (n) => p(`${n} בקשות`, `${n} requests`),
+    loadingRequests: p('טוען...', 'Loading...'),
+
+    typeFilterAll: p('כל סוגי הבקשות', 'All request types'),
+    typeFilterAddStudent: p('הוספת סטודנט', 'Add Student'),
+    typeFilterRemoveStudent: p('הסרה ממעונות', 'Remove from Dorms'),
+    typeFilterRoom: p('שינוי חדר', 'Room Transfer'),
+    typeFilterApartment: p('מעבר דירה / אזור', 'Apartment / Region Transfer'),
+    typeFilterSwap: p('חילוף סטודנטים', 'Student Swap'),
+    typeFilterOther: p('בקשה אחרת', 'Other Request'),
+
+    // ── Empty states ──
+    emptyNoRequestsTitle: p('אין בקשות מעבר כרגע', 'No transfer requests yet'),
+    emptyNoRequestsSub: p('בקשות חדשות שייווצרו יופיעו כאן', 'New requests will appear here'),
+    emptyNoResultsTitle: p('לא נמצאו בקשות', 'No requests found'),
+    emptyNoResultsSub: p('נסי לשנות את החיפוש או את הסינונים', 'Try changing the search or filters'),
+    emptyDetailNoneTitle: p('אין בקשות להצגה', 'No requests to display'),
+    emptyDetailNoneSub: p('כאשר תיווצר בקשת מעבר חדשה, פרטיה יוצגו כאן.', 'When a new transfer request is created, its details will appear here.'),
+    emptyDetailPickTitle: p('בחרי בקשה מהרשימה', 'Select a request from the list'),
+    emptyDetailPickSub: p('בחרי בקשה כדי לצפות בפרטים, בשיבוץ הנוכחי ובפעולות הזמינות.', 'Select a request to view its details, current placement and available actions.'),
+
+    errLoad: p('שגיאה בטעינה', 'Failed to load'),
+    errSubmit: p('שגיאה בשליחה', 'Failed to submit'),
+    errGeneric: p('שגיאה', 'Error'),
+
+    // ── Wizard shared chrome ──
+    cancel: p('ביטול', 'Cancel'),
+    back: p('חזרה', 'Back'),
+    next: p('המשך', 'Next'),
+    submit: p('שלח', 'Submit'),
+    selectPlaceholder: p('בחר...', 'Select...'),
+    studentSearchPlaceholder: p('חפש סטודנט משובץ...', 'Search assigned student...'),
+
+    // ── New Request modal: type picker ──
+    modalNewRequest: p('בקשה חדשה', 'New Request'),
+    modalChooseType: p('בחר סוג בקשה', 'Choose Request Type'),
+    modalBackToTypes: p('סוגי בקשות', 'Request Types'),
+    typeAddStudentTitle: p('הוספת סטודנט', 'Add Student'),
+    typeAddStudentSub: p('רישום סטודנט חדש למעונות', 'Register a new student to the dorms'),
+    typeRemoveStudentTitle: p('הסרה ממעונות', 'Remove from Dorms'),
+    typeRemoveStudentSub: p('הסרת סטודנט קיים', 'Remove an existing student'),
+    typeTransferTitle: p('בקשת מעבר', 'Transfer Request'),
+    typeTransferSub: p('חדר אחר, דירה אחרת או אזור אחר', 'Different room, apartment or region'),
+    typeSwapTitle: p('חילוף בין סטודנטים', 'Student Swap'),
+    typeSwapSub: p('שני סטודנטים מחליפים מקום', 'Two students swap places'),
+    typeOtherTitle: p('בקשה אחרת', 'Other Request'),
+    typeOtherSub: p('הארכת שהייה ועוד', 'Stay extension and more'),
+
+    // ── AddStudentWizard ──
+    addSteps: [p('פרטי סטודנט', 'Student Details'), p('העדפות דיור', 'Housing Preferences'), p('סיבה', 'Reason'), p('סיכום', 'Summary')],
+    addStep0Title: p('פרטי הסטודנט החדש', 'New Student Details'),
+    addStep1Title: p('העדפות דיור', 'Housing Preferences'),
+    addStep2Title: p('סיבת הבקשה', 'Request Reason'),
+    addStep3Title: p('סיכום לפני שליחה', 'Summary Before Submitting'),
+    labelId: p('תעודת זהות', 'ID Number'),
+    labelFirstName: p('שם פרטי', 'First Name'),
+    labelLastName: p('שם משפחה', 'Last Name'),
+    labelPhone: p('טלפון', 'Phone'),
+    labelEmail: p('אימייל', 'Email'),
+    labelCity: p('עיר', 'City'),
+    labelGender: p('מגדר', 'Gender'),
+    labelReligion: p('דת', 'Religion'),
+    labelDormType: p('סוג מעון', 'Dorm Type'),
+    labelReason: p('סיבה', 'Reason'),
+    genderMale: p(localizeGender('male', 'he'), localizeGender('male', 'en')),
+    genderFemale: p(localizeGender('female', 'he'), localizeGender('female', 'en')),
+    religionJewish: p('יהודי', 'Jewish'),
+    religionMuslim: p('מוסלמי', 'Muslim'),
+    religionChristian: p('נוצרי', 'Christian'),
+    religionDruze: p('דרוזי', 'Druze'),
+    dormCouples: p('זוגות', 'Couples'),
+    dormSingle: p('בודדים', 'Singles'),
+    addReasonPlaceholder: p('הסבר מדוע הסטודנט זקוק למקום במעון...', 'Explain why the student needs a place in the dorms...'),
+    summaryName: p('שם', 'Name'),
+    summaryIdShort: p('ת.ז', 'ID'),
+    summaryPhone: p('טלפון', 'Phone'),
+    summaryEmail: p('אימייל', 'Email'),
+    summaryCity: p('עיר', 'City'),
+    summaryGender: p('מגדר', 'Gender'),
+    summaryReligion: p('דת', 'Religion'),
+    summaryDormType: p('סוג מעון', 'Dorm Type'),
+    summaryReason: p('סיבה', 'Reason'),
+
+    // ── RemoveWizard ──
+    removeSteps: [p('בחר סטודנט', 'Select Student'), p('שיבוץ נוכחי', 'Current Placement'), p('סיבה', 'Reason'), p('אישור', 'Confirm')],
+    removeStep0Title: p('בחר סטודנט להסרה', 'Select Student to Remove'),
+    removeStep1Title: p('שיבוץ נוכחי', 'Current Placement'),
+    removeStep2Title: p('סיבת ההסרה', 'Removal Reason'),
+    removeStep3Title: p('אישור הסרה', 'Confirm Removal'),
+    fieldBuilding: p('בניין', 'Building'),
+    fieldApartment: p('דירה', 'Apartment'),
+    fieldRoom: p('חדר', 'Room'),
+    fieldBed: p('מיטה', 'Bed'),
+    removeNote: p('לאחר האישור, המיטה תתפנה ופרטי הסטודנט יסומנו כלא פעיל.', 'Once confirmed, the bed will be freed and the student will be marked inactive.'),
+    removeReasonPlaceholder: p('הסבר מדוע הסטודנט מוסר...', 'Explain why the student is being removed...'),
+    summaryStudent: p('סטודנט', 'Student'),
+    summaryPlacement: p('שיבוץ', 'Placement'),
+    confirmRemoveBtn: p('אשר', 'Confirm'),
+    loc3,
+
+    // ── SwapWizard ──
+    swapSteps: [p('סטודנט א׳', 'Student A'), p('סטודנט ב׳', 'Student B'), p('סיבה', 'Reason'), p('אישור', 'Confirm')],
+    swapStep0Title: p('בחר סטודנט ראשון', 'Select First Student'),
+    swapStep1Title: p('בחר סטודנט שני להחלפה', 'Select Second Student to Swap With'),
+    swapStep2Title: p('סיבת החילוף', 'Swap Reason'),
+    swapStep3Title: p('אישור חילוף', 'Confirm Swap'),
+    swapDifferentStudents: p('יש לבחור שני סטודנטים שונים', 'Please select two different students'),
+    swapReasonPlaceholder: p('הסבר מדוע מבוקש החילוף...', 'Explain why the swap is requested...'),
+    summaryStudentA: p('סטודנט א׳', 'Student A'),
+    summaryStudentB: p('סטודנט ב׳', 'Student B'),
+    submitSwapBtn: p('שלח בקשת חילוף', 'Submit Swap Request'),
+
+    // ── TransferWizard ──
+    transferStepStudent: p('בחר סטודנט', 'Select Student'),
+    transferStepScope: p('סוג מעבר', 'Transfer Type'),
+    transferStepDetails: p('פרטים', 'Details'),
+    transferStepOptions: p('אפשרויות', 'Options'),
+    transferStepConfirm: p('אישור', 'Confirm'),
+    transferStudentTitle: p('בחר סטודנט', 'Select Student'),
+    transferScopeTitle: p('סוג המעבר', 'Transfer Type'),
+    scopeSameApartment: p('בתוך אותה דירה', 'Within the same apartment'),
+    scopeSameRegion: p('לדירה אחרת באותו אזור', 'Different apartment, same region'),
+    scopeCrossRegion: p('לאזור אחר', 'To a different region'),
+    scopeCentralOnlyTitle: p('רק מנהל מרכזי יכול ליצור מעבר לאזור אחר', 'Only a central admin can create a cross-region transfer'),
+    targetRegionLabel: p('אזור יעד:', 'Target region:'),
+    currentStudentRegionFallback: p('האזור הנוכחי של הסטודנט', "the student's current region"),
+    hintSameApartment: p('מעבר לחדר/מיטה אחרת בתוך הדירה הנוכחית', 'Transfer to a different room/bed within the current apartment'),
+    hintSameRegion: p('נבחר אוטומטית - האזור הנוכחי של הסטודנט', "Chosen automatically - the student's current region"),
+    nonCentralNote: p(
+      'משתמש אזורי רשאי לבצע מעברים בתוך האזור המורשה בלבד; מעבר לאזור אחר מוגש על ידי מנהל מרכזי',
+      'A regional user may only make transfers within their authorized region; cross-region transfers are submitted by a central admin'
+    ),
+    destRegionLabel: p('אזור יעד', 'Target region'),
+    searchRegionPlaceholder: p('חיפוש אזור...', 'Search region...'),
+    noRegionsFound: p('לא נמצאו אזורים', 'No regions found'),
+    currentRegionTag: p('(האזור הנוכחי)', '(current region)'),
+    selectedLabel: p('נבחר:', 'Selected:'),
+    detailsTitle: p('פרטי הבקשה', 'Request Details'),
+    otherDescLabel: p('תיאור הבקשה', 'Request Description'),
+    otherDescPlaceholder: p('תאר את הבקשה...', 'Describe the request...'),
+    transferReasonPlaceholder: p('הסבר את סיבת הבקשה...', 'Explain the reason for the request...'),
+    optionsTitle: p('אפשרויות שיבוץ', 'Assignment Options'),
+    optionsSameApartmentHint: p('מוצגות מיטות פנויות בדירה הנוכחית בלבד', 'Only free beds in the current apartment are shown'),
+    checkOptionsBtn: p('בדיקת אפשרויות שיבוץ', 'Check assignment options'),
+    searchingEllipsis: p('מחפש...', 'Searching...'),
+    confirmSummaryTitle: p('סיכום לפני שליחה', 'Summary Before Submitting'),
+    summaryCurrentPlacement: p('שיבוץ נוכחי', 'Current Placement'),
+    summaryTransferType: p('סוג מעבר', 'Transfer Type'),
+    summaryTargetRegion: p('אזור יעד', 'Target Region'),
+    summarySelectedTarget: p('יעד נבחר', 'Selected Target'),
+    summaryDescription: p('תיאור', 'Description'),
+    singlePlace: p('מקום יחיד', 'single place'),
+    bedWord: p('מיטה', 'bed'),
+    loc3WithRegion,
+
+    // ── ActionPanel ──
+    actionsLabel: p('פעולות', 'Actions'),
+    rejectPlaceholder: p('סיבת הדחייה (אופציונלי)...', 'Rejection reason (optional)...'),
+    rejectBtn: p('דחה', 'Reject'),
+    approveRemoveBtn: p('אשר הסרה', 'Confirm Removal'),
+    approveSwapBtn: p('אשר חילוף', 'Confirm Swap'),
+    selectBedToApprove: p('בחר מיטה כדי לאשר', 'Select a bed to approve'),
+    checkingEllipsis: p('בודק...', 'Checking...'),
+    checkAvailabilityBtn: p('בדוק אפשרויות', 'Check options'),
+    recheckBtn: p('שוב', 'Recheck'),
+    assignNotePrefix: p('הסטודנט/ית ישובץ/תשובץ ל:', 'The student will be assigned to:'),
+    crossRegionFromPrefix: p('מ-', 'From '),
+    crossRegionFromSuffix: p(' אל ', ' to '),
+    targetRegionColon: p('אזור יעד: ', 'Target region: '),
+    crossRegionHint: p('מוצגות מיטות פנויות באזור היעד בלבד', 'Only free beds in the target region are shown'),
+
+    // ── DetailPane ──
+    tlCreated: p('נוצרה', 'Created'),
+    tlPendingApproval: p('ממתינה לאישור', 'Awaiting approval'),
+    tlApprovalFallback: p('אישור', 'Approval'),
+    sectionRequestRoute: p('מסלול הבקשה', 'Request Route'),
+    sectionCurrentPlacement: p('שיבוץ נוכחי', 'Current Placement'),
+    sectionRequestDetails: p('פרטי הבקשה', 'Request Details'),
+    dpTypeLabel: p('סוג הבקשה:', 'Request type:'),
+    kvTransferType: p('סוג מעבר', 'Transfer Type'),
+    transferTypeCrossRegion: p('לאזור אחר', 'To a different region'),
+    transferTypeSameApartment: p('בתוך אותה דירה', 'Within the same apartment'),
+    transferTypeSameRegionDiffApt: p('לדירה אחרת באותו אזור', 'Different apartment, same region'),
+    transferTypeFallback: p('מעבר בתוך האזור הנוכחי', 'Transfer within the current region'),
+    kvSourceRegion: p('אזור מוצא', 'Source Region'),
+    kvTargetRegion: p('אזור יעד', 'Target Region'),
+    kvFinalPlacement: p('שיבוץ סופי', 'Final Placement'),
+    kvSwapWith: p('מחליף/ה עם', 'Swapping with'),
+    kvReason: p('סיבה', 'Reason'),
+    kvDescription: p('תיאור', 'Description'),
+    kvOpenedBy: p('נפתח ע"י', 'Opened by'),
+    kvDate: p('תאריך', 'Date'),
+    kvHandledBy: p('טופל ע"י', 'Handled by'),
+    historyToggle: (n) => p(`היסטוריית שיבוצים (${n})`, `Placement history (${n})`),
+    rejectionReasonLabel: p('סיבת הדחייה:', 'Rejection reason:'),
+    dash: '—',
+
+    // Directional "back"/"forward" arrows in wizard footers and the type
+    // picker - Hebrew reads right-to-left so "forward" points left and
+    // "back" points right; English mirrors this. Kept as icon refs on the
+    // dictionary so every wizard picks the right glyph without re-deriving it.
+    BackArrow: isHe ? ArrowRight : ArrowLeft,
+    NextArrow: isHe ? ArrowLeft : ArrowRight,
+  };
+}
 
 // ── Atoms ────────────────────────────────────────────────────
 const Pill = ({ color, children, small }) => (
@@ -127,11 +370,11 @@ const PickedBar = ({ student, onClear }) => {
 
 
 // ── Add Student Wizard ────────────────────────────────────────
-const AddStudentWizard = ({ onSubmit, onCancel, submitting, error }) => {
+const AddStudentWizard = ({ onSubmit, onCancel, submitting, error, T }) => {
   const [step, setStep] = useState(0);
   const [d, setD] = useState({ student_id:'', first_name:'', last_name:'', phone:'', email:'', city:'', gender:'', religion:'', dorm_type:'', reason:'' });
   const set = (k,v) => setD(p=>({...p,[k]:v}));
-  const steps = ['פרטי סטודנט','העדפות דיור','סיבה','סיכום'];
+  const steps = T.addSteps;
 
   const canNext = () => {
     if (step===0) return d.student_id && d.first_name && d.last_name;
@@ -150,7 +393,7 @@ const AddStudentWizard = ({ onSubmit, onCancel, submitting, error }) => {
     <div className="wz-field">
       <label>{lbl}{req&&<span className="req">*</span>}</label>
       <select value={d[k]} onChange={e=>set(k,e.target.value)}>
-        <option value="">בחר...</option>
+        <option value="">{T.selectPlaceholder}</option>
         {opts.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
       </select>
     </div>
@@ -161,32 +404,32 @@ const AddStudentWizard = ({ onSubmit, onCancel, submitting, error }) => {
       <WizardBar steps={steps} current={step} colorKey="blue"/>
       <div className="wz-content">
         {step===0 && (<>
-          <h3 className="wz-title">פרטי הסטודנט החדש</h3>
-          <div className="wz-g3">{fld('student_id','תעודת זהות','text',true)}{fld('first_name','שם פרטי','text',true)}{fld('last_name','שם משפחה','text',true)}</div>
-          <div className="wz-g3">{fld('phone','טלפון','tel')}{fld('email','אימייל','email')}{fld('city','עיר')}</div>
+          <h3 className="wz-title">{T.addStep0Title}</h3>
+          <div className="wz-g3">{fld('student_id',T.labelId,'text',true)}{fld('first_name',T.labelFirstName,'text',true)}{fld('last_name',T.labelLastName,'text',true)}</div>
+          <div className="wz-g3">{fld('phone',T.labelPhone,'tel')}{fld('email',T.labelEmail,'email')}{fld('city',T.labelCity)}</div>
         </>)}
         {step===1 && (<>
-          <h3 className="wz-title">העדפות דיור</h3>
+          <h3 className="wz-title">{T.addStep1Title}</h3>
           <div className="wz-g2">
-            {sel('gender','מגדר',[{v:'male',l:'זכר'},{v:'female',l:'נקבה'}],true)}
-            {sel('religion','דת',[{v:'Jewish',l:'יהודי'},{v:'Muslims',l:'מוסלמי'},{v:'Christian',l:'נוצרי'},{v:'Druze',l:'דרוזי'}])}
-            {sel('dorm_type','סוג מעון',[{v:'couples',l:'זוגות'},{v:'single',l:'בודדים'}])}
+            {sel('gender',T.labelGender,[{v:'male',l:T.genderMale},{v:'female',l:T.genderFemale}],true)}
+            {sel('religion',T.labelReligion,[{v:'Jewish',l:T.religionJewish},{v:'Muslims',l:T.religionMuslim},{v:'Christian',l:T.religionChristian},{v:'Druze',l:T.religionDruze}])}
+            {sel('dorm_type',T.labelDormType,[{v:'couples',l:T.dormCouples},{v:'single',l:T.dormSingle}])}
           </div>
         </>)}
         {step===2 && (<>
-          <h3 className="wz-title">סיבת הבקשה</h3>
+          <h3 className="wz-title">{T.addStep2Title}</h3>
           <div className="wz-field">
-            <label>סיבה<span className="req">*</span></label>
-            <textarea rows={4} value={d.reason} onChange={e=>set('reason',e.target.value)} placeholder="הסבר מדוע הסטודנט זקוק למקום במעון..."/>
+            <label>{T.labelReason}<span className="req">*</span></label>
+            <textarea rows={4} value={d.reason} onChange={e=>set('reason',e.target.value)} placeholder={T.addReasonPlaceholder}/>
           </div>
         </>)}
         {step===3 && (<>
-          <h3 className="wz-title">סיכום לפני שליחה</h3>
+          <h3 className="wz-title">{T.addStep3Title}</h3>
           <div className="wz-summary">
-            {[['שם',`${d.first_name} ${d.last_name}`],['ת.ז',d.student_id],['טלפון',d.phone||'—'],
-              ['אימייל',d.email||'—'],['עיר',d.city||'—'],
-              ['מגדר',d.gender==='male'?'זכר':d.gender==='female'?'נקבה':'—'],
-              ['דת',d.religion||'—'],['סוג מעון',d.dorm_type||'—'],['סיבה',d.reason]
+            {[[T.summaryName,`${d.first_name} ${d.last_name}`],[T.summaryIdShort,d.student_id],[T.summaryPhone,d.phone||T.dash],
+              [T.summaryEmail,d.email||T.dash],[T.summaryCity,d.city||T.dash],
+              [T.summaryGender,d.gender==='male'?T.genderMale:d.gender==='female'?T.genderFemale:T.dash],
+              [T.summaryReligion,d.religion||T.dash],[T.summaryDormType,d.dorm_type||T.dash],[T.summaryReason,d.reason]
             ].map(([k,v])=>(
               <div key={k} className="sum-row">
                 <span className="sum-k">{k}</span><span className="sum-v">{v}</span>
@@ -198,16 +441,16 @@ const AddStudentWizard = ({ onSubmit, onCancel, submitting, error }) => {
       </div>
       <div className="wz-footer">
         <button className="wz-back" onClick={step===0?onCancel:()=>setStep(s=>s-1)}>
-          {step===0?'ביטול':<><ArrowRight size={13}/> חזרה</>}
+          {step===0?T.cancel:<><T.BackArrow size={13}/> {T.back}</>}
         </button>
         <span className="wz-prog">{step+1}/{steps.length}</span>
         {step<steps.length-1
-          ? <button className="wz-next wz-blue" disabled={!canNext()} onClick={()=>setStep(s=>s+1)}>המשך <ArrowLeft size={13}/></button>
+          ? <button className="wz-next wz-blue" disabled={!canNext()} onClick={()=>setStep(s=>s+1)}>{T.next} <T.NextArrow size={13}/></button>
           : <button className="wz-next wz-blue" disabled={submitting} onClick={()=>{
               const { reason, ...studentFields } = d;
               onSubmit({ request_type:'add_student', reason, student_data: studentFields });
             }}>
-              {submitting?<Spinner size={13}/>:<Check size={13}/>} שלח
+              {submitting?<Spinner size={13}/>:<Check size={13}/>} {T.submit}
             </button>}
       </div>
     </div>
@@ -215,11 +458,11 @@ const AddStudentWizard = ({ onSubmit, onCancel, submitting, error }) => {
 };
 
 // ── Remove Student Wizard ─────────────────────────────────────
-const RemoveWizard = ({ onSubmit, onCancel, submitting, error }) => {
+const RemoveWizard = ({ onSubmit, onCancel, submitting, error, T, language }) => {
   const [step, setStep] = useState(0);
   const [student, setStudent] = useState(null);
   const [reason, setReason] = useState('');
-  const steps = ['בחר סטודנט','שיבוץ נוכחי','סיבה','אישור'];
+  const steps = T.removeSteps;
 
   const canNext = () => {
     if (step===0) return !!student;
@@ -232,44 +475,44 @@ const RemoveWizard = ({ onSubmit, onCancel, submitting, error }) => {
       <WizardBar steps={steps} current={step} colorKey="rose"/>
       <div className="wz-content">
         {step===0 && (<>
-          <h3 className="wz-title">בחר סטודנט להסרה</h3>
-          {student ? <PickedBar student={student} onClear={()=>setStudent(null)}/> : <StudentSearch onPick={setStudent} filter={s=>s.is_assigned} placeholder="חפש סטודנט משובץ..."/>}
+          <h3 className="wz-title">{T.removeStep0Title}</h3>
+          {student ? <PickedBar student={student} onClear={()=>setStudent(null)}/> : <StudentSearch onPick={setStudent} filter={s=>s.is_assigned} placeholder={T.studentSearchPlaceholder} language={language}/>}
         </>)}
         {step===1 && student && (<>
-          <h3 className="wz-title">שיבוץ נוכחי</h3>
+          <h3 className="wz-title">{T.removeStep1Title}</h3>
           <div className="assignment-panel rose-panel">
-            <div className="ap-row"><Building2 size={13}/><span>בניין</span><strong>{student.current_building||'—'}</strong></div>
-            <div className="ap-row"><DoorOpen size={13}/><span>דירה</span><strong>{student.current_apartment||'—'}</strong></div>
-            <div className="ap-row"><Home size={13}/><span>חדר</span><strong>{student.current_room||'—'}</strong></div>
-            <div className="ap-row"><BedDouble size={13}/><span>מיטה</span><strong>{student.current_bed||'—'}</strong></div>
+            <div className="ap-row"><Building2 size={13}/><span>{T.fieldBuilding}</span><strong>{student.current_building||T.dash}</strong></div>
+            <div className="ap-row"><DoorOpen size={13}/><span>{T.fieldApartment}</span><strong>{student.current_apartment||T.dash}</strong></div>
+            <div className="ap-row"><Home size={13}/><span>{T.fieldRoom}</span><strong>{student.current_room||T.dash}</strong></div>
+            <div className="ap-row"><BedDouble size={13}/><span>{T.fieldBed}</span><strong>{student.current_bed||T.dash}</strong></div>
           </div>
-          <div className="wz-note rose-note"><AlertTriangle size={13}/> לאחר האישור, המיטה תתפנה ופרטי הסטודנט יסומנו כלא פעיל.</div>
+          <div className="wz-note rose-note"><AlertTriangle size={13}/> {T.removeNote}</div>
         </>)}
         {step===2 && (<>
-          <h3 className="wz-title">סיבת ההסרה</h3>
+          <h3 className="wz-title">{T.removeStep2Title}</h3>
           <div className="wz-field">
-            <label>סיבה<span className="req">*</span></label>
-            <textarea rows={4} value={reason} onChange={e=>setReason(e.target.value)} placeholder="הסבר מדוע הסטודנט מוסר..."/>
+            <label>{T.labelReason}<span className="req">*</span></label>
+            <textarea rows={4} value={reason} onChange={e=>setReason(e.target.value)} placeholder={T.removeReasonPlaceholder}/>
           </div>
         </>)}
         {step===3 && (<>
-          <h3 className="wz-title">אישור הסרה</h3>
+          <h3 className="wz-title">{T.removeStep3Title}</h3>
           <div className="wz-summary">
-            <div className="sum-row"><span className="sum-k">סטודנט</span><span className="sum-v">{student?.full_name}</span></div>
-            <div className="sum-row"><span className="sum-k">ת.ז</span><span className="sum-v mono">{student?.student_id}</span></div>
-            <div className="sum-row"><span className="sum-k">שיבוץ</span><span className="sum-v">בניין {student?.current_building} · דירה {student?.current_apartment} · חדר {student?.current_room}</span></div>
-            <div className="sum-row"><span className="sum-k">סיבה</span><span className="sum-v">{reason}</span></div>
+            <div className="sum-row"><span className="sum-k">{T.summaryStudent}</span><span className="sum-v">{student?.full_name}</span></div>
+            <div className="sum-row"><span className="sum-k">{T.summaryIdShort}</span><span className="sum-v mono">{student?.student_id}</span></div>
+            <div className="sum-row"><span className="sum-k">{T.summaryPlacement}</span><span className="sum-v">{T.loc3(student?.current_building, student?.current_apartment, student?.current_room)}</span></div>
+            <div className="sum-row"><span className="sum-k">{T.summaryReason}</span><span className="sum-v">{reason}</span></div>
           </div>
           {error && <div className="wz-err">{error}</div>}
         </>)}
       </div>
       <div className="wz-footer">
-        <button className="wz-back" onClick={step===0?onCancel:()=>setStep(s=>s-1)}>{step===0?'ביטול':<><ArrowRight size={13}/> חזרה</>}</button>
+        <button className="wz-back" onClick={step===0?onCancel:()=>setStep(s=>s-1)}>{step===0?T.cancel:<><T.BackArrow size={13}/> {T.back}</>}</button>
         <span className="wz-prog">{step+1}/{steps.length}</span>
         {step<steps.length-1
-          ? <button className="wz-next wz-rose" disabled={!canNext()} onClick={()=>setStep(s=>s+1)}>המשך <ArrowLeft size={13}/></button>
+          ? <button className="wz-next wz-rose" disabled={!canNext()} onClick={()=>setStep(s=>s+1)}>{T.next} <T.NextArrow size={13}/></button>
           : <button className="wz-next wz-rose" disabled={submitting} onClick={()=>onSubmit({student:student?.id,reason,request_type:'remove_student'})}>
-              {submitting?<Spinner size={13}/>:<UserMinus size={13}/>} אשר
+              {submitting?<Spinner size={13}/>:<UserMinus size={13}/>} {T.confirmRemoveBtn}
             </button>}
       </div>
     </div>
@@ -277,12 +520,12 @@ const RemoveWizard = ({ onSubmit, onCancel, submitting, error }) => {
 };
 
 // ── Swap Wizard (two students swap current beds/rooms) ────────
-const SwapWizard = ({ onSubmit, onCancel, submitting, error }) => {
+const SwapWizard = ({ onSubmit, onCancel, submitting, error, T, language }) => {
   const [step, setStep] = useState(0);
   const [studentA, setStudentA] = useState(null);
   const [studentB, setStudentB] = useState(null);
   const [reason, setReason] = useState('');
-  const steps = ['סטודנט א׳','סטודנט ב׳','סיבה','אישור'];
+  const steps = T.swapSteps;
 
   const canNext = () => {
     if (step===0) return !!studentA;
@@ -293,10 +536,10 @@ const SwapWizard = ({ onSubmit, onCancel, submitting, error }) => {
 
   const AssignmentBox = ({ student }) => (
     <div className="assignment-panel violet-panel">
-      <div className="ap-row"><Building2 size={13}/><span>בניין</span><strong>{student.current_building||'—'}</strong></div>
-      <div className="ap-row"><DoorOpen size={13}/><span>דירה</span><strong>{student.current_apartment||'—'}</strong></div>
-      <div className="ap-row"><Home size={13}/><span>חדר</span><strong>{student.current_room||'—'}</strong></div>
-      <div className="ap-row"><BedDouble size={13}/><span>מיטה</span><strong>{student.current_bed||'—'}</strong></div>
+      <div className="ap-row"><Building2 size={13}/><span>{T.fieldBuilding}</span><strong>{student.current_building||T.dash}</strong></div>
+      <div className="ap-row"><DoorOpen size={13}/><span>{T.fieldApartment}</span><strong>{student.current_apartment||T.dash}</strong></div>
+      <div className="ap-row"><Home size={13}/><span>{T.fieldRoom}</span><strong>{student.current_room||T.dash}</strong></div>
+      <div className="ap-row"><BedDouble size={13}/><span>{T.fieldBed}</span><strong>{student.current_bed||T.dash}</strong></div>
     </div>
   );
 
@@ -305,42 +548,42 @@ const SwapWizard = ({ onSubmit, onCancel, submitting, error }) => {
       <WizardBar steps={steps} current={step} colorKey="indigo"/>
       <div className="wz-content">
         {step===0 && (<>
-          <h3 className="wz-title">בחר סטודנט ראשון</h3>
-          {studentA ? <PickedBar student={studentA} onClear={()=>setStudentA(null)}/> : <StudentSearch onPick={setStudentA} filter={s=>s.is_assigned} placeholder="חפש סטודנט משובץ..."/>}
+          <h3 className="wz-title">{T.swapStep0Title}</h3>
+          {studentA ? <PickedBar student={studentA} onClear={()=>setStudentA(null)}/> : <StudentSearch onPick={setStudentA} filter={s=>s.is_assigned} placeholder={T.studentSearchPlaceholder} language={language}/>}
           {studentA && <div style={{marginTop:12}}><AssignmentBox student={studentA}/></div>}
         </>)}
         {step===1 && (<>
-          <h3 className="wz-title">בחר סטודנט שני להחלפה</h3>
-          {studentB ? <PickedBar student={studentB} onClear={()=>setStudentB(null)}/> : <StudentSearch onPick={setStudentB} filter={s=>s.is_assigned && s.id!==studentA?.id} placeholder="חפש סטודנט משובץ..."/>}
+          <h3 className="wz-title">{T.swapStep1Title}</h3>
+          {studentB ? <PickedBar student={studentB} onClear={()=>setStudentB(null)}/> : <StudentSearch onPick={setStudentB} filter={s=>s.is_assigned && s.id!==studentA?.id} placeholder={T.studentSearchPlaceholder} language={language}/>}
           {studentB && <div style={{marginTop:12}}><AssignmentBox student={studentB}/></div>}
           {studentB && studentB.id===studentA?.id && (
-            <div className="wz-note rose-note"><AlertTriangle size={13}/> יש לבחור שני סטודנטים שונים</div>
+            <div className="wz-note rose-note"><AlertTriangle size={13}/> {T.swapDifferentStudents}</div>
           )}
         </>)}
         {step===2 && (<>
-          <h3 className="wz-title">סיבת החילוף</h3>
+          <h3 className="wz-title">{T.swapStep2Title}</h3>
           <div className="wz-field">
-            <label>סיבה<span className="req">*</span></label>
-            <textarea rows={4} value={reason} onChange={e=>setReason(e.target.value)} placeholder="הסבר מדוע מבוקש החילוף..."/>
+            <label>{T.labelReason}<span className="req">*</span></label>
+            <textarea rows={4} value={reason} onChange={e=>setReason(e.target.value)} placeholder={T.swapReasonPlaceholder}/>
           </div>
         </>)}
         {step===3 && (<>
-          <h3 className="wz-title">אישור חילוף</h3>
+          <h3 className="wz-title">{T.swapStep3Title}</h3>
           <div className="wz-summary">
-            <div className="sum-row"><span className="sum-k">סטודנט א׳</span><span className="sum-v">{studentA?.full_name} · בניין {studentA?.current_building} דירה {studentA?.current_apartment} חדר {studentA?.current_room}</span></div>
-            <div className="sum-row"><span className="sum-k">סטודנט ב׳</span><span className="sum-v">{studentB?.full_name} · בניין {studentB?.current_building} דירה {studentB?.current_apartment} חדר {studentB?.current_room}</span></div>
-            <div className="sum-row"><span className="sum-k">סיבה</span><span className="sum-v">{reason}</span></div>
+            <div className="sum-row"><span className="sum-k">{T.summaryStudentA}</span><span className="sum-v">{studentA?.full_name} · {T.loc3(studentA?.current_building, studentA?.current_apartment, studentA?.current_room)}</span></div>
+            <div className="sum-row"><span className="sum-k">{T.summaryStudentB}</span><span className="sum-v">{studentB?.full_name} · {T.loc3(studentB?.current_building, studentB?.current_apartment, studentB?.current_room)}</span></div>
+            <div className="sum-row"><span className="sum-k">{T.summaryReason}</span><span className="sum-v">{reason}</span></div>
           </div>
           {error && <div className="wz-err">{error}</div>}
         </>)}
       </div>
       <div className="wz-footer">
-        <button className="wz-back" onClick={step===0?onCancel:()=>setStep(s=>s-1)}>{step===0?'ביטול':<><ArrowRight size={13}/> חזרה</>}</button>
+        <button className="wz-back" onClick={step===0?onCancel:()=>setStep(s=>s-1)}>{step===0?T.cancel:<><T.BackArrow size={13}/> {T.back}</>}</button>
         <span className="wz-prog">{step+1}/{steps.length}</span>
         {step<steps.length-1
-          ? <button className="wz-next wz-indigo" disabled={!canNext()} onClick={()=>setStep(s=>s+1)}>המשך <ArrowLeft size={13}/></button>
+          ? <button className="wz-next wz-indigo" disabled={!canNext()} onClick={()=>setStep(s=>s+1)}>{T.next} <T.NextArrow size={13}/></button>
           : <button className="wz-next wz-indigo" disabled={submitting} onClick={()=>onSubmit({student:studentA?.id,swap_with_student:studentB?.id,reason,request_type:'swap'})}>
-              {submitting?<Spinner size={13}/>:<RefreshCw size={13}/>} שלח בקשת חילוף
+              {submitting?<Spinner size={13}/>:<RefreshCw size={13}/>} {T.submitSwapBtn}
             </button>}
       </div>
     </div>
@@ -349,7 +592,8 @@ const SwapWizard = ({ onSubmit, onCancel, submitting, error }) => {
 
 // ── Transfer Wizard (room / apartment / other) ────────────────
 const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions = [],
-  feasData, onCheckFeas, checkingFeas, onClearFeas, onLoadMoreFeas, loadingMoreFeas, loadMoreFeasError }) => {
+  feasData, onCheckFeas, checkingFeas, onClearFeas, onLoadMoreFeas, loadingMoreFeas, loadMoreFeasError,
+  T, language }) => {
   const { isCentralAdmin, user } = useAuth();
   const central = isCentralAdmin();
   const [step, setStep] = useState(0);
@@ -379,8 +623,8 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions =
     ? ['student','scope','details','options','confirm']
     : ['student','details','confirm'];
   const stepLabels = {
-    student:'בחר סטודנט', scope:'סוג מעבר', details:'פרטים',
-    options:'אפשרויות', confirm:'אישור',
+    student:T.transferStepStudent, scope:T.transferStepScope, details:T.transferStepDetails,
+    options:T.transferStepOptions, confirm:T.transferStepConfirm,
   };
   const steps = stepKeys.map(k=>stepLabels[k]);
   const stepKey = stepKeys[step];
@@ -405,12 +649,12 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions =
   const visibleRegions = regions.filter(r =>
     !regionQuery.trim() || (r.name||'').toLowerCase().includes(regionQuery.trim().toLowerCase()));
   const destRegionNames = regions.filter(r=>destRegions.includes(r.id)).map(r=>r.name);
-  const currentRegionLabel = student?.region_name || 'האזור הנוכחי של הסטודנט';
+  const currentRegionLabel = student?.region_name || T.currentStudentRegionFallback;
   const searchedRegionNames = (feasData?.search_regions||[]).map(r=>r.name);
   const scopeLabel = {
-    same_apartment:'בתוך אותה דירה',
-    same_region:'לדירה אחרת באותו אזור',
-    cross_region:'לאזור אחר',
+    same_apartment:T.scopeSameApartment,
+    same_region:T.scopeSameRegion,
+    cross_region:T.scopeCrossRegion,
   }[scope] || '';
 
   return (
@@ -418,117 +662,117 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions =
       <WizardBar steps={steps} current={step} colorKey={colorKey}/>
       <div className="wz-content">
         {stepKey==='student' && (<>
-          <h3 className="wz-title">בחר סטודנט</h3>
+          <h3 className="wz-title">{T.transferStudentTitle}</h3>
           {student ? <PickedBar student={student} onClear={()=>setStudent(null)}/> : (
             <StudentSearch
               onPick={(s)=>{
                 setStudent(s);
                 // The slim search payload has no region_name - fetch the full
-                // record so the read-only "אזור יעד" label can show the real
-                // current region name on the scope step.
+                // record so the read-only target-region label can show the
+                // real current region name on the scope step.
                 if (!s.region_name && studentsAPI.getById) {
                   studentsAPI.getById(s.id)
                     .then(full => setStudent(prev => (prev && prev.id===s.id ? { ...prev, ...full } : prev)))
                     .catch(()=>{});
                 }
               }}
-              filter={s=>s.is_assigned} placeholder="חפש סטודנט משובץ..."/>
+              filter={s=>s.is_assigned} placeholder={T.studentSearchPlaceholder} language={language}/>
           )}
           {student && (
             <div className="assignment-panel violet-panel" style={{marginTop:12}}>
-              {student.region_name && <div className="ap-row"><MapPin size={13}/><span>אזור</span><strong>{student.region_name}</strong></div>}
-              <div className="ap-row"><Building2 size={13}/><span>בניין</span><strong>{student.current_building||'—'}</strong></div>
-              <div className="ap-row"><DoorOpen size={13}/><span>דירה</span><strong>{student.current_apartment||'—'}</strong></div>
-              <div className="ap-row"><Home size={13}/><span>חדר</span><strong>{student.current_room||'—'}</strong></div>
+              {student.region_name && <div className="ap-row"><MapPin size={13}/><span>{T.fieldRegion}</span><strong>{student.region_name}</strong></div>}
+              <div className="ap-row"><Building2 size={13}/><span>{T.fieldBuilding}</span><strong>{student.current_building||T.dash}</strong></div>
+              <div className="ap-row"><DoorOpen size={13}/><span>{T.fieldApartment}</span><strong>{student.current_apartment||T.dash}</strong></div>
+              <div className="ap-row"><Home size={13}/><span>{T.fieldRoom}</span><strong>{student.current_room||T.dash}</strong></div>
             </div>
           )}
         </>)}
 
         {stepKey==='scope' && (<>
-          <h3 className="wz-title">סוג המעבר</h3>
+          <h3 className="wz-title">{T.transferScopeTitle}</h3>
           <div className="pref-group">
             {[
-              {v:'same_apartment', l:'בתוך אותה דירה'},
-              {v:'same_region',    l:'לדירה אחרת באותו אזור'},
-              {v:'cross_region',   l:'לאזור אחר', centralOnly:true},
+              {v:'same_apartment', l:T.scopeSameApartment},
+              {v:'same_region',    l:T.scopeSameRegion},
+              {v:'cross_region',   l:T.scopeCrossRegion, centralOnly:true},
             ].map(o=>(
               <button key={o.v} type="button"
                 className={`pref-btn${scope===o.v?' pref-active':''}`}
                 disabled={o.centralOnly && !central}
-                title={o.centralOnly && !central ? 'רק מנהל מרכזי יכול ליצור מעבר לאזור אחר' : undefined}
+                title={o.centralOnly && !central ? T.scopeCentralOnlyTitle : undefined}
                 onClick={()=>setScope(o.v)}>{o.l}</button>
             ))}
           </div>
           {(scope==='same_apartment' || scope==='same_region') && (
             <div className="scope-region-note">
-              <MapPin size={13}/> אזור יעד: <strong>{central ? currentRegionLabel : (user?.region_name || user?.regionName || currentRegionLabel)}</strong>
+              <MapPin size={13}/> {T.targetRegionLabel} <strong>{central ? currentRegionLabel : (user?.region_name || user?.regionName || currentRegionLabel)}</strong>
               <span className="scope-region-hint">
                 {scope==='same_apartment'
-                  ? 'מעבר לחדר/מיטה אחרת בתוך הדירה הנוכחית'
-                  : 'נבחר אוטומטית - האזור הנוכחי של הסטודנט'}
+                  ? T.hintSameApartment
+                  : T.hintSameRegion}
               </span>
             </div>
           )}
           {!central && (
             <div className="scope-region-note">
               <MapPin size={13}/>
-              <span className="scope-region-hint">משתמש אזורי רשאי לבצע מעברים בתוך האזור המורשה בלבד; מעבר לאזור אחר מוגש על ידי מנהל מרכזי</span>
+              <span className="scope-region-hint">{T.nonCentralNote}</span>
             </div>
           )}
           {scope==='cross_region' && central && (
             <div className="region-ms">
-              <label className="region-ms-label">אזור יעד<span className="req">*</span></label>
+              <label className="region-ms-label">{T.destRegionLabel}<span className="req">*</span></label>
               <div className="region-ms-search">
                 <Search size={12}/>
-                <input value={regionQuery} onChange={e=>setRegionQuery(e.target.value)} placeholder="חיפוש אזור..."/>
+                <input value={regionQuery} onChange={e=>setRegionQuery(e.target.value)} placeholder={T.searchRegionPlaceholder}/>
               </div>
               <div className="region-ms-list">
                 {visibleRegions.map(r=>(
                   <label key={r.id} className={`region-ms-row${destRegions.includes(r.id)?' region-ms-on':''}`}>
                     <input type="radio" name="dest-region" checked={destRegions.includes(r.id)} onChange={()=>setDestRegions([r.id])}/>
                     <span>{r.name}</span>
-                    {student?.region_name===r.name && <span className="region-ms-cur">(האזור הנוכחי)</span>}
+                    {student?.region_name===r.name && <span className="region-ms-cur">{T.currentRegionTag}</span>}
                   </label>
                 ))}
-                {visibleRegions.length===0 && <div className="region-ms-empty">לא נמצאו אזורים</div>}
+                {visibleRegions.length===0 && <div className="region-ms-empty">{T.noRegionsFound}</div>}
               </div>
               {destRegions.length>0 && (
-                <div className="region-ms-picked">נבחר: <strong>{destRegionNames.join(', ')}</strong></div>
+                <div className="region-ms-picked">{T.selectedLabel} <strong>{destRegionNames.join(', ')}</strong></div>
               )}
             </div>
           )}
         </>)}
 
         {stepKey==='details' && (<>
-          <h3 className="wz-title">פרטי הבקשה</h3>
+          <h3 className="wz-title">{T.detailsTitle}</h3>
           {type==='other' && (
             <div className="wz-field">
-              <label>תיאור הבקשה</label>
-              <input value={otherDesc} onChange={e=>setOtherDesc(e.target.value)} placeholder="תאר את הבקשה..."/>
+              <label>{T.otherDescLabel}</label>
+              <input value={otherDesc} onChange={e=>setOtherDesc(e.target.value)} placeholder={T.otherDescPlaceholder}/>
             </div>
           )}
           <div className="wz-field">
-            <label>סיבה<span className="req">*</span></label>
-            <textarea rows={3} value={reason} onChange={e=>setReason(e.target.value)} placeholder="הסבר את סיבת הבקשה..."/>
+            <label>{T.labelReason}<span className="req">*</span></label>
+            <textarea rows={3} value={reason} onChange={e=>setReason(e.target.value)} placeholder={T.transferReasonPlaceholder}/>
           </div>
         </>)}
 
         {stepKey==='options' && (<>
-          <h3 className="wz-title">אפשרויות שיבוץ</h3>
+          <h3 className="wz-title">{T.optionsTitle}</h3>
           <div className="scope-region-note">
             <MapPin size={13}/>
             {scope==='cross_region'
-              ? <>אזור יעד: <strong>{(searchedRegionNames.length?searchedRegionNames:destRegionNames).join(', ')}</strong></>
-              : <>אזור יעד: <strong>{searchedRegionNames[0] || currentRegionLabel}</strong></>}
-            {scope==='same_apartment' && <span className="scope-region-hint">מוצגות מיטות פנויות בדירה הנוכחית בלבד</span>}
+              ? <>{T.targetRegionColon}<strong>{(searchedRegionNames.length?searchedRegionNames:destRegionNames).join(', ')}</strong></>
+              : <>{T.targetRegionColon}<strong>{searchedRegionNames[0] || currentRegionLabel}</strong></>}
+            {scope==='same_apartment' && <span className="scope-region-hint">{T.optionsSameApartmentHint}</span>}
           </div>
           {!feasData && !checkingFeas && (
             <button className="check-feas-btn"
               onClick={()=>onCheckFeas(null,student?.id,effReqType,effSameApt,effScope,scope==='cross_region'?destRegions:undefined)}>
-              <Activity size={14}/> בדיקת אפשרויות שיבוץ
+              <Activity size={14}/> {T.checkOptionsBtn}
             </button>
           )}
-          {checkingFeas && <div className="checking-state"><Spinner/> מחפש...</div>}
+          {checkingFeas && <div className="checking-state"><Spinner/> {T.searchingEllipsis}</div>}
           {feasData && (
             <BedMatchPicker
               buildings={feasData.buildings||[]}
@@ -546,31 +790,31 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions =
               loadMoreError={loadMoreFeasError}
               selectedBedId={selOpt?.bed_id}
               onSelectBed={setSelOpt}
-              language="he"
+              language={language}
               scopeContext={scope}
             />
           )}
         </>)}
 
         {stepKey==='confirm' && (<>
-          <h3 className="wz-title">סיכום לפני שליחה</h3>
+          <h3 className="wz-title">{T.confirmSummaryTitle}</h3>
           <div className="wz-summary">
-            <div className="sum-row"><span className="sum-k">סטודנט</span><span className="sum-v">{student?.full_name}</span></div>
-            <div className="sum-row"><span className="sum-k">שיבוץ נוכחי</span><span className="sum-v">{student?.region_name ? `${student.region_name} · ` : ''}בניין {student?.current_building} · דירה {student?.current_apartment} · חדר {student?.current_room}</span></div>
-            {isTransfer && <div className="sum-row"><span className="sum-k">סוג מעבר</span><span className="sum-v">{scopeLabel}</span></div>}
-            {isTransfer && scope==='cross_region' && <div className="sum-row"><span className="sum-k">אזור יעד</span><span className="sum-v">{destRegionNames.join(', ')}</span></div>}
-            {isTransfer&&selOpt && <div className="sum-row"><span className="sum-k">יעד נבחר</span><span className="sum-v">{selOpt.region_name ? `${selOpt.region_name} · ` : ''}בניין {selOpt.building} · דירה {selOpt.apartment} · חדר {selOpt.room} · {selOpt.single_bed_room ? 'מקום יחיד' : `מיטה ${selOpt.bed_display || selOpt.bed_label}`}</span></div>}
-            {reason && <div className="sum-row"><span className="sum-k">סיבה</span><span className="sum-v">{reason}</span></div>}
-            {otherDesc && <div className="sum-row"><span className="sum-k">תיאור</span><span className="sum-v">{otherDesc}</span></div>}
+            <div className="sum-row"><span className="sum-k">{T.summaryStudent}</span><span className="sum-v">{student?.full_name}</span></div>
+            <div className="sum-row"><span className="sum-k">{T.summaryCurrentPlacement}</span><span className="sum-v">{T.loc3WithRegion(student?.region_name, student?.current_building, student?.current_apartment, student?.current_room)}</span></div>
+            {isTransfer && <div className="sum-row"><span className="sum-k">{T.summaryTransferType}</span><span className="sum-v">{scopeLabel}</span></div>}
+            {isTransfer && scope==='cross_region' && <div className="sum-row"><span className="sum-k">{T.summaryTargetRegion}</span><span className="sum-v">{destRegionNames.join(', ')}</span></div>}
+            {isTransfer&&selOpt && <div className="sum-row"><span className="sum-k">{T.summarySelectedTarget}</span><span className="sum-v">{T.loc3WithRegion(selOpt.region_name, selOpt.building, selOpt.apartment, selOpt.room)} · {selOpt.single_bed_room ? T.singlePlace : `${T.bedWord} ${selOpt.bed_display || selOpt.bed_label}`}</span></div>}
+            {reason && <div className="sum-row"><span className="sum-k">{T.summaryReason}</span><span className="sum-v">{reason}</span></div>}
+            {otherDesc && <div className="sum-row"><span className="sum-k">{T.summaryDescription}</span><span className="sum-v">{otherDesc}</span></div>}
           </div>
           {error && <div className="wz-err">{error}</div>}
         </>)}
       </div>
       <div className="wz-footer">
-        <button className="wz-back" onClick={step===0?onCancel:()=>setStep(s=>s-1)}>{step===0?'ביטול':<><ArrowRight size={13}/> חזרה</>}</button>
+        <button className="wz-back" onClick={step===0?onCancel:()=>setStep(s=>s-1)}>{step===0?T.cancel:<><T.BackArrow size={13}/> {T.back}</>}</button>
         <span className="wz-prog">{step+1}/{steps.length}</span>
         {step<lastStep
-          ? <button className={`wz-next wz-${colorKey}`} disabled={!canNext()} onClick={()=>setStep(s=>s+1)}>המשך <ArrowLeft size={13}/></button>
+          ? <button className={`wz-next wz-${colorKey}`} disabled={!canNext()} onClick={()=>setStep(s=>s+1)}>{T.next} <T.NextArrow size={13}/></button>
           : <button className={`wz-next wz-${colorKey}`} disabled={submitting}
               onClick={()=>{
                 const payload = {
@@ -590,7 +834,7 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions =
                 };
                 onSubmit(payload);
               }}>
-              {submitting?<Spinner size={13}/>:<Check size={13}/>} שלח
+              {submitting?<Spinner size={13}/>:<Check size={13}/>} {T.submit}
             </button>}
       </div>
     </div>
@@ -598,7 +842,7 @@ const TransferWizard = ({ type, onSubmit, onCancel, submitting, error, regions =
 };
 
 // ── New Request Modal ─────────────────────────────────────────
-const NewRequestModal = ({ onClose, onSuccess, regions = [] }) => {
+const NewRequestModal = ({ onClose, onSuccess, regions = [], T, language }) => {
   const [type, setType] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -613,17 +857,17 @@ const NewRequestModal = ({ onClose, onSuccess, regions = [] }) => {
   const feasAbortRef = useRef(null);
 
   const typeCards = [
-    { v:'add_student',    Icon:UserPlus,  color:'blue',   title:'הוספת סטודנט', sub:'רישום סטודנט חדש למעונות' },
-    { v:'remove_student', Icon:UserMinus, color:'rose',   title:'הסרה ממעונות', sub:'הסרת סטודנט קיים' },
-    { v:'transfer',       Icon:ArrowRightLeft, color:'violet', title:'בקשת מעבר', sub:'חדר אחר, דירה אחרת או אזור אחר' },
-    { v:'swap',           Icon:RefreshCw, color:'indigo', title:'חילוף בין סטודנטים', sub:'שני סטודנטים מחליפים מקום' },
-    { v:'other',          Icon:FileText,  color:'amber',  title:'בקשה אחרת',   sub:'הארכת שהייה ועוד' },
+    { v:'add_student',    Icon:UserPlus,  color:'blue',   title:T.typeAddStudentTitle, sub:T.typeAddStudentSub },
+    { v:'remove_student', Icon:UserMinus, color:'rose',   title:T.typeRemoveStudentTitle, sub:T.typeRemoveStudentSub },
+    { v:'transfer',       Icon:ArrowRightLeft, color:'violet', title:T.typeTransferTitle, sub:T.typeTransferSub },
+    { v:'swap',           Icon:RefreshCw, color:'indigo', title:T.typeSwapTitle, sub:T.typeSwapSub },
+    { v:'other',          Icon:FileText,  color:'amber',  title:T.typeOtherTitle,   sub:T.typeOtherSub },
   ];
 
   const handleSubmit = async (payload) => {
     setError(''); setSubmitting(true);
     try { await requestsAPI.create(payload); onSuccess(); onClose(); }
-    catch (err) { setError(err.message||'שגיאה בשליחה'); }
+    catch (err) { setError(err.message||T.errSubmit); }
     finally { setSubmitting(false); }
   };
 
@@ -663,7 +907,7 @@ const NewRequestModal = ({ onClose, onSuccess, regions = [] }) => {
       setFeasData((prev) => ({ ...d, buildings: mergeBuildings(prev?.buildings, d.buildings) }));
     } catch (err) {
       // keep existing results visible - a failed "load more" isn't fatal.
-      setLoadMoreFeasError(err.message || 'שגיאה');
+      setLoadMoreFeasError(err.message || T.errGeneric);
     } finally { setLoadingMoreFeas(false); }
   };
 
@@ -672,8 +916,8 @@ const NewRequestModal = ({ onClose, onSuccess, regions = [] }) => {
       <div className="modal-box" onClick={e=>e.stopPropagation()}>
         <div className="modal-head">
           <div className="mh-left">
-            {type && <button className="back-type" onClick={()=>setType(null)}><ArrowRight size={13}/> סוגי בקשות</button>}
-            <h2>{type?'בקשה חדשה':'בחר סוג בקשה'}</h2>
+            {type && <button className="back-type" onClick={()=>setType(null)}><T.BackArrow size={13}/> {T.modalBackToTypes}</button>}
+            <h2>{type?T.modalNewRequest:T.modalChooseType}</h2>
           </div>
           <button className="modal-close" onClick={onClose}><X size={17}/></button>
         </div>
@@ -689,22 +933,22 @@ const NewRequestModal = ({ onClose, onSuccess, regions = [] }) => {
                     <span className="tp-title">{tc.title}</span>
                     <span className="tp-sub">{tc.sub}</span>
                   </div>
-                  <ArrowLeft size={13} className="tp-arrow"/>
+                  <T.NextArrow size={13} className="tp-arrow"/>
                 </button>
               );
             })}
           </div>
         )}
-        {type==='add_student'    && <AddStudentWizard onSubmit={handleSubmit} onCancel={onClose} submitting={submitting} error={error}/>}
-        {type==='remove_student' && <RemoveWizard     onSubmit={handleSubmit} onCancel={onClose} submitting={submitting} error={error}/>}
-        {type==='swap'           && <SwapWizard       onSubmit={handleSubmit} onCancel={onClose} submitting={submitting} error={error}/>}
+        {type==='add_student'    && <AddStudentWizard onSubmit={handleSubmit} onCancel={onClose} submitting={submitting} error={error} T={T}/>}
+        {type==='remove_student' && <RemoveWizard     onSubmit={handleSubmit} onCancel={onClose} submitting={submitting} error={error} T={T} language={language}/>}
+        {type==='swap'           && <SwapWizard       onSubmit={handleSubmit} onCancel={onClose} submitting={submitting} error={error} T={T} language={language}/>}
         {(type==='transfer'||type==='other') && (
           <TransferWizard type={type} onSubmit={handleSubmit} onCancel={onClose}
             submitting={submitting} error={error} regions={regions}
             feasData={feasData} onCheckFeas={handleCheckFeas} checkingFeas={checkingFeas}
             onClearFeas={()=>setFeasData(null)}
             onLoadMoreFeas={handleLoadMoreFeas} loadingMoreFeas={loadingMoreFeas}
-            loadMoreFeasError={loadMoreFeasError}/>
+            loadMoreFeasError={loadMoreFeasError} T={T} language={language}/>
         )}
       </div>
     </div>
@@ -716,7 +960,7 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
   feasData, checkingFeas, onCheckFeas, onLoadMoreFeas, loadingMoreFeas, loadMoreFeasError,
   rawBedOptions, loadingBeds, bedsError, onLoadMoreBedOptions, loadingMoreBeds, loadMoreBedsError,
   roomId, onSetRoom,
-  selFeasOpt, onSelFeasOpt }) => {
+  selFeasOpt, onSelFeasOpt, T, language }) => {
 
   const [rejectText, setRejectText] = useState('');
   const [showReject, setShowReject] = useState(false);
@@ -729,30 +973,30 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
 
   return (
     <div className="action-panel">
-      <span className="ap-label">פעולות</span>
+      <span className="ap-label">{T.actionsLabel}</span>
       {showReject ? (
         <div className="reject-form">
-          <textarea rows={2} value={rejectText} onChange={e=>setRejectText(e.target.value)} placeholder="סיבת הדחייה (אופציונלי)..."/>
+          <textarea rows={2} value={rejectText} onChange={e=>setRejectText(e.target.value)} placeholder={T.rejectPlaceholder}/>
           <div className="rf-row">
-            <button className="btn-ghost-sm" onClick={()=>setShowReject(false)}>ביטול</button>
+            <button className="btn-ghost-sm" onClick={()=>setShowReject(false)}>{T.cancel}</button>
             <button className="btn-rej-sm" onClick={()=>onReject(request.id,rejectText)} disabled={acting}>
-              {acting?<Spinner size={12}/>:<XCircle size={12}/>} דחה
+              {acting?<Spinner size={12}/>:<XCircle size={12}/>} {T.rejectBtn}
             </button>
           </div>
         </div>
       ) : isRem ? (
         <div className="act-row">
           <button className="btn-approve-danger" onClick={()=>onApprove(request.id)} disabled={acting}>
-            {acting?<Spinner size={12}/>:<UserMinus size={12}/>} אשר הסרה
+            {acting?<Spinner size={12}/>:<UserMinus size={12}/>} {T.approveRemoveBtn}
           </button>
-          <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> דחה</button>
+          <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> {T.rejectBtn}</button>
         </div>
       ) : isSwap ? (
         <div className="act-row">
           <button className="btn-approve" onClick={()=>onApprove(request.id)} disabled={acting}>
-            {acting?<Spinner size={12}/>:<RefreshCw size={12}/>} אשר חילוף
+            {acting?<Spinner size={12}/>:<RefreshCw size={12}/>} {T.approveSwapBtn}
           </button>
-          <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> דחה</button>
+          <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> {T.rejectBtn}</button>
         </div>
       ) : isAdd ? (
         <>
@@ -773,28 +1017,28 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
             loadMoreError={loadMoreBedsError}
             selectedBedId={roomId?.bed_id}
             onSelectBed={(bed)=>onSetRoom(bed)}
-            language="he"
+            language={language}
           />
           {roomId && (
             <div className="assign-confirm-note">
               <CheckCircle size={13}/>
-              הסטודנט/ית ישובץ/תשובץ ל: בניין {roomId.building} · דירה {roomId.apartment} · חדר {roomId.room}
-              {roomId.single_bed_room ? ' · מקום יחיד' : ` · מיטה ${roomId.bed_display || roomId.bed_label}`}
+              {T.assignNotePrefix} {T.loc3(roomId.building, roomId.apartment, roomId.room)}
+              {roomId.single_bed_room ? ` · ${T.singlePlace}` : ` · ${T.bedWord} ${roomId.bed_display || roomId.bed_label}`}
             </div>
           )}
           <div className="act-row" style={{marginTop:8}}>
             <button className="btn-approve" onClick={()=>onApprove(request.id,roomId?.room_id,roomId?.bed_id)} disabled={acting||!roomId||!roomId.bed_id}>
-              {acting?<Spinner size={12}/>:<Check size={12}/>} {roomId ? assignActionLabel(roomId) : 'בחר מיטה כדי לאשר'}
+              {acting?<Spinner size={12}/>:<Check size={12}/>} {roomId ? assignActionLabel(roomId, language) : T.selectBedToApprove}
             </button>
-            <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> דחה</button>
+            <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> {T.rejectBtn}</button>
           </div>
         </>
       ) : !hasFeas ? (
         <div className="act-row">
           <button className="btn-check" onClick={()=>onCheckFeas(request.id)} disabled={checkingFeas}>
-            {checkingFeas?<><Spinner size={12}/> בודק...</>:<><Activity size={12}/> בדוק אפשרויות</>}
+            {checkingFeas?<><Spinner size={12}/> {T.checkingEllipsis}</>:<><Activity size={12}/> {T.checkAvailabilityBtn}</>}
           </button>
-          <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> דחה</button>
+          <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> {T.rejectBtn}</button>
         </div>
       ) : (
         <>
@@ -803,11 +1047,13 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
               <MapPin size={13}/>
               {request.transfer_scope==='cross_region'
                 ? <>
-                    {request.source_region_name ? <>מ-<strong>{request.source_region_name}</strong> אל </> : 'אזור יעד: '}
+                    {request.source_region_name
+                      ? <>{T.crossRegionFromPrefix}<strong>{request.source_region_name}</strong>{T.crossRegionFromSuffix}</>
+                      : T.targetRegionColon}
                     <strong>{feasData.search_regions.map(r=>r.name).join(', ')}</strong>
-                    <span className="scope-region-hint">מוצגות מיטות פנויות באזור היעד בלבד</span>
+                    <span className="scope-region-hint">{T.crossRegionHint}</span>
                   </>
-                : <>אזור יעד: <strong>{feasData.search_regions.map(r=>r.name).join(', ')}</strong></>}
+                : <>{T.targetRegionColon}<strong>{feasData.search_regions.map(r=>r.name).join(', ')}</strong></>}
             </div>
           )}
           <BedMatchPicker
@@ -826,7 +1072,7 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
             loadMoreError={loadMoreFeasError}
             selectedBedId={selFeasOpt?.bed_id}
             onSelectBed={onSelFeasOpt}
-            language="he"
+            language={language}
             scopeContext={
               request.transfer_scope==='cross_region' ? 'cross_region'
               : request.same_apartment===true ? 'same_apartment'
@@ -836,8 +1082,8 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
           {selFeasOpt && (
             <div className="assign-confirm-note">
               <CheckCircle size={13}/>
-              הסטודנט/ית ישובץ/תשובץ ל: בניין {selFeasOpt.building} · דירה {selFeasOpt.apartment} · חדר {selFeasOpt.room}
-              {selFeasOpt.single_bed_room ? ' · מקום יחיד' : ` · מיטה ${selFeasOpt.bed_display || selFeasOpt.bed_label}`}
+              {T.assignNotePrefix} {T.loc3(selFeasOpt.building, selFeasOpt.apartment, selFeasOpt.room)}
+              {selFeasOpt.single_bed_room ? ` · ${T.singlePlace}` : ` · ${T.bedWord} ${selFeasOpt.bed_display || selFeasOpt.bed_label}`}
               {selFeasOpt.region_name ? ` (${selFeasOpt.region_name})` : ''}
             </div>
           )}
@@ -845,11 +1091,11 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
             {feasData.feasible===true && (
               <button className="btn-approve" disabled={acting||!selFeasOpt||!selFeasOpt.bed_id}
                 onClick={()=>onApprove(request.id,selFeasOpt?.room_id,selFeasOpt?.bed_id)}>
-                {acting?<Spinner size={12}/>:<Check size={12}/>} {selFeasOpt ? assignActionLabel(selFeasOpt) : 'בחר מיטה כדי לאשר'}
+                {acting?<Spinner size={12}/>:<Check size={12}/>} {selFeasOpt ? assignActionLabel(selFeasOpt, language) : T.selectBedToApprove}
               </button>
             )}
-            <button className="btn-recheck" onClick={()=>onCheckFeas(request.id)} disabled={checkingFeas}><RefreshCw size={12}/> שוב</button>
-            <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> דחה</button>
+            <button className="btn-recheck" onClick={()=>onCheckFeas(request.id)} disabled={checkingFeas}><RefreshCw size={12}/> {T.recheckBtn}</button>
+            <button className="btn-rej-outline" onClick={()=>setShowReject(true)}><XCircle size={12}/> {T.rejectBtn}</button>
           </div>
         </>
       )}
@@ -858,7 +1104,7 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
 };
 
 // ── Detail Pane ───────────────────────────────────────────────
-const DetailPane = ({ request, onApprove, onReject, acting, language,
+const DetailPane = ({ request, onApprove, onReject, acting, language, T,
   feasData, checkingFeas, onCheckFeas, onLoadMoreFeas, loadingMoreFeas, loadMoreFeasError,
   rawBedOptions, loadingBeds, bedsError, onLoadMoreBedOptions, loadingMoreBeds, loadMoreBedsError,
   roomId, onSetRoom,
@@ -871,9 +1117,10 @@ const DetailPane = ({ request, onApprove, onReject, acting, language,
   const StatIcon  = statusCfg.Icon;
 
   const tl = [
-    { label:'נוצרה',             sub:`${fmtDate(request.created_at)} · ${request.requested_by_name||'—'}`, done:true },
-    { label:'ממתינה לאישור',      sub:'',  done:request.status!=='pending', active:request.status==='pending' },
-    { label:request.status==='approved'?'אושרה':request.status==='rejected'?'נדחתה':'אישור',
+    { label:T.tlCreated,             sub:`${fmtDate(request.created_at)} · ${request.requested_by_name||T.dash}`, done:true },
+    { label:T.tlPendingApproval,      sub:'',  done:request.status!=='pending', active:request.status==='pending' },
+    { label:request.status==='approved'?(language==='he'?STATUS_CFG.approved.labelHe:STATUS_CFG.approved.labelEn)
+      :request.status==='rejected'?(language==='he'?STATUS_CFG.rejected.labelHe:STATUS_CFG.rejected.labelEn):T.tlApprovalFallback,
       sub:request.reviewed_at?`${fmtDate(request.reviewed_at)} · ${request.reviewed_by_name||''}` : '',
       done:request.status==='approved'||request.status==='rejected' },
   ];
@@ -897,7 +1144,7 @@ const DetailPane = ({ request, onApprove, onReject, acting, language,
           </div>
 <div className={`dp-type-tag dp-type-${typeCfg.color}`}>
   <TypeIcon size={12}/>
-  <span className="dp-type-label">סוג הבקשה:</span>
+  <span className="dp-type-label">{T.dpTypeLabel}</span>
   <span>{language === 'he' ? typeCfg.labelHe : typeCfg.labelEn}</span>
 </div>
         </div>
@@ -907,23 +1154,23 @@ const DetailPane = ({ request, onApprove, onReject, acting, language,
       <div className="dp-body">
       {/* Timeline */}
         <section>
-          <div className="sec-title">מסלול הבקשה</div>
+          <div className="sec-title">{T.sectionRequestRoute}</div>
           <Timeline events={tl}/>
         </section>
 
         {/* Current placement */}
         {request.current_building && (
           <section>
-            <div className="sec-title">שיבוץ נוכחי</div>
+            <div className="sec-title">{T.sectionCurrentPlacement}</div>
             <div className="assign-rows">
               {request.current_region && (
-                <div className="assign-row"><MapPin size={18}/><span className="assign-row-label">אזור</span><span className="assign-row-val">{request.current_region}</span></div>
+                <div className="assign-row"><MapPin size={18}/><span className="assign-row-label">{T.fieldRegion}</span><span className="assign-row-val">{request.current_region}</span></div>
               )}
-              <div className="assign-row"><Building2 size={18}/><span className="assign-row-label">בניין</span><span className="assign-row-val">{request.current_building}</span></div>
-              <div className="assign-row"><DoorOpen  size={18}/><span className="assign-row-label">דירה</span><span className="assign-row-val">{request.current_apartment}</span></div>
-              <div className="assign-row"><Home      size={18}/><span className="assign-row-label">חדר</span><span className="assign-row-val">{request.current_room}</span></div>
+              <div className="assign-row"><Building2 size={18}/><span className="assign-row-label">{T.fieldBuilding}</span><span className="assign-row-val">{request.current_building}</span></div>
+              <div className="assign-row"><DoorOpen  size={18}/><span className="assign-row-label">{T.fieldApartment}</span><span className="assign-row-val">{request.current_apartment}</span></div>
+              <div className="assign-row"><Home      size={18}/><span className="assign-row-label">{T.fieldRoom}</span><span className="assign-row-val">{request.current_room}</span></div>
               {request.current_bed && (
-                <div className="assign-row"><BedDouble size={18}/><span className="assign-row-label">מיטה</span><span className="assign-row-val">{request.current_bed}</span></div>
+                <div className="assign-row"><BedDouble size={18}/><span className="assign-row-label">{T.fieldBed}</span><span className="assign-row-val">{request.current_bed}</span></div>
               )}
             </div>
           </section>
@@ -931,48 +1178,48 @@ const DetailPane = ({ request, onApprove, onReject, acting, language,
 
         {/* Details */}
         <section>
-          <div className="sec-title">פרטי הבקשה</div>
+          <div className="sec-title">{T.sectionRequestDetails}</div>
           {(request.request_type==='room'||request.request_type==='apartment') && (
-            <div className="kv"><span>סוג מעבר</span><strong>{
-              request.transfer_scope==='cross_region' ? 'לאזור אחר'
-              : request.same_apartment===true ? 'בתוך אותה דירה'
-              : request.same_apartment===false ? 'לדירה אחרת באותו אזור'
-              : (request.transfer_scope_display || 'מעבר בתוך האזור הנוכחי')
+            <div className="kv"><span>{T.kvTransferType}</span><strong>{
+              request.transfer_scope==='cross_region' ? T.transferTypeCrossRegion
+              : request.same_apartment===true ? T.transferTypeSameApartment
+              : request.same_apartment===false ? T.transferTypeSameRegionDiffApt
+              : (request.transfer_scope_display || T.transferTypeFallback)
             }</strong></div>
           )}
           {request.transfer_scope && request.source_region_name && (
-            <div className="kv"><span>אזור מוצא</span><strong>{request.source_region_name}</strong></div>
+            <div className="kv"><span>{T.kvSourceRegion}</span><strong>{request.source_region_name}</strong></div>
           )}
           {request.transfer_scope==='cross_region' && (request.destination_region_names||[]).length>0 && (
-            <div className="kv"><span>אזור יעד</span><strong>{request.destination_region_names.join(', ')}</strong></div>
+            <div className="kv"><span>{T.kvTargetRegion}</span><strong>{request.destination_region_names.join(', ')}</strong></div>
           )}
           {request.status==='approved' && request.target_room_name && (
-            <div className="kv"><span>שיבוץ סופי</span><strong>
-              בניין {request.target_building_number} · דירה {request.target_apartment_number} · חדר {request.target_room_name}
-              {request.final_bed_label ? ` · מיטה ${String(request.final_bed_label).replace(/^bed\s*/i,'')}` : ''}
+            <div className="kv"><span>{T.kvFinalPlacement}</span><strong>
+              {T.loc3(request.target_building_number, request.target_apartment_number, request.target_room_name)}
+              {request.final_bed_label ? ` · ${T.bedWord} ${String(request.final_bed_label).replace(/^bed\s*/i,'')}` : ''}
             </strong></div>
           )}
           {request.request_type==='swap' && request.swap_with_student_name && (
-            <div className="kv"><span>מחליף/ה עם</span><strong>{request.swap_with_student_name} ({request.swap_with_student_id_number})</strong></div>
+            <div className="kv"><span>{T.kvSwapWith}</span><strong>{request.swap_with_student_name} ({request.swap_with_student_id_number})</strong></div>
           )}
-          {request.reason && <div className="kv"><span>סיבה</span><strong className="kv-reason">{request.reason}</strong></div>}
-          {request.other_description && <div className="kv"><span>תיאור</span><strong>{request.other_description}</strong></div>}
-          <div className="kv"><span>נפתח ע"י</span><strong>{request.requested_by_name||'—'}</strong></div>
-          <div className="kv"><span>תאריך</span><strong>{fmtDate(request.created_at)}</strong></div>
-          {request.reviewed_by_name && <div className="kv"><span>טופל ע"י</span><strong>{request.reviewed_by_name}</strong></div>}
+          {request.reason && <div className="kv"><span>{T.kvReason}</span><strong className="kv-reason">{request.reason}</strong></div>}
+          {request.other_description && <div className="kv"><span>{T.kvDescription}</span><strong>{request.other_description}</strong></div>}
+          <div className="kv"><span>{T.kvOpenedBy}</span><strong>{request.requested_by_name||T.dash}</strong></div>
+          <div className="kv"><span>{T.kvDate}</span><strong>{fmtDate(request.created_at)}</strong></div>
+          {request.reviewed_by_name && <div className="kv"><span>{T.kvHandledBy}</span><strong>{request.reviewed_by_name}</strong></div>}
         </section>
 
         {/* History */}
         {Array.isArray(request.placement_history)&&request.placement_history.length>0&&(
           <section>
             <button className="hist-toggle" onClick={()=>setHistOpen(h=>!h)}>
-              <Activity size={12}/> היסטוריית שיבוצים ({request.placement_history.length}) {histOpen?<ChevronUp size={12}/>:<ChevronDown size={12}/>}
+              <Activity size={12}/> {T.historyToggle(request.placement_history.length)} {histOpen?<ChevronUp size={12}/>:<ChevronDown size={12}/>}
             </button>
             {histOpen && (
               <div className="hist-list">
                 {request.placement_history.map((p,i)=>(
                   <div key={i} className="hist-item">
-                    <div className="hi-loc">{p.region&&<span className="hi-reg">{p.region}</span>}<span>בניין {p.building} · דירה {p.apartment} · חדר {p.room}</span></div>
+                    <div className="hi-loc">{p.region&&<span className="hi-reg">{p.region}</span>}<span>{T.loc3(p.building, p.apartment, p.room)}</span></div>
                     <span className="hi-date">{fmtDate(p.assigned_at)}{p.ended_at?` → ${fmtDate(p.ended_at)}`:''}</span>
                   </div>
                 ))}
@@ -983,7 +1230,7 @@ const DetailPane = ({ request, onApprove, onReject, acting, language,
 
         {/* Rejection */}
         {request.status==='rejected'&&request.rejection_reason&&(
-          <div className="rej-banner"><AlertTriangle size={13}/><strong>סיבת הדחייה:</strong> {request.rejection_reason}</div>
+          <div className="rej-banner"><AlertTriangle size={13}/><strong>{T.rejectionReasonLabel}</strong> {request.rejection_reason}</div>
         )}
 
         {/* Actions */}
@@ -995,6 +1242,7 @@ const DetailPane = ({ request, onApprove, onReject, acting, language,
           onLoadMoreBedOptions={onLoadMoreBedOptions} loadingMoreBeds={loadingMoreBeds} loadMoreBedsError={loadMoreBedsError}
           roomId={roomId} onSetRoom={onSetRoom}
           selFeasOpt={selFeasOpt} onSelFeasOpt={onSelFeasOpt}
+          T={T} language={language}
         />
       </div>
     </div>
@@ -1031,6 +1279,8 @@ const ListItem = ({ request, selected, onClick, language }) => {
 // ── Main Page ─────────────────────────────────────────────────
 export default function TransfersPage({ language = 'he' }) {
   const isHe = language === 'he';
+  const dir = isHe ? 'rtl' : 'ltr';
+  const T = buildT(isHe);
   const { isCentralAdmin } = useAuth();
 
   const [requests, setRequests]   = useState([]);
@@ -1139,7 +1389,7 @@ useEffect(() => {
     }
 
   } catch (err) {
-    setPageError(err.message || 'שגיאה בטעינה');
+    setPageError(err.message || T.errLoad);
   } finally {
     setLoading(false);
   }
@@ -1198,7 +1448,7 @@ useEffect(() => {
       const d = await requestsAPI.getAddStudentBeds(id, { offset: (current.buildings || []).length });
       setBedOpts(p => ({ ...p, [id]: { ...d, buildings: mergeBuildings(p[id]?.buildings, d.buildings) } }));
     } catch (err) {
-      setLoadMoreBedsErr(p => ({ ...p, [id]: err.message || 'שגיאה' }));
+      setLoadMoreBedsErr(p => ({ ...p, [id]: err.message || T.errGeneric }));
     } finally { setLoadingMoreBedsId(null); }
   };
 
@@ -1229,7 +1479,7 @@ useEffect(() => {
       const d = await requestsAPI.checkFeasibility(id, { offset: (current.buildings || []).length });
       setFeasData(p => ({ ...p, [id]: { ...d, buildings: mergeBuildings(p[id]?.buildings, d.buildings) } }));
     } catch (err) {
-      setLoadMoreFeasErr(p => ({ ...p, [id]: err.message || 'שגיאה' }));
+      setLoadMoreFeasErr(p => ({ ...p, [id]: err.message || T.errGeneric }));
     } finally { setLoadingMoreFeasId(null); }
   };
 
@@ -1239,51 +1489,51 @@ useEffect(() => {
     if (roomId) payload.target_room = roomId;
     if (bedId) payload.bed_id = bedId;
     try { await requestsAPI.approve(id, payload); await loadRequests(); }
-    catch (err) { alert(err.message || 'שגיאה'); }
+    catch (err) { alert(err.message || T.errGeneric); }
     finally { setActionId(null); }
   };
 
   const doReject = async (id, reason) => {
     setActionId(id);
     try { await requestsAPI.reject(id, reason); await loadRequests(); }
-    catch (err) { alert(err.message || 'שגיאה'); }
+    catch (err) { alert(err.message || T.errGeneric); }
     finally { setActionId(null); }
   };
 
   const statCards = [
-    { key:'all',           label:'סה"כ',    Icon:Inbox,       color:'slate' },
-    { key:'pending',       label:'ממתינות', Icon:Clock,       color:'amber' },
-    { key:'approved',      label:'אושרו',   Icon:CheckCircle, color:'green' },
-    { key:'rejected',      label:'נדחו',    Icon:XCircle,     color:'rose'  },
+    { key:'all',           label:T.statTotal,    Icon:Inbox,       color:'slate' },
+    { key:'pending',       label:T.statPending, Icon:Clock,       color:'amber' },
+    { key:'approved',      label:T.statApproved,   Icon:CheckCircle, color:'green' },
+    { key:'rejected',      label:T.statRejected,    Icon:XCircle,     color:'rose'  },
   ];
 
   const typeFilters = [
-  { v:'all',            l:'כל סוגי הבקשות' },
-  { v:'add_student',    l:'הוספת סטודנט'    },
-  { v:'remove_student', l:'הסרה ממעונות'    },
-  { v:'room',           l:'שינוי חדר'       },
-  { v:'apartment',      l:'מעבר דירה / אזור'},
-  { v:'swap',           l:'חילוף סטודנטים'  },
-  { v:'other',          l:'בקשה אחרת'       },
+  { v:'all',            l:T.typeFilterAll },
+  { v:'add_student',    l:T.typeFilterAddStudent    },
+  { v:'remove_student', l:T.typeFilterRemoveStudent    },
+  { v:'room',           l:T.typeFilterRoom       },
+  { v:'apartment',      l:T.typeFilterApartment},
+  { v:'swap',           l:T.typeFilterSwap  },
+  { v:'other',          l:T.typeFilterOther       },
 ];
 
   return (
-    <div className="tp-root" dir="rtl">
+    <div className="tp-root" dir={dir}>
 
       {/* Top bar */}
       <div className="tp-top">
         <div className="tp-title-row">
           <div>
-            <h1>בקשות מעבר</h1>
-            <span className="tp-sub">ניהול ואישור בקשות שינוי מגורים של סטודנטים</span>
+            <h1>{T.pageTitle}</h1>
+            <span className="tp-sub">{T.pageSubtitle}</span>
           </div>
         </div>
         <div className="tp-top-actions">
-          <button className="btn-refresh" onClick={loadRequests} disabled={loading}>
+          <button className="btn-refresh" onClick={loadRequests} disabled={loading} title={T.refresh}>
             <RefreshCw size={13} className={loading ? 'spin' : ''}/>
           </button>
           <button className="btn-new" onClick={() => setShowModal(true)}>
-            <Plus size={14}/> בקשה חדשה
+            <Plus size={14}/> {T.newRequest}
           </button>
         </div>
       </div>
@@ -1315,25 +1565,25 @@ useEffect(() => {
           <div className="list-toolbar">
             <div className="lt-search">
               <Search size={12}/>
-              <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="חיפוש..."/>
+              <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder={T.searchPlaceholder}/>
               {searchQ && <button onClick={()=>setSearchQ('')}><X size={10}/></button>}
             </div>
             <div className="status-tabs">
-              {[{v:'all',l:'הכל'},{v:'pending',l:'ממתינות'},{v:'approved',l:'אושרו'},{v:'rejected',l:'נדחו'}].map(t=> (
+              {[{v:'all',l:T.tabAll},{v:'pending',l:T.tabPending},{v:'approved',l:T.tabApproved},{v:'rejected',l:T.tabRejected}].map(tb=> (
                   <button
-                      key={t.v}
-                      className={`stab${tab === t.v ? ' stab-active' : ''}`}
+                      key={tb.v}
+                      className={`stab${tab === tb.v ? ' stab-active' : ''}`}
                       onClick={() => {
-                        setTab(t.v);
+                        setTab(tb.v);
                         setSelected(null);
                       }}
                   >
-                    {t.l}
+                    {tb.l}
                   </button>
               ))}
             </div>
             <div className="filter-row">
-              <span className="filter-label">סוג בקשה</span>
+              <span className="filter-label">{T.requestTypeLabel}</span>
 
               <select
                   className="type-select"
@@ -1351,15 +1601,15 @@ onChange={(e) => {
             </div>
             {isCentralAdmin() && (
   <div className="filter-row">
-    <span className="filter-label">אזור</span>
+    <span className="filter-label">{T.regionLabel}</span>
 
     <select
       className="region-select"
       value={regionFilter}
       onChange={(e) => setRegionFilter(e.target.value)}
-      title="סינון לפי אזור"
+      title={T.regionFilterTitle}
     >
-      <option value="all">כל האזורים</option>
+      <option value="all">{T.allRegions}</option>
       {regions.map(r => (
         <option key={r.id} value={r.id}>
           {r.name}
@@ -1368,25 +1618,25 @@ onChange={(e) => {
     </select>
   </div>
 )}
-            <div className="lt-count">{visible.length} בקשות</div>
+            <div className="lt-count">{T.requestsCount(visible.length)}</div>
           </div>
 
           <div className="rq-list">
-            {loading && !requests.length && <div className="list-loading"><Spinner/> טוען...</div>}
+            {loading && !requests.length && <div className="list-loading"><Spinner/> {T.loadingRequests}</div>}
             {!loading && visible.length === 0 && (
   requests.length === 0
     ? (
       <EmptyPane
         icon={Inbox}
-        title="אין בקשות מעבר כרגע"
-        sub="בקשות חדשות שייווצרו יופיעו כאן"
+        title={T.emptyNoRequestsTitle}
+        sub={T.emptyNoRequestsSub}
       />
     )
     : (
       <EmptyPane
         icon={Search}
-        title="לא נמצאו בקשות"
-        sub="נסי לשנות את החיפוש או את הסינונים"
+        title={T.emptyNoResultsTitle}
+        sub={T.emptyNoResultsSub}
       />
     )
 )}
@@ -1427,16 +1677,16 @@ onChange={(e) => {
 
                       {requests.length === 0 ? (
                           <>
-                            <h3 className="eds-title">אין בקשות להצגה</h3>
+                            <h3 className="eds-title">{T.emptyDetailNoneTitle}</h3>
                             <p className="eds-sub">
-                              כאשר תיווצר בקשת מעבר חדשה, פרטיה יוצגו כאן.
+                              {T.emptyDetailNoneSub}
                             </p>
                           </>
                       ) : (
                           <>
-                            <h3 className="eds-title">בחרי בקשה מהרשימה</h3>
+                            <h3 className="eds-title">{T.emptyDetailPickTitle}</h3>
                             <p className="eds-sub">
-                              בחרי בקשה כדי לצפות בפרטים, בשיבוץ הנוכחי ובפעולות הזמינות.
+                              {T.emptyDetailPickSub}
                             </p>
                           </>
                       )}
@@ -1445,7 +1695,7 @@ onChange={(e) => {
                   </div>
               )
               : <DetailPane
-                  request={selected} language={language}
+                  request={selected} language={language} T={T}
                   acting={actionId === selected.id}
                   onApprove={doApprove} onReject={doReject}
                   feasData={feasData[selected.id]}
@@ -1476,6 +1726,7 @@ onChange={(e) => {
             setShowModal(false);
             loadRequests();
           }}
+          T={T} language={language}
         />
       )}
 
@@ -1559,7 +1810,7 @@ onChange={(e) => {
           color: var(--t1);
           background: var(--bg);
           min-height: 100vh;
-          direction: rtl;
+          direction: ${dir};
           -webkit-font-smoothing: antialiased;
           -moz-osx-font-smoothing: grayscale;
         }
@@ -1884,13 +2135,14 @@ onChange={(e) => {
           border-color: var(--blue-bdr) !important;
         }
 
-        /* Type colour strip — left edge (RTL = right border) */
-        .rq-item-violet { border-right: 3px solid var(--violet); }
-        .rq-item-teal   { border-right: 3px solid var(--teal);   }
-        .rq-item-amber  { border-right: 3px solid var(--amber);  }
-        .rq-item-blue   { border-right: 3px solid var(--blue);   }
-        .rq-item-rose   { border-right: 3px solid var(--rose);   }
-        .rq-item-indigo { border-right: 3px solid var(--indigo); }
+        /* Type colour strip on the leading (start) edge - mirrors
+           automatically between RTL (right) and LTR (left). */
+        .rq-item-violet { border-inline-start: 3px solid var(--violet); }
+        .rq-item-teal   { border-inline-start: 3px solid var(--teal);   }
+        .rq-item-amber  { border-inline-start: 3px solid var(--amber);  }
+        .rq-item-blue   { border-inline-start: 3px solid var(--blue);   }
+        .rq-item-rose   { border-inline-start: 3px solid var(--rose);   }
+        .rq-item-indigo { border-inline-start: 3px solid var(--indigo); }
 
         .ri-top {
           display: flex;
@@ -1973,7 +2225,7 @@ onChange={(e) => {
         .detail-outer {
           overflow-y: auto;
           min-width: 0;
-          border-right: 1px solid var(--bdr);
+          border-inline-start: 1px solid var(--bdr);
         }
         .detail-outer::-webkit-scrollbar { width: 6px; }
         .detail-outer::-webkit-scrollbar-track { background: transparent; }
