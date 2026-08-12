@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { allocationAPI } from '../services/api';
+import { localizeGender } from '../utils/genderLabels';
 import {
   AlertTriangle,
   ArrowRight,
@@ -1394,7 +1395,7 @@ const formattedLastAllocationDate =
                                                                         }
                                                                         :
                                                                       </strong>{' '}
-                                                                      {student?.gender ||
+                                                                      {localizeGender(student?.gender, language) ||
                                                                         '-'}
                                                                     </span>
 
@@ -1691,8 +1692,8 @@ const formattedLastAllocationDate =
                   </td>
 
                   <td>
-                    {student?.gender_display ||
-                      student?.gender ||
+                    {localizeGender(student?.gender, language) ||
+                      student?.gender_display ||
                       '-'}
                   </td>
 
