@@ -1467,6 +1467,7 @@ class AllocationRunSerializer(serializers.ModelSerializer):
             'successful_assignments',
             'roommate_matches',
             'conflicts',
+            'max_search_seconds',
             'started_at',
             'completed_at',
             'error_message',
