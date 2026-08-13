@@ -871,6 +871,7 @@ class AllocationRun(models.Model):
         QUEUED = 'queued', _('בתור')
         RUNNING = 'running', _('רץ')
         CANCELLATION_REQUESTED = 'cancellation_requested', _('מבוקשת עצירה')
+        STOP_AND_SAVE_REQUESTED = 'stop_and_save_requested', _('מבוקשת עצירה ושמירה')
         STOPPED = 'stopped', _('עצר')
         COMPLETED = 'completed', _('הושלם')
         FAILED = 'failed', _('נכשל')
@@ -905,6 +906,25 @@ class AllocationRun(models.Model):
 
     error_message = models.TextField(blank=True)
 
+    # Effective CP-SAT max_time_in_seconds used for this run (either the
+    # user-selected value from the "max search time" control, or the
+    # solver's own default when none was supplied). Recorded at creation
+    # so it is visible in the UI while the run is still QUEUED/RUNNING,
+    # without needing to inspect the solver call site.
+    max_search_seconds = models.PositiveIntegerField(null=True, blank=True)
+
+    # Throttled, compact "current best solution so far" snapshot written
+    # by the CP-SAT solution callback while a run is in progress (see
+    # allocation.solver._LiveSolutionCallback). This is a lightweight
+    # cross-worker-safe fallback for the /preview/ endpoint when the
+    # fast in-process live_registry cache has nothing for this run_id
+    # (e.g. a different worker process, or this worker restarted) — the
+    # same rationale as `diagnostics` below. It is NEVER used to persist
+    # real BedAssignment/Student rows; only the final solver persistence
+    # transaction does that. Always cleared (None) once the run reaches
+    # a terminal status.
+    live_snapshot = models.JSONField(null=True, blank=True, default=None)
+
     # Solver-produced diagnostics that do not fit any of the counter
     # fields above: warnings (e.g. an existing Building-179 occupant who
     # is not an eligible Hasmaha ANIR student) and the Building-179/ANIR
@@ -929,6 +949,7 @@ class AllocationRun(models.Model):
             self.Status.QUEUED,
             self.Status.RUNNING,
             self.Status.CANCELLATION_REQUESTED,
+            self.Status.STOP_AND_SAVE_REQUESTED,
         }
 
         if self.status in in_progress:

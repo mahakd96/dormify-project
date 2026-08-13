@@ -8,8 +8,10 @@ Run with the test database (never the production Azure DB):
 """
 
 from collections import defaultdict
+import threading
+import time
 from unittest.mock import patch, MagicMock
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
@@ -121,6 +123,67 @@ def _make_run_with_assignment(region, user, status_val=AllocationRun.Status.COMP
 
 
 # ---------------------------------------------------------------------------
+# Helpers for max-solver-time / live-preview / Stop & Save / Cancel tests
+# (configurable search duration, current-result preview, real early
+# interruption). Reuse the exact category='male'/housing_type='single_male'
+# combination already proven to match in _make_run_with_assignment above,
+# and the same minimal-config shape SolverReligiousJewishRuleTest already
+# uses successfully for direct run_improved_ortools_allocation calls.
+# ---------------------------------------------------------------------------
+
+def _make_minimal_infra(region, beds_per_apt=1, num_apts=1):
+    """A small, always-solvable inventory: one building, `num_apts` single-room
+    apartments with `beds_per_apt` beds each, all region-scoped so the async
+    view layer's accepted_dorm_type__region filter can find them too."""
+    dorm_type = DormType.objects.create(
+        name=f'Dorm_{region.id}_{num_apts}x{beds_per_apt}',
+        region=region,
+    )
+    building = Building.objects.create(number=100, dorm_type=dorm_type)
+    rooms = []
+    for i in range(num_apts):
+        apartment = Apartment.objects.create(
+            building=building,
+            number=str(i + 1),
+            category=Apartment.Category.MALE,
+            apartment_type=Apartment.ApartmentType.SINGLE,
+            room_count=1,
+        )
+        room = Room.objects.create(apartment=apartment, name='A', capacity=beds_per_apt)
+        for j in range(beds_per_apt):
+            Bed.objects.create(room=room, label=str(j + 1))
+        rooms.append(room)
+    return dorm_type, rooms
+
+
+def _make_minimal_student(student_id, dorm_type):
+    # housing_type must be the real Hebrew choice value (Student.HousingType
+    # is a plain CharField with Hebrew choices, e.g. SINGLE_MALE='רווקים') -
+    # a plain .create() bypasses choice validation, so an invalid raw
+    # string like 'single_male' would silently create a student with zero
+    # candidate apartments instead of raising.
+    return Student.objects.create(
+        student_id=student_id,
+        first_name='Test',
+        last_name=student_id,
+        housing_type=Student.HousingType.SINGLE_MALE,
+        accepted_dorm_type=dorm_type,
+    )
+
+
+MINIMAL_SOLVER_CONFIG = {
+    "ReligiousTogether": {"enabled": False},
+    "sameReligion": {"enabled": False},
+    "sectorMatching": {"enabled": False},
+    "roommateMatch": {"enabled": False},
+    "roommatePositiveOnly": {"enabled": False},
+    "avoidYearMix_1_with_3_4": {"enabled": False},
+    "avoidAtudaimWithHasmaha": {"enabled": False},
+    "priorityFirst": {"enabled": False},
+}
+
+
+# ---------------------------------------------------------------------------
 # Tests: AllocationRun lifecycle model
 # ---------------------------------------------------------------------------
 
@@ -197,7 +260,13 @@ class ActiveRunTest(TestCase):
         self.assertEqual(resp.data['run']['id'], run.id)
 
     def test_returns_completed_draft(self):
-        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.COMPLETED)
+        # get_active_allocation_run only surfaces a COMPLETED run when it
+        # still has active BedAssignments (see views.get_active_allocation_run);
+        # a bare _make_run() has none, so this needs the helper that also
+        # creates a real active assignment tied to the run.
+        run, _student, _bed = _make_run_with_assignment(
+            self.region, self.boss, status_val=AllocationRun.Status.COMPLETED,
+        )
         resp = self.client.get('/api/allocation/runs/active/')
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data['run']['id'], run.id)
@@ -5975,4 +6044,560 @@ class RetryUnassignedAllocationTest(TestCase):
         client.force_authenticate(user=employee)
         response = client.post(f'/api/allocation/runs/{original_run.id}/retry-unassigned/', {}, format='json')
         self.assertEqual(response.status_code, 403, response.data)
+
+
+# ---------------------------------------------------------------------------
+# Tests: configurable max solver time (זמן חיפוש מרבי)
+# ---------------------------------------------------------------------------
+
+from allocation.solver import (  # noqa: E402
+    run_improved_ortools_allocation,
+    MIN_USER_SOLVER_TIME_SECONDS,
+    MAX_USER_SOLVER_TIME_SECONDS,
+    DEFAULT_SOLVER_TIME_SECONDS,
+    _run_stop_watcher,
+    _STOP_WATCHER_POLL_INTERVAL_SECONDS,
+)
+from allocation import live_registry  # noqa: E402
+
+
+class MaxSolverSecondsViewTest(TestCase):
+    """Requirement 1/2: user-selected max time reaches CP-SAT; invalid values rejected."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.region = _make_region('MaxSecondsRegion')
+        self.boss = _make_region_boss(self.region)
+
+    @patch('api.views._execute_allocation_background')
+    def test_valid_max_solver_seconds_passed_through(self, mock_bg):
+        self.client.force_authenticate(user=self.boss)
+        resp = self.client.post('/api/allocation/start/', {
+            'region': self.region.id,
+            'max_solver_seconds': 90,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED, resp.data)
+        mock_bg.assert_called_once()
+        self.assertEqual(mock_bg.call_args.kwargs['max_seconds'], 90.0)
+
+        run = AllocationRun.objects.get(pk=resp.data['run_id'])
+        self.assertEqual(run.max_search_seconds, 90)
+
+    @patch('api.views._execute_allocation_background')
+    def test_missing_max_solver_seconds_uses_default(self, mock_bg):
+        self.client.force_authenticate(user=self.boss)
+        resp = self.client.post('/api/allocation/start/', {
+            'region': self.region.id,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED, resp.data)
+        self.assertEqual(mock_bg.call_args.kwargs['max_seconds'], DEFAULT_SOLVER_TIME_SECONDS)
+
+    @patch('api.views._execute_allocation_background')
+    def test_non_numeric_max_solver_seconds_rejected(self, mock_bg):
+        self.client.force_authenticate(user=self.boss)
+        resp = self.client.post('/api/allocation/start/', {
+            'region': self.region.id,
+            'max_solver_seconds': 'not-a-number',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_bg.assert_not_called()
+
+    @patch('api.views._execute_allocation_background')
+    def test_below_minimum_max_solver_seconds_rejected(self, mock_bg):
+        self.client.force_authenticate(user=self.boss)
+        resp = self.client.post('/api/allocation/start/', {
+            'region': self.region.id,
+            'max_solver_seconds': 0,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_bg.assert_not_called()
+
+    @patch('api.views._execute_allocation_background')
+    def test_above_maximum_max_solver_seconds_rejected(self, mock_bg):
+        self.client.force_authenticate(user=self.boss)
+        resp = self.client.post('/api/allocation/start/', {
+            'region': self.region.id,
+            'max_solver_seconds': 999999,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_bg.assert_not_called()
+
+
+class SolverTimeLimitDirectTest(TestCase):
+    """Requirements 1/2/3 at the solver layer: bounds enforced independently
+    of the view, max_seconds reaches CpSolver, an easy model finishes long
+    before its time limit."""
+
+    def setUp(self):
+        patcher = patch('allocation.solver.close_old_connections')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.region = _make_region('SolverTimeRegion')
+        self.dorm_type, self.rooms = _make_minimal_infra(self.region)
+        self.student = _make_minimal_student('TL1', self.dorm_type)
+
+    def test_max_seconds_reaches_solver_time_limit(self):
+        result = run_improved_ortools_allocation(
+            [self.student], self.rooms, MINIMAL_SOLVER_CONFIG, max_seconds=8,
+        )
+        self.assertEqual(result['time_limit_seconds'], 8.0)
+
+    def test_default_max_seconds_used_when_not_specified(self):
+        result = run_improved_ortools_allocation(
+            [self.student], self.rooms, MINIMAL_SOLVER_CONFIG,
+        )
+        self.assertEqual(result['time_limit_seconds'], DEFAULT_SOLVER_TIME_SECONDS)
+
+    def test_solver_rejects_below_minimum_max_seconds(self):
+        with self.assertRaises(ValueError):
+            run_improved_ortools_allocation(
+                [self.student], self.rooms, MINIMAL_SOLVER_CONFIG,
+                max_seconds=MIN_USER_SOLVER_TIME_SECONDS - 1,
+            )
+
+    def test_solver_rejects_above_maximum_max_seconds(self):
+        with self.assertRaises(ValueError):
+            run_improved_ortools_allocation(
+                [self.student], self.rooms, MINIMAL_SOLVER_CONFIG,
+                max_seconds=MAX_USER_SOLVER_TIME_SECONDS + 1,
+            )
+
+    def test_solver_finishes_before_max_time_when_trivially_optimal(self):
+        result = run_improved_ortools_allocation(
+            [self.student], self.rooms, MINIMAL_SOLVER_CONFIG, max_seconds=30,
+        )
+        self.assertEqual(result['solver_status'], 'OPTIMAL')
+        self.assertTrue(result['optimality_proven'])
+        self.assertLess(result['wall_time'], 5.0)
+
+
+# ---------------------------------------------------------------------------
+# Tests: live "current result" snapshot (_LiveSolutionCallback)
+# ---------------------------------------------------------------------------
+
+class LiveSnapshotCallbackTest(TestCase):
+    """Requirement: the FIRST feasible solution is captured immediately,
+    not delayed by the memory/DB throttle windows; the registry is cleared
+    once the solve finishes; callers without allocation_run_id see zero
+    behavior change."""
+
+    def setUp(self):
+        patcher = patch('allocation.solver.close_old_connections')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.region = _make_region('LiveSnapshotRegion')
+        self.boss = _make_region_boss(self.region)
+        self.dorm_type, self.rooms = _make_minimal_infra(self.region)
+        self.student = _make_minimal_student('LS1', self.dorm_type)
+
+    def tearDown(self):
+        live_registry._snapshots.clear()
+        live_registry._active_solvers.clear()
+
+    def test_first_feasible_snapshot_captured_immediately(self):
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+
+        result = run_improved_ortools_allocation(
+            [self.student], self.rooms, MINIMAL_SOLVER_CONFIG,
+            allocation_run_id=run.id, max_seconds=5,
+        )
+
+        self.assertIn(result['solver_status'], ('OPTIMAL', 'FEASIBLE'))
+        run.refresh_from_db()
+        self.assertIsNotNone(
+            run.live_snapshot,
+            "the first feasible solution must be captured immediately, "
+            "not delayed by the throttle window",
+        )
+        self.assertEqual(run.live_snapshot['assigned_count'], 1)
+        self.assertEqual(run.live_snapshot['unassigned_count'], 0)
+
+    def test_live_registry_cleared_after_solve_completes(self):
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        run_improved_ortools_allocation(
+            [self.student], self.rooms, MINIMAL_SOLVER_CONFIG,
+            allocation_run_id=run.id, max_seconds=5,
+        )
+        self.assertIsNone(live_registry.get(run.id))
+        self.assertIsNone(live_registry._active_solvers.get(run.id))
+
+    def test_no_allocation_run_id_skips_live_callback_entirely(self):
+        """Callers that omit allocation_run_id (sync legacy endpoint, most
+        existing solver tests) must see zero behavior change: no registry
+        writes, no watcher thread, no live_snapshot write attempted."""
+        result = run_improved_ortools_allocation(
+            [self.student], self.rooms, MINIMAL_SOLVER_CONFIG, max_seconds=5,
+        )
+        self.assertEqual(result['solver_status'], 'OPTIMAL')
+        self.assertEqual(len(live_registry._snapshots), 0)
+        self.assertEqual(len(live_registry._active_solvers), 0)
+
+
+# ---------------------------------------------------------------------------
+# Tests: GET /api/allocation/runs/<id>/preview/ ("צפה בתוצאה הנוכחית")
+# ---------------------------------------------------------------------------
+
+class PreviewEndpointTest(TestCase):
+    """Requirements 5/6/7: preview never stops the solver, never creates
+    BedAssignment rows, and reports unavailable (not an error) before any
+    feasible solution exists."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.region = _make_region('PreviewRegion')
+        self.boss = _make_region_boss(self.region)
+
+    def tearDown(self):
+        live_registry._snapshots.clear()
+        live_registry._active_solvers.clear()
+
+    def test_preview_unavailable_before_any_snapshot(self):
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        self.client.force_authenticate(user=self.boss)
+        resp = self.client.get(f'/api/allocation/runs/{run.id}/preview/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(resp.data['available'])
+        self.assertIsNone(resp.data['snapshot'])
+
+    def test_preview_returns_snapshot_without_touching_solver_or_db(self):
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        fake_solver = MagicMock()
+        live_registry.register_solver(run.id, fake_solver)
+        snapshot = {
+            'sequence': 1,
+            'assignments': [{'student_db_id': 1, 'student_name': 'X'}],
+            'assigned_count': 1,
+            'unassigned_count': 0,
+            'objective_value': 10.0,
+            'wall_time_seconds': 0.2,
+            'solver_status': 'FEASIBLE',
+            'captured_at': timezone.now().isoformat(),
+        }
+        live_registry.set(run.id, snapshot)
+
+        self.client.force_authenticate(user=self.boss)
+        resp = self.client.get(f'/api/allocation/runs/{run.id}/preview/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data['available'])
+        self.assertEqual(resp.data['snapshot']['sequence'], 1)
+
+        # Preview must never touch the solver control surface or create
+        # any DB assignment - it is a pure read of already-computed data.
+        fake_solver.StopSearch.assert_not_called()
+        run.refresh_from_db()
+        self.assertEqual(run.status, AllocationRun.Status.RUNNING)
+        self.assertEqual(BedAssignment.objects.filter(allocation_run=run).count(), 0)
+
+    def test_preview_falls_back_to_db_snapshot_when_not_registered_in_process(self):
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        AllocationRun.objects.filter(pk=run.id).update(live_snapshot={
+            'sequence': 3, 'assignments': [], 'assigned_count': 0,
+            'unassigned_count': 5, 'objective_value': 1.0,
+            'wall_time_seconds': 4.0, 'solver_status': 'FEASIBLE',
+            'captured_at': timezone.now().isoformat(),
+        })
+        self.client.force_authenticate(user=self.boss)
+        resp = self.client.get(f'/api/allocation/runs/{run.id}/preview/')
+        self.assertTrue(resp.data['available'])
+        self.assertEqual(resp.data['snapshot']['sequence'], 3)
+
+    def test_preview_forbidden_for_other_region_user(self):
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        other_region = _make_region('OtherPreviewRegion')
+        other_employee = _make_employee(other_region, email='other-preview@test.com')
+        self.client.force_authenticate(user=other_employee)
+        resp = self.client.get(f'/api/allocation/runs/{run.id}/preview/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+# ---------------------------------------------------------------------------
+# Tests: POST /api/allocation/runs/<id>/stop-and-save/ ("עצור ושמור תוצאה")
+# ---------------------------------------------------------------------------
+
+class StopAndSaveSameProcessFastPathTest(TestCase):
+    """Requirement 8 (same-process path): the view calls
+    live_registry.request_stop_search, which invokes StopSearch() directly
+    on whatever solver object is registered for this run - proven here with
+    a stand-in solver, independent of real CP-SAT timing."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.region = _make_region('StopSaveFastPathRegion')
+        self.boss = _make_region_boss(self.region)
+
+    def tearDown(self):
+        live_registry._active_solvers.clear()
+
+    def test_stop_and_save_calls_stopsearch_when_solver_registered_in_process(self):
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        fake_solver = MagicMock()
+        live_registry.register_solver(run.id, fake_solver)
+
+        self.client.force_authenticate(user=self.boss)
+        resp = self.client.post(f'/api/allocation/runs/{run.id}/stop-and-save/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        run.refresh_from_db()
+        self.assertEqual(run.status, AllocationRun.Status.STOP_AND_SAVE_REQUESTED)
+        fake_solver.StopSearch.assert_called_once()
+
+    def test_stop_and_save_unauthorized(self):
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        employee = _make_employee(self.region, email='emp-stopsave@test.com')
+        self.client.force_authenticate(user=employee)
+        resp = self.client.post(f'/api/allocation/runs/{run.id}/stop-and-save/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_stop_and_save_completed_run_returns_409(self):
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.COMPLETED)
+        self.client.force_authenticate(user=self.boss)
+        resp = self.client.post(f'/api/allocation/runs/{run.id}/stop-and-save/')
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_repeated_stop_and_save_is_idempotent(self):
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        self.client.force_authenticate(user=self.boss)
+        resp1 = self.client.post(f'/api/allocation/runs/{run.id}/stop-and-save/')
+        self.assertEqual(resp1.status_code, status.HTTP_200_OK)
+        resp2 = self.client.post(f'/api/allocation/runs/{run.id}/stop-and-save/')
+        self.assertEqual(resp2.status_code, status.HTTP_200_OK)
+        run.refresh_from_db()
+        self.assertEqual(run.status, AllocationRun.Status.STOP_AND_SAVE_REQUESTED)
+
+
+class StopWatcherThreadTest(TransactionTestCase):
+    """Requirement 8 (process-agnostic path): _run_stop_watcher polls the DB
+    on its own fixed timer, independent of CP-SAT's solution callback, and
+    calls StopSearch() once it observes a stop request written by a
+    completely separate thread/connection - exactly the cross-process-style
+    scenario a same-process shortcut cannot cover. Needs TransactionTestCase
+    so the watcher's own DB connection actually sees the committed update."""
+
+    def test_watcher_thread_calls_stopsearch_when_status_changes(self):
+        region = _make_region('WatcherRegion')
+        boss = _make_region_boss(region)
+        run = _make_run(region, boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        fake_solver = MagicMock()
+        stop_event = threading.Event()
+
+        watcher_thread = threading.Thread(
+            target=_run_stop_watcher,
+            args=(run.id, fake_solver, stop_event),
+            daemon=True,
+        )
+        watcher_thread.start()
+
+        # Give the watcher a moment to start polling, then request a stop -
+        # from the watcher's perspective this is indistinguishable from a
+        # stop requested by a different process entirely, since it only
+        # ever learns about it through the DB.
+        time.sleep(0.2)
+        AllocationRun.objects.filter(pk=run.id).update(
+            status=AllocationRun.Status.STOP_AND_SAVE_REQUESTED,
+        )
+
+        watcher_thread.join(timeout=_STOP_WATCHER_POLL_INTERVAL_SECONDS + 3.0)
+        stop_event.set()
+
+        fake_solver.StopSearch.assert_called_once()
+        self.assertFalse(watcher_thread.is_alive())
+
+
+class StopAndSaveBranchLogicTest(TestCase):
+    """Requirements 9/10/11: how _execute_allocation_background finalizes a
+    run depends on (a) whether Cancel or Stop & Save was requested and
+    (b) whether the (possibly early-stopped) solve actually persisted a
+    result. Tested deterministically by faking the solver's return value -
+    the real persistence transaction itself is unchanged, existing code."""
+
+    def setUp(self):
+        self.region = _make_region('StopSaveBranchRegion')
+        self.boss = _make_region_boss(self.region)
+        self.dorm_type, self.rooms = _make_minimal_infra(self.region)
+        self.student = _make_minimal_student('SSB1', self.dorm_type)
+
+    class _SyncThread:
+        """Stand-in for threading.Thread that runs its target synchronously
+        on .start(), so _execute_allocation_background's inner closure runs
+        inline within the test's own transaction/connection instead of a
+        real (untestable-without-TransactionTestCase) background thread."""
+
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            self._target(*self._args, **self._kwargs)
+
+        def join(self, timeout=None):
+            pass
+
+    def _run_background_sync(self, run, fabricated_result, set_status_before_return=None):
+        def _fake_solve(*args, **kwargs):
+            if set_status_before_return:
+                AllocationRun.objects.filter(pk=run.id).update(status=set_status_before_return)
+            return fabricated_result
+
+        # _execute_allocation_background's inner closure was written to run
+        # in a genuinely separate thread/connection and closes that
+        # connection in its own finally block when done - correct in
+        # production, but _SyncThread deliberately runs it inline on the
+        # test's own thread, so that same close() call would kill the
+        # connection TestCase's wrapping transaction depends on for every
+        # assertion after this call (and cascade into later tests). Patch
+        # both connection-closing calls out, exactly like
+        # DeleteAllocationRunTest already does for close_old_connections.
+        with patch('api.views.threading.Thread', self._SyncThread), \
+                patch('allocation.solver.run_improved_ortools_allocation', side_effect=_fake_solve), \
+                patch('django.db.close_old_connections'), \
+                patch('django.db.connection.close'):
+            from api.views import _execute_allocation_background
+            _execute_allocation_background(
+                allocation_run_id=run.id,
+                region_id=self.region.id,
+                constraints_config={},
+                include_assigned=False,
+                allocation_scope=None,
+                max_seconds=30,
+            )
+
+    def test_stop_and_save_with_no_feasible_solution_persists_nothing(self):
+        """Requirement 10."""
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        fabricated_result = {
+            'solver_status': 'UNKNOWN',
+            'solution_persisted': False,
+            'successful_assignments': 0,
+            'conflicts': 1,
+            'students_processed': 1,
+            'warnings': [],
+            'anier_building_179_diagnostics': {},
+        }
+        self._run_background_sync(
+            run, fabricated_result,
+            set_status_before_return=AllocationRun.Status.STOP_AND_SAVE_REQUESTED,
+        )
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, AllocationRun.Status.STOPPED)
+        self.assertEqual(BedAssignment.objects.filter(allocation_run=run).count(), 0)
+
+    def test_stop_and_save_persists_feasible_result_and_marks_completed(self):
+        """Requirement 9."""
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        fabricated_result = {
+            'solver_status': 'FEASIBLE',
+            'optimality_proven': False,
+            'solution_persisted': True,
+            'successful_assignments': 1,
+            'conflicts': 0,
+            'students_processed': 1,
+            'roommate_matches': 0,
+            'warnings': [],
+            'anier_building_179_diagnostics': {},
+        }
+        self._run_background_sync(
+            run, fabricated_result,
+            set_status_before_return=AllocationRun.Status.STOP_AND_SAVE_REQUESTED,
+        )
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, AllocationRun.Status.COMPLETED)
+        self.assertTrue(run.diagnostics.get('stopped_early_by_user'))
+        self.assertEqual(run.diagnostics.get('solver_status'), 'FEASIBLE')
+        self.assertFalse(run.diagnostics.get('optimality_proven'))
+
+    def test_cancellation_still_discards_result(self):
+        """Requirement 11 (regression): Cancel (בטל הרצה) keeps discarding
+        results exactly as before, distinct from Stop & Save."""
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        fabricated_result = {
+            'solver_status': 'FEASIBLE',
+            'optimality_proven': False,
+            'solution_persisted': True,
+            'successful_assignments': 1,
+            'conflicts': 0,
+            'students_processed': 1,
+            'roommate_matches': 0,
+            'warnings': [],
+            'anier_building_179_diagnostics': {},
+        }
+        self._run_background_sync(
+            run, fabricated_result,
+            set_status_before_return=AllocationRun.Status.CANCELLATION_REQUESTED,
+        )
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, AllocationRun.Status.STOPPED)
+
+
+class StopAndSaveRealInterruptionTest(TransactionTestCase):
+    """End-to-end smoke test: a Stop & Save request already sitting in the
+    DB before the solve starts is picked up by the real watcher thread
+    spawned inside run_improved_ortools_allocation itself, and the existing
+    best-effort persistence path still produces a valid, safely-persisted
+    result. Uses TransactionTestCase because the watcher runs in its own
+    thread/connection and must see this test's committed writes."""
+
+    def test_stop_and_save_requested_before_solve_still_yields_valid_result(self):
+        region = _make_region('StopSaveRealRegion')
+        boss = _make_region_boss(region)
+        dorm_type, rooms = _make_minimal_infra(region)
+        student = _make_minimal_student('SSR1', dorm_type)
+        run = _make_run(region, boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+
+        AllocationRun.objects.filter(pk=run.id).update(
+            status=AllocationRun.Status.STOP_AND_SAVE_REQUESTED,
+        )
+
+        result = run_improved_ortools_allocation(
+            [student], rooms, MINIMAL_SOLVER_CONFIG,
+            allocation_run_id=run.id, max_seconds=30,
+        )
+
+        self.assertIn(result['solver_status'], ('OPTIMAL', 'FEASIBLE'))
+        self.assertTrue(result['solution_persisted'])
+        self.assertEqual(result['successful_assignments'], 1)
+        live_registry.unregister_solver(run.id)
+        live_registry.clear(run.id)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Stop & Save vs Cancel race protection
+# ---------------------------------------------------------------------------
+
+class StopSaveVsCancelRaceTest(TestCase):
+    """Requirement 12: whichever of Stop & Save / Cancel is requested first
+    wins the row lock and "claims" the stop; the other gets 409, not a
+    silent double-apply."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.region = _make_region('RaceRegion')
+        self.boss = _make_region_boss(self.region)
+        self.client.force_authenticate(user=self.boss)
+
+    def test_stop_and_save_then_cancel_returns_409(self):
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        resp1 = self.client.post(f'/api/allocation/runs/{run.id}/stop-and-save/')
+        self.assertEqual(resp1.status_code, status.HTTP_200_OK)
+
+        resp2 = self.client.post(f'/api/allocation/runs/{run.id}/stop/')
+        self.assertEqual(resp2.status_code, status.HTTP_409_CONFLICT)
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, AllocationRun.Status.STOP_AND_SAVE_REQUESTED)
+
+    def test_cancel_then_stop_and_save_returns_409(self):
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        resp1 = self.client.post(f'/api/allocation/runs/{run.id}/stop/')
+        self.assertEqual(resp1.status_code, status.HTTP_200_OK)
+
+        resp2 = self.client.post(f'/api/allocation/runs/{run.id}/stop-and-save/')
+        self.assertEqual(resp2.status_code, status.HTTP_409_CONFLICT)
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, AllocationRun.Status.CANCELLATION_REQUESTED)
 

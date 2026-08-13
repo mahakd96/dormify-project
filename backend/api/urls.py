@@ -47,11 +47,21 @@ urlpatterns = [
     path('allocation/summary/', views.allocation_summary, name='allocation-summary'),
     path('allocation/results/', views.allocation_results, name='allocation-results'),
 
-    # Allocation lifecycle (async: start → poll → stop / delete)
+    # Allocation lifecycle (async: start → poll → preview / stop-and-save / cancel / delete)
     path('allocation/start/', views.start_allocation_run, name='allocation-start'),
     path('allocation/runs/active/', views.get_active_allocation_run, name='allocation-active-run'),
     path('allocation/runs/<int:run_id>/', views.get_allocation_run_detail, name='allocation-run-detail'),
+    path(
+        'allocation/runs/<int:run_id>/preview/',
+        views.get_allocation_run_preview,
+        name='allocation-run-preview',
+    ),
     path('allocation/runs/<int:run_id>/stop/', views.stop_allocation_run, name='allocation-run-stop'),
+    path(
+        'allocation/runs/<int:run_id>/stop-and-save/',
+        views.stop_and_save_allocation_run,
+        name='allocation-run-stop-and-save',
+    ),
     path('allocation/runs/<int:run_id>/delete/', views.delete_allocation_run, name='allocation-run-delete'),
     path(
         'allocation/runs/<int:run_id>/retry-unassigned/',

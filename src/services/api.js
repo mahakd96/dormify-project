@@ -287,6 +287,30 @@ export const allocationAPI = {
     }
   },
 
+  // "צפה בתוצאה הנוכחית" - lightweight read of the current best-feasible
+  // snapshot while a run is still RUNNING. Never stops the solver, never
+  // creates BedAssignment rows - see backend get_allocation_run_preview.
+  getPreview: async (runId) => {
+    try {
+      const { data } = await api.get(`/api/allocation/runs/${runId}/preview/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to get current result preview"));
+    }
+  },
+
+  // "עצור ושמור תוצאה" - interrupts the solver and keeps the best
+  // feasible result found so far, distinct from stopRun ("בטל הרצה"),
+  // which discards any partial work.
+  stopAndSave: async (runId) => {
+    try {
+      const { data } = await api.post(`/api/allocation/runs/${runId}/stop-and-save/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to stop and save allocation run"));
+    }
+  },
+
   deleteResults: async (runId) => {
     try {
       const { data } = await api.delete(`/api/allocation/runs/${runId}/delete/`);
