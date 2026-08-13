@@ -8,6 +8,7 @@ Run with the test database (never the production Azure DB):
 """
 
 from collections import defaultdict
+from datetime import timedelta
 import threading
 import time
 from unittest.mock import patch, MagicMock
@@ -20,6 +21,7 @@ from api.models import (
     User, Region, AllocationRun, BedAssignment, Student, DormType,
     Building, Apartment, Room, Bed,
 )
+from api.serializers import AllocationRunSerializer
 
 
 # ---------------------------------------------------------------------------
@@ -6169,6 +6171,126 @@ class SolverTimeLimitDirectTest(TestCase):
         self.assertEqual(result['solver_status'], 'OPTIMAL')
         self.assertTrue(result['optimality_proven'])
         self.assertLess(result['wall_time'], 5.0)
+
+
+# ---------------------------------------------------------------------------
+# Tests: persistent search timing (AllocationRun.search_started_at +
+# AllocationRunSerializer.elapsed_search_seconds/remaining_search_seconds).
+# Frontend timer-reconstruction bug fix — the backend must be the source
+# of truth, never local React state re-derived from Date.now() at mount.
+# ---------------------------------------------------------------------------
+
+class SearchStartedAtTest(TestCase):
+    """search_started_at is stamped by the solver itself, right before
+    Solve() — meaningfully after AllocationRun.started_at (row creation),
+    and only when a real solver_run_id is supplied."""
+
+    def setUp(self):
+        patcher = patch('allocation.solver.close_old_connections')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.region = _make_region('SearchStartedAtRegion')
+        self.boss = _make_region_boss(self.region)
+        self.dorm_type, self.rooms = _make_minimal_infra(self.region)
+        self.student = _make_minimal_student('SSA1', self.dorm_type)
+
+    def test_search_started_at_set_after_solve_with_run_id(self):
+        run = _make_run(self.region, self.boss, status_val=AllocationRun.Status.RUNNING, completed=False)
+        self.assertIsNone(run.search_started_at)
+
+        run_improved_ortools_allocation(
+            [self.student], self.rooms, MINIMAL_SOLVER_CONFIG,
+            allocation_run_id=run.id, max_seconds=5,
+        )
+
+        run.refresh_from_db()
+        self.assertIsNotNone(run.search_started_at)
+        self.assertGreaterEqual(run.search_started_at, run.started_at)
+
+    def test_search_started_at_stays_none_without_run_id(self):
+        """Legacy sync callers (no allocation_run_id) see zero behavior
+        change — nothing to stamp, no AllocationRun row passed in."""
+        result = run_improved_ortools_allocation(
+            [self.student], self.rooms, MINIMAL_SOLVER_CONFIG, max_seconds=5,
+        )
+        self.assertEqual(result['solver_status'], 'OPTIMAL')
+        # No exception / no AllocationRun touched — nothing further to assert.
+
+
+class AllocationRunTimingSerializerTest(TestCase):
+    """Pure serializer-level checks for elapsed_search_seconds /
+    remaining_search_seconds — the values the frontend now treats as
+    authoritative instead of re-deriving them from local mount time."""
+
+    def setUp(self):
+        self.region = _make_region('TimingSerializerRegion')
+        self.boss = _make_region_boss(self.region)
+
+    def _run(self, **kwargs):
+        defaults = dict(
+            region=self.region,
+            run_by=self.boss,
+            status=AllocationRun.Status.RUNNING,
+            max_search_seconds=500,
+        )
+        defaults.update(kwargs)
+        run = AllocationRun(**defaults)
+        # bulk_create bypasses the model's overridden save()/full_clean(),
+        # same pattern _make_run() above already uses — lets these fixtures
+        # set search_started_at/completed_at combinations directly.
+        AllocationRun.objects.bulk_create([run])
+        return AllocationRun.objects.get(pk=run.pk)
+
+    def test_queued_or_pre_solve_shows_zero_elapsed_and_full_remaining(self):
+        run = self._run(status=AllocationRun.Status.QUEUED, search_started_at=None)
+        data = AllocationRunSerializer(run).data
+        self.assertEqual(data['elapsed_search_seconds'], 0)
+        self.assertEqual(data['remaining_search_seconds'], 500)
+
+    def test_running_elapsed_matches_now_minus_search_started_at(self):
+        started = timezone.now() - timedelta(seconds=200)
+        run = self._run(status=AllocationRun.Status.RUNNING, search_started_at=started)
+        data = AllocationRunSerializer(run).data
+        # allow a couple seconds of test-execution slack
+        self.assertAlmostEqual(data['elapsed_search_seconds'], 200, delta=3)
+        self.assertAlmostEqual(data['remaining_search_seconds'], 300, delta=3)
+
+    def test_completed_run_freezes_at_completed_at_not_now(self):
+        started = timezone.now() - timedelta(seconds=400)
+        completed = started + timedelta(seconds=120)
+        run = self._run(
+            status=AllocationRun.Status.COMPLETED,
+            search_started_at=started,
+            completed_at=completed,
+        )
+        data = AllocationRunSerializer(run).data
+        self.assertEqual(data['elapsed_search_seconds'], 120)
+        self.assertEqual(data['remaining_search_seconds'], 380)
+
+        # A second read (simulating a later GET on a finished run) must
+        # return the exact same frozen value, not one that keeps growing
+        # with real wall-clock time.
+        data_again = AllocationRunSerializer(run).data
+        self.assertEqual(data_again['elapsed_search_seconds'], 120)
+
+    def test_remaining_floors_at_zero_when_elapsed_exceeds_max(self):
+        started = timezone.now() - timedelta(seconds=999)
+        run = self._run(
+            status=AllocationRun.Status.RUNNING,
+            search_started_at=started,
+            max_search_seconds=500,
+        )
+        data = AllocationRunSerializer(run).data
+        self.assertEqual(data['remaining_search_seconds'], 0)
+
+    def test_no_max_search_seconds_means_no_remaining(self):
+        run = self._run(
+            status=AllocationRun.Status.RUNNING,
+            search_started_at=timezone.now(),
+            max_search_seconds=None,
+        )
+        data = AllocationRunSerializer(run).data
+        self.assertIsNone(data['remaining_search_seconds'])
 
 
 # ---------------------------------------------------------------------------

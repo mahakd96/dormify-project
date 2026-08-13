@@ -4,6 +4,7 @@ Convert database objects to JSON and vice versa
 """
 
 from django.contrib.auth import authenticate, get_user_model
+from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
@@ -1452,6 +1453,8 @@ class AllocationRunSerializer(serializers.ModelSerializer):
     region_name = serializers.CharField(source='region.name', read_only=True)
     run_by_name = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
+    elapsed_search_seconds = serializers.SerializerMethodField()
+    remaining_search_seconds = serializers.SerializerMethodField()
 
     class Meta:
         model = AllocationRun
@@ -1468,6 +1471,9 @@ class AllocationRunSerializer(serializers.ModelSerializer):
             'roommate_matches',
             'conflicts',
             'max_search_seconds',
+            'search_started_at',
+            'elapsed_search_seconds',
+            'remaining_search_seconds',
             'started_at',
             'completed_at',
             'error_message',
@@ -1478,6 +1484,28 @@ class AllocationRunSerializer(serializers.ModelSerializer):
         if not obj.run_by:
             return None
         return obj.run_by.get_full_name() or obj.run_by.email
+
+    def get_elapsed_search_seconds(self, obj):
+        """
+        Seconds of actual CP-SAT search time, anchored to
+        search_started_at (stamped by allocation.solver immediately
+        before solver.Solve() — see AllocationRun.search_started_at).
+        0 while the solver hasn't started searching yet (QUEUED, or still
+        loading/building candidates). Frozen at completed_at once the run
+        reaches a terminal status, so repeated reads of a finished run
+        never keep advancing.
+        """
+        if not obj.search_started_at:
+            return 0
+        end = obj.completed_at or timezone.now()
+        return max(0, round((end - obj.search_started_at).total_seconds()))
+
+    def get_remaining_search_seconds(self, obj):
+        """max_search_seconds minus elapsed_search_seconds, floored at 0."""
+        if obj.max_search_seconds is None:
+            return None
+        elapsed = self.get_elapsed_search_seconds(obj)
+        return max(0, obj.max_search_seconds - elapsed)
 
     def validate(self, attrs):
         instance = self.instance

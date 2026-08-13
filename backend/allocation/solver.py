@@ -1,5 +1,6 @@
 from collections import defaultdict
 from itertools import combinations
+import os
 import re
 import threading
 import unicodedata
@@ -24,7 +25,14 @@ WEIGHT_UNIT = 10
 # tests). This is a DEFAULT, not an upper bound - a user-selected "max
 # search time" can be smaller or much larger, see the MIN/MAX bounds below.
 DEFAULT_SOLVER_TIME_SECONDS = 500
-NUM_SEARCH_WORKERS = 2
+
+
+try:
+    NUM_SEARCH_WORKERS = int(os.getenv("ALLOCATION_NUM_SEARCH_WORKERS", "2"))
+except (TypeError, ValueError):
+    NUM_SEARCH_WORKERS = 2
+if NUM_SEARCH_WORKERS < 1:
+    NUM_SEARCH_WORKERS = 2
 
 # Reasonable bounds for a user-selected "max search time" (זמן חיפוש
 # מרבי). These are the backend-side belt-and-suspenders check:
@@ -61,44 +69,7 @@ EXCLUSIVE_HOUSING_TYPES = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Building 179 / כפר הסמכה automatic-allocation preference
-#
-# Confirmed data mapping (business + Excel, see ANIR_PRIORITY_ACCESSIBILITY_
-# AUDIT.md section 4/9A):
-#   - DormType.code == 15 is כפר הסמכה. This is the ONLY dorm type this
-#     policy applies to.
-#   - DormType.code == 11 is עליון עמים — a real, separate dorm type. It is
-#     mentioned here only so a future reader never re-confuses the two
-#     codes again; no functional logic in this file keys off code 11.
-#   - DormType.code is a domain/map code, not a Django primary key — never
-#     compare it against accepted_dorm_type_id or dorm_type_id.
-#   - כפר הסמכה's current Excel inventory includes Buildings 176, 177, 178
-#     and 179. Only 179 gets special automatic-allocation treatment; 176-
-#     178 are ordinary DormType-15 inventory and are deliberately NOT
-#     hard-coded anywhere below — overflow works through accepted-dorm-type
-#     matching (DormType.code == 15) so any future building added to this
-#     dorm type is automatically included with no code change.
-#
-# The rule is ASYMMETRIC, not mutually exclusive:
-#   - A student who is not an eligible Hasmaha ANIR student (see
-#     _is_hasmaha_anier_student) may never automatically consume Building-
-#     179 inventory. This is a hard candidate-eligibility rule.
-#   - An eligible Hasmaha ANIR student is not restricted to Building 179 —
-#     their candidates include every otherwise-compatible apartment in
-#     DormType 15. Building 179 is only their PREFERRED destination,
-#     implemented as a soft CP-SAT objective reward (see
-#     _add_building_179_preference), so they overflow into 176/177/178 (or
-#     any future DormType-15 building) whenever 179 lacks a compatible bed,
-#     while still respecting every hard constraint (gender, religion,
-#     capacity, housing type, existing occupants, etc).
-#
-# This policy governs AUTOMATIC allocation only. Authorized staff may still
-# manually assign any student into Building 179, or move a student out of
-# it, via the ordinary manual assignment/transfer/swap endpoints — those
-# endpoints intentionally never call the helpers below (confirmed business
-# rule: manual override remains permitted).
-# ---------------------------------------------------------------------------
+
 BUILDING_179_NUMBER = 179
 HASMAHA_DORM_TYPE_CODE = 15
 PRIORITY_BUILDING_CLUSTER_WEIGHT = 3
@@ -1597,8 +1568,17 @@ def _add_soft_group_compaction(
     weight,
     label,
 ):
+    """
+    Returns (created, used_var_by_group_scope, member_vars_by_group_scope)
+    — the two extra dicts are pure bookkeeping over what this function
+    already computes internally (which used_var/member_vars pair belongs
+    to which (group, apartment_or_room) scope). Nothing about which
+    variables get created, how they're linked, or what enters the
+    objective changes — see _add_group_capacity_valid_inequalities, the
+    only consumer of this extra data, for what it's used for.
+    """
     if weight <= 0:
-        return 0
+        return 0, {}, {}
 
     groups_by_apartment = defaultdict(lambda: defaultdict(list))
 
@@ -1611,10 +1591,12 @@ def _add_soft_group_compaction(
             if variable is not None:
                 groups_by_apartment[apartment_id][group].append(variable)
 
+    used_var_by_group_scope = {}
+    member_vars_by_group_scope = {}
     created = 0
     for apartment in apartments:
-        for group_index, member_vars in enumerate(
-            groups_by_apartment.get(apartment.id, {}).values(),
+        for group_index, (group_key, member_vars) in enumerate(
+            groups_by_apartment.get(apartment.id, {}).items(),
             start=1,
         ):
             used_var = model.NewBoolVar(
@@ -1623,8 +1605,76 @@ def _add_soft_group_compaction(
             _link_group_used_var(model, used_var, member_vars)
             objective_terms.append(used_var * (-weight * WEIGHT_UNIT))
             created += 1
+            used_var_by_group_scope[(group_key, apartment.id)] = used_var
+            member_vars_by_group_scope[(group_key, apartment.id)] = member_vars
 
-    return created
+    return created, used_var_by_group_scope, member_vars_by_group_scope
+
+
+def _add_group_capacity_valid_inequalities(
+    model,
+    students,
+    assigned_expr_by_student,
+    free_capacity_by_apartment,
+    group_scopes,
+):
+    """
+    Adds redundant (mathematically implied, never business-rule-changing)
+    aggregate valid inequalities strengthening the LP relaxation around
+    _add_soft_group_compaction's used_var booleans:
+
+        assigned_group_g <= sum_a( group_capacity[g,a] * used[g,a] )
+
+    Proof this is implied by the existing model, for every group g and
+    apartment a already tracked by _add_soft_group_compaction:
+      - _link_group_used_var(used[g,a], member_vars) already forces every
+        member_var <= used[g,a]. So used[g,a]=0 forces every group-g
+        candidate assignment at apartment a to 0 (0 actual placements),
+        and used[g,a]=1 is the only case where >0 placements are possible.
+      - group_capacity[g,a] = min(free_capacity[a], len(member_vars)) is
+        the min of two values ALREADY exact/authoritative in the model:
+        free_capacity[a] is the identical number the apartment's own
+        capacity constraint (elsewhere in this function's caller) uses,
+        and len(member_vars) is the count of distinct candidate variables
+        that exist at all — an assignment can never exceed the number of
+        variables available to set. The min of two safe upper bounds is
+        itself a safe upper bound; capacity is never underestimated.
+      - So actual-group-g-count-at-a <= group_capacity[g,a]*used[g,a] for
+        every apartment individually; summing over every apartment where
+        a group-g candidate exists (exactly the scopes this function
+        receives, sourced from the same student_candidates/assignment_vars
+        the rest of the model already uses) gives the inequality above.
+
+    Never called for group_scopes belonging to room-pairing rooms/
+    apartments — the caller only ever passes ordinary-apartment scopes,
+    since the analogous room-level capacity term was never derived or
+    tested; skipping room-pairing runs entirely (rather than guessing a
+    room-level bound) is the deliberately conservative choice here.
+
+    Returns the number of cuts added, for diagnostics only.
+    """
+    cuts_added = 0
+    for used_map, members_map, group_function in group_scopes:
+        groups_seen = defaultdict(list)
+        for (group_key, apartment_id), used_var in used_map.items():
+            member_vars = members_map[(group_key, apartment_id)]
+            capacity = min(
+                free_capacity_by_apartment.get(apartment_id, 0),
+                len(member_vars),
+            )
+            groups_seen[group_key].append((apartment_id, used_var, capacity))
+
+        for group_key, entries in groups_seen.items():
+            assigned_group_expr = sum(
+                assigned_expr_by_student[student.id]
+                for student in students
+                if group_function(student) == group_key
+            )
+            rhs = sum(capacity * used_var for _apt_id, used_var, capacity in entries)
+            model.Add(assigned_group_expr <= rhs)
+            cuts_added += 1
+
+    return cuts_added
 
 
 def _add_soft_mix_penalty(
@@ -2196,12 +2246,37 @@ class _LiveSolutionCallback(cp_model.CpSolverSolutionCallback if ORTOOLS_AVAILAB
 
         self._sequence += 1
 
+        # objective_value/best_objective_bound are both readable from
+        # CpSolverSolutionCallback in the installed OR-Tools version
+        # (confirmed: 9.10.4067 exposes BestObjectiveBound() on the
+        # callback itself, not just on CpSolver after Solve() returns).
+        # Gap formula intentionally identical to the post-solve
+        # calculation below (see absolute_gap/relative_gap after
+        # solver.Solve() returns) so a live snapshot's gap is directly
+        # comparable to the final result's gap, never a different metric.
+        #
+        # Important limitation: on_solution_callback only fires when
+        # CP-SAT finds a NEW INCUMBENT (better feasible solution). CP-SAT
+        # can also tighten best_objective_bound with NO new incumbent
+        # (pure bound improvement during proof-of-optimality search) -
+        # this installed version's public API has no separate bound-only
+        # callback, so bound tightening that happens between incumbents is
+        # invisible to us. What we capture here is "the bound as of the
+        # last incumbent event", not a continuously live bound.
+        objective_value = float(self.ObjectiveValue())
+        best_objective_bound = float(self.BestObjectiveBound())
+        absolute_gap = max(0.0, best_objective_bound - objective_value)
+        relative_gap = absolute_gap / max(1.0, abs(objective_value))
+
         return {
             "sequence": self._sequence,
             "assignments": assignments,
             "assigned_count": len(assignments),
             "unassigned_count": len(self._students) - len(assignments),
-            "objective_value": float(self.ObjectiveValue()),
+            "objective_value": objective_value,
+            "best_objective_bound": best_objective_bound,
+            "absolute_gap": absolute_gap,
+            "relative_gap": relative_gap,
             "wall_time_seconds": float(wall_time),
             "solver_status": "FEASIBLE",
             "captured_at": timezone.now().isoformat(),
@@ -2274,6 +2349,7 @@ def run_improved_ortools_allocation(
     max_relative_gap=0.0,
     persist_feasible_on_timeout=False,
     log_search_progress=False,
+    enable_group_capacity_cuts=False,
 ):
     if not ORTOOLS_AVAILABLE:
         raise ImportError("OR-Tools is not installed.")
@@ -2745,55 +2821,82 @@ def run_improved_ortools_allocation(
                     soft_terms.append(variable * reward)
 
     religion_group_vars = 0
+    religion_used_map, religion_members_map = {}, {}
     if use_same_religion:
-        religion_group_vars = _add_soft_group_compaction(
-            model,
-            soft_terms,
-            students,
-            ordinary_apartments,
-            assignment_vars,
-            student_candidates,
-            _religion_key,
-            religion_weight,
-            "religion",
-        )
-        if room_pairing_rooms:
-            religion_group_vars += _add_soft_group_compaction(
+        religion_group_vars, religion_used_map, religion_members_map = (
+            _add_soft_group_compaction(
                 model,
                 soft_terms,
                 students,
-                room_pairing_rooms,
-                room_assignment_vars,
-                student_room_candidates,
+                ordinary_apartments,
+                assignment_vars,
+                student_candidates,
                 _religion_key,
                 religion_weight,
-                "religion_room",
+                "religion",
             )
-
-    sector_group_vars = 0
-    if use_sector_matching:
-        sector_group_vars = _add_soft_group_compaction(
-            model,
-            soft_terms,
-            students,
-            ordinary_apartments,
-            assignment_vars,
-            student_candidates,
-            _sector_key,
-            sector_weight,
-            "sector",
         )
         if room_pairing_rooms:
-            sector_group_vars += _add_soft_group_compaction(
+            extra_created, _room_used_map, _room_members_map = (
+                _add_soft_group_compaction(
+                    model,
+                    soft_terms,
+                    students,
+                    room_pairing_rooms,
+                    room_assignment_vars,
+                    student_room_candidates,
+                    _religion_key,
+                    religion_weight,
+                    "religion_room",
+                )
+            )
+            religion_group_vars += extra_created
+
+    sector_group_vars = 0
+    sector_used_map, sector_members_map = {}, {}
+    if use_sector_matching:
+        sector_group_vars, sector_used_map, sector_members_map = (
+            _add_soft_group_compaction(
                 model,
                 soft_terms,
                 students,
-                room_pairing_rooms,
-                room_assignment_vars,
-                student_room_candidates,
+                ordinary_apartments,
+                assignment_vars,
+                student_candidates,
                 _sector_key,
                 sector_weight,
-                "sector_room",
+                "sector",
+            )
+        )
+        if room_pairing_rooms:
+            extra_created, _room_used_map, _room_members_map = (
+                _add_soft_group_compaction(
+                    model,
+                    soft_terms,
+                    students,
+                    room_pairing_rooms,
+                    room_assignment_vars,
+                    student_room_candidates,
+                    _sector_key,
+                    sector_weight,
+                    "sector_room",
+                )
+            )
+            sector_group_vars += extra_created
+
+    if enable_group_capacity_cuts and not room_pairing_apartment_ids:
+        group_scopes = []
+        if use_same_religion and religion_used_map:
+            group_scopes.append((religion_used_map, religion_members_map, _religion_key))
+        if use_sector_matching and sector_used_map:
+            group_scopes.append((sector_used_map, sector_members_map, _sector_key))
+        if group_scopes:
+            _add_group_capacity_valid_inequalities(
+                model,
+                students,
+                assigned_expr_by_student,
+                free_capacity_by_apartment,
+                group_scopes,
             )
 
     year_mix_vars = 0
@@ -2926,6 +3029,20 @@ def run_improved_ortools_allocation(
 
     if max_relative_gap > 0:
         solver.parameters.relative_gap_limit = max_relative_gap
+
+    # Stamp the real search-start moment now — model/candidate generation
+    # above (DB loading, _build_candidate_apartments/_build_candidate_rooms,
+    # constraint/objective construction) can take meaningfully longer than
+    # an instant, so this is deliberately NOT AllocationRun.started_at
+    # (set at row creation, before any of that work). AllocationRunSerializer
+    # derives elapsed_search_seconds/remaining_search_seconds from this
+    # field so the frontend can reconstruct accurate timing after
+    # navigating away, refreshing, or opening the page in a new tab. Only
+    # a timing instrumentation write — does not affect solver behavior.
+    if allocation_run_id is not None:
+        AllocationRun.objects.filter(pk=allocation_run_id).update(
+            search_started_at=timezone.now(),
+        )
 
     _solver_log(
         "solve_start",
