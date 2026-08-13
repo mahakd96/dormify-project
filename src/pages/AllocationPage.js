@@ -30,14 +30,14 @@ import {
   Info,
 } from 'lucide-react';
 
-// Mirrors the backend's MIN_USER_SOLVER_TIME_SECONDS / MAX_USER_SOLVER_TIME_SECONDS
-// (allocation/solver.py) so the frontend can validate before ever sending a
-// request - the backend re-validates independently regardless, so a
-// malformed/bypassed request can never hand CP-SAT an unreasonable duration.
+
 const MIN_SOLVER_SECONDS = 1;
 const MAX_SOLVER_SECONDS = 36000; // 10 hours
 const DEFAULT_SOLVER_SECONDS = 500;
 const SOLVER_UNIT_TO_SECONDS = { seconds: 1, minutes: 60, hours: 3600 };
+
+
+const LIVE_RUN_STATUSES = ['queued', 'running', 'cancellation_requested', 'stop_and_save_requested'];
 const PREVIEW_POLL_INTERVAL_MS = 5000;
 
 // ─────────────────────────────────────────────
@@ -384,7 +384,6 @@ function AllocationPage({ language = 'he' }) {
 
   // ── Run State ───────────────────────────────
   const [isRunning, setIsRunning]   = useState(false);
-  const [progress, setProgress]     = useState(0);
   const [result, setResult]         = useState(null);
   const [runId, setRunId]           = useState(null);
   const [runStatus, setRunStatus]   = useState(null);
@@ -408,7 +407,19 @@ function AllocationPage({ language = 'he' }) {
   const [confirmModal, setConfirmModal] = useState(null);
   const [toast, setToast]               = useState(null);
   const [expandedType, setExpandedType] = useState(null);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  // ── Search Timing State ──────────────────────
+  // Anchored to the backend's AllocationRun.search_started_at (via
+  // AllocationRunSerializer.elapsed_search_seconds/remaining_search_seconds
+  // — see get_active_allocation_run / get_allocation_run_detail), never to
+  // local React lifetime. `searchTiming` holds the last server-confirmed
+  // snapshot plus the client clock at the moment it was received; the
+  // ticking effect below only ever extrapolates FROM that anchor, so a
+  // page navigation, refresh, or a second tab opened on /allocation all
+  // recompute the same correct elapsed/remaining from persisted backend
+  // state instead of restarting from zero.
+  const [searchTiming, setSearchTiming] = useState(null);
+  const [displayElapsed, setDisplayElapsed] = useState(0);
 
   // ── Constraints State ────────────────────────
   const [constraints, setConstraints] = useState({
@@ -428,8 +439,6 @@ function AllocationPage({ language = 'he' }) {
   // ── Refs ────────────────────────────────────
   const pollRef = useRef(null);
   const mountedRef = useRef(true);
-  const runStartRef = useRef(null);
-  const timerRef = useRef(null);
   const previewPollRef = useRef(null);
   const previewSequenceRef = useRef(0);
   const previewHasContentRef = useRef(false);
@@ -525,7 +534,8 @@ function AllocationPage({ language = 'he' }) {
         maxSearchTimeInvalid: 'יש להזין זמן חיפוש תקין',
         maxSearchTimeTooLow: 'זמן החיפוש המינימלי הוא שנייה אחת',
         maxSearchTimeTooHigh: 'זמן החיפוש המרבי הוא 10 שעות',
-        maxSearchTimeConfiguredLabel: 'זמן מרבי מוגדר',
+        elapsedLabel: 'זמן שעבר',
+        finalSearchDurationLabel: 'זמן ריצה',
         // Current-result preview ("צפה בתוצאה הנוכחית")
         viewCurrentResult: 'צפה בתוצאה הנוכחית',
         previewTitle: 'תוצאה זמנית',
@@ -705,7 +715,8 @@ function AllocationPage({ language = 'he' }) {
         maxSearchTimeInvalid: 'Enter a valid search time',
         maxSearchTimeTooLow: 'Minimum search time is 1 second',
         maxSearchTimeTooHigh: 'Maximum search time is 10 hours',
-        maxSearchTimeConfiguredLabel: 'Configured max time',
+        elapsedLabel: 'Elapsed',
+        finalSearchDurationLabel: 'Run time',
         // Current-result preview
         viewCurrentResult: 'View Current Result',
         previewTitle: 'Temporary Result',
@@ -1005,8 +1016,13 @@ function AllocationPage({ language = 'he' }) {
   }, [maxSolverValue, maxSolverUnit]);
 
   const formatElapsed = (secs) => {
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
+    const total = Math.max(0, Math.round(Number(secs) || 0));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h > 0) {
+      return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
     return `${m}:${String(s).padStart(2, '0')}`;
   };
 
@@ -1045,6 +1061,15 @@ function AllocationPage({ language = 'he' }) {
   // _may_use_building_179_automatically). Every other region shows the
   // generic priority-placement message instead.
   const isUpperDorm = summary?.region?.id === 'gush-elyon';
+
+  // The progress bar represents ONLY elapsed-vs-configured-max search
+  // time — never algorithm/optimality completion. CP-SAT gives no live
+  // signal for "how close to done" beyond elapsed time itself (see the
+  // optimality-proof investigation), so this bar must not be read as
+  // "X% solved."
+  const progressPct = searchTiming?.maxSearchSeconds
+    ? Math.min(100, Math.round((displayElapsed / searchTiming.maxSearchSeconds) * 100))
+    : 0;
   const effectiveConfig = useMemo(() => {
     const out = {};
     Object.entries(constraints).forEach(([k, v]) => {
@@ -1138,22 +1163,36 @@ function AllocationPage({ language = 'he' }) {
     Boolean(runId) &&
     canRun;
 
-  // ── Elapsed Timer ────────────────────────────
+  // ── Search Timing Display (ticks locally, anchored to the backend) ──
+  // Extrapolates from `searchTiming` (last server-confirmed snapshot) using
+  // the client clock only for smooth per-second display between the 3s
+  // polling ticks — never as the source of truth. Every poll response
+  // re-anchors `searchTiming` (see applySearchTiming), so this self-heals
+  // after navigating away/back, a refresh, tab throttling, etc. instead of
+  // drifting or restarting from zero.
   useEffect(() => {
-    if (isRunning) {
-      runStartRef.current = Date.now();
-      timerRef.current = setInterval(() => {
-        if (mountedRef.current) {
-          setElapsedSeconds(Math.floor((Date.now() - runStartRef.current) / 1000));
-        }
-      }, 1000);
-    } else {
-      clearInterval(timerRef.current);
-      if (!isRunning) setElapsedSeconds(0);
-      runStartRef.current = null;
+    if (!searchTiming) {
+      setDisplayElapsed(0);
+      return;
     }
-    return () => clearInterval(timerRef.current);
-  }, [isRunning]);
+
+    const tick = () => {
+      if (!mountedRef.current) return;
+      if (searchTiming.live) {
+        const nextElapsed = searchTiming.elapsedAtSync + (Date.now() - searchTiming.syncedAtClientMs) / 1000;
+        setDisplayElapsed(nextElapsed);
+      } else {
+        // Terminal / not-yet-searching snapshot: frozen, no ticking.
+        setDisplayElapsed(searchTiming.elapsedAtSync);
+      }
+    };
+
+    tick();
+    if (!searchTiming.live) return undefined;
+
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [searchTiming]);
 
   // ── Data Fetching ────────────────────────────
   const loadPage = useCallback(async () => {
@@ -1193,6 +1232,28 @@ function AllocationPage({ language = 'he' }) {
     return normalizedSummary;
   }, [central, getErrorMessage, safeInbox, safeSummary]);
 
+  // Seeds/refreshes the backend-anchored search-timing snapshot from a
+  // serialized AllocationRun (see AllocationRunSerializer.elapsed_search_seconds
+  // / remaining_search_seconds). Called on every poll tick and whenever a
+  // run is (re)discovered, so the anchor self-corrects continuously
+  // instead of ever depending on when this component happened to mount.
+  const applySearchTiming = useCallback((runData) => {
+    if (!runData) {
+      setSearchTiming(null);
+      return;
+    }
+    const max = runData.max_search_seconds != null ? Number(runData.max_search_seconds) : null;
+    const elapsed = Number(runData.elapsed_search_seconds) || 0;
+    const remaining = runData.remaining_search_seconds != null ? Number(runData.remaining_search_seconds) : null;
+    setSearchTiming({
+      maxSearchSeconds: max,
+      elapsedAtSync: elapsed,
+      remainingAtSync: remaining,
+      syncedAtClientMs: Date.now(),
+      live: LIVE_RUN_STATUSES.includes(runData.status),
+    });
+  }, []);
+
   const startPolling = useCallback((id) => {
     stopPolling();
     pollRef.current = setInterval(async () => {
@@ -1205,6 +1266,7 @@ function AllocationPage({ language = 'he' }) {
 
         if (!mountedRef.current) return;
         setRunStatus(st);
+        applySearchTiming(runData);
 
         if (st === 'completed') {
           stopPolling();
@@ -1212,7 +1274,6 @@ function AllocationPage({ language = 'he' }) {
           setIsRunning(false);
           setIsStopping(false);
           setIsStoppingSave(false);
-          setProgress(100);
           setResult({
             successful_assignments: data.successful_assignments ?? runData?.successful_assignments ?? 0,
             roommate_matches:       data.roommate_matches ?? runData?.roommate_matches ?? 0,
@@ -1222,6 +1283,11 @@ function AllocationPage({ language = 'he' }) {
             solver_status:          data.solver_status ?? null,
             optimality_proven:      Boolean(data.optimality_proven),
             stopped_early_by_user:  Boolean(data.stopped_early_by_user),
+            // Frozen final search duration (backend-computed, see
+            // AllocationRunSerializer.elapsed_search_seconds) — shown as
+            // "זמן ריצה" after completion, distinct from the live-preview's
+            // own wall_time (PreviewPanel keeps its own separate label).
+            final_search_seconds:   runData?.elapsed_search_seconds ?? null,
             run:                    runData,
           });
           loadPage().catch(() => {});
@@ -1232,7 +1298,6 @@ function AllocationPage({ language = 'he' }) {
           setIsRunning(false);
           setIsStopping(false);
           setIsStoppingSave(false);
-          setProgress(0);
           setResult(null);
           setRunId(null);
           setRunStatus(null);
@@ -1241,18 +1306,14 @@ function AllocationPage({ language = 'he' }) {
           else if (st === 'failed')  showToast(runData?.error_message || t.unknownError, 'error');
         } else if (st === 'cancellation_requested') {
           setIsStopping(true);
-          setProgress((prev) => Math.min(prev + 2, 95));
         } else if (st === 'stop_and_save_requested') {
           setIsStoppingSave(true);
-          setProgress((prev) => Math.min(prev + 2, 95));
-        } else if (st === 'running' || st === 'queued') {
-          setProgress((prev) => Math.min(prev + 3, 92));
         }
       } catch (err) {
         console.warn('Polling error:', err);
       }
     }, 3000);
-  }, [stopPolling, closePreview, loadPage, showToast, t.stoppedStatus, t.unknownError, t.stopAndSaveSuccess, safePopulationSummary]);
+  }, [stopPolling, closePreview, loadPage, showToast, t.stoppedStatus, t.unknownError, t.stopAndSaveSuccess, safePopulationSummary, applySearchTiming]);
 
   const recoverActiveRun = useCallback(
   async (regionId, currentSummary = null) => {
@@ -1276,12 +1337,7 @@ function AllocationPage({ language = 'he' }) {
       const hasAssignmentsNow =
         assignedNow > 0;
 
-      const activeStatuses = [
-        'queued',
-        'running',
-        'cancellation_requested',
-        'stop_and_save_requested',
-      ];
+      const activeStatuses = LIVE_RUN_STATUSES;
 
       /*
        * הרצה שרצה כרגע נשחזר תמיד,
@@ -1291,6 +1347,7 @@ function AllocationPage({ language = 'he' }) {
         setRunId(run.id);
         setRunStatus(run.status);
         setIsRunning(true);
+        applySearchTiming(run);
 
         if (
           run.status ===
@@ -1370,6 +1427,9 @@ function AllocationPage({ language = 'he' }) {
               population_summary:
                 safePopulationSummary(detail.population_summary),
 
+              final_search_seconds:
+                detail.run?.elapsed_search_seconds ?? null,
+
               run: detail.run,
             });
           }
@@ -1397,7 +1457,7 @@ function AllocationPage({ language = 'he' }) {
       );
     }
   },
-  [startPolling, safePopulationSummary]
+  [startPolling, safePopulationSummary, applySearchTiming]
 );
 
   const loadPageRef = useRef(loadPage);
@@ -1469,11 +1529,11 @@ function AllocationPage({ language = 'he' }) {
     setMaxSolverError('');
 
     setIsRunning(true);
-    setProgress(0);
     setResult(null);
     setError(null);
     setRunId(null);
     setRunStatus(null);
+    setSearchTiming(null);
     setPreviewSnapshot(null);
     setPreviewHasNewer(false);
     previewSequenceRef.current = 0;
@@ -1497,6 +1557,7 @@ function AllocationPage({ language = 'he' }) {
 
       setRunId(id);
       setRunStatus('queued');
+      applySearchTiming(response?.run);
       startPolling(id);
 
       if (inboxItem?.id) {
@@ -1507,6 +1568,7 @@ function AllocationPage({ language = 'he' }) {
       setIsRunning(false);
       setRunId(null);
       setRunStatus(null);
+      setSearchTiming(null);
     }
   };
 
@@ -1568,9 +1630,9 @@ stopPolling();
 setResult(null);
 setRunId(null);
 setRunStatus(null);
+setSearchTiming(null);
 setIsRunning(false);
 setIsStopping(false);
-setProgress(0);
 
 await loadPage();
 
@@ -1690,6 +1752,16 @@ showToast(
                 <div className="ap-last-run">
                   <Clock size={13} />
                   <span>{lastRunDate}</span>
+                </div>
+              )}
+              {/* Frozen final search duration, only after completion — no
+                  max/remaining shown here, matching the live card. The
+                  live-preview's own elapsed label (PreviewPanel) stays
+                  entirely separate and is never conflated with this. */}
+              {!isRunning && result?.final_search_seconds != null && (
+                <div className="ap-last-run">
+                  <Clock size={13} />
+                  <span>{t.finalSearchDurationLabel}: {formatElapsed(result.final_search_seconds)}</span>
                 </div>
               )}
             </div>
@@ -1969,29 +2041,31 @@ showToast(
               </div>
               <div className="ap-progress-timer">
                 <Clock size={13} />
-                <span>{formatElapsed(elapsedSeconds)}</span>
+                <span>{t.elapsedLabel}</span>
+                <span>{formatElapsed(displayElapsed)}</span>
               </div>
             </div>
 
+            {/* Bar = elapsed / configured max search time ONLY — never an
+                algorithm/optimality-completion estimate. CP-SAT gives no
+                live "how close to done" signal beyond elapsed time; do not
+                relabel this as "% completed". Anchored to the backend
+                (AllocationRun.search_started_at via elapsed_search_seconds),
+                never to how long this page happened to be open — survives
+                navigation, refresh, and a second tab. This is a MAXIMUM,
+                not a promise: an earlier OPTIMAL proof stops the solver
+                (and this bar) sooner. */}
             <div className="ap-progress-bar-wrap">
               <div className="ap-progress-bar">
-                <div className="ap-progress-fill" style={{ width: `${progress}%` }} />
+                <div className="ap-progress-fill" style={{ width: `${progressPct}%` }} />
               </div>
-              <span className="ap-progress-pct">{progress}%</span>
+              <span className="ap-progress-pct">{progressPct}%</span>
             </div>
 
             <div className="ap-progress-detail">
               <span className="ap-progress-chip">
                 <Users size={12} />
                 {summary?.unassigned_students || 0} {t.students}
-              </span>
-              <span className="ap-progress-chip ap-chip-blue">
-                <Clock size={12} />
-                {t.maxSearchTimeConfiguredLabel}: {maxSolverValue} {
-                  maxSolverUnit === 'seconds' ? t.maxSearchTimeUnitSeconds
-                  : maxSolverUnit === 'minutes' ? t.maxSearchTimeUnitMinutes
-                  : t.maxSearchTimeUnitHours
-                }
               </span>
             </div>
           </div>

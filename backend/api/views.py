@@ -3728,30 +3728,26 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
 # =========================
 
 def _run_diagnostics_payload(result):
-    """
-    Build the {"warnings": [...], "anier_building_179_diagnostics": {...},
-    "solver_status": ..., "optimality_proven": ...} shape persisted on
-    AllocationRun.diagnostics, from a solver result dict. Shared by both
-    the sync and async allocation entry points so neither path can
-    silently drop this data or diverge in shape.
-
-    solver_status/optimality_proven are already computed by
-    run_improved_ortools_allocation (solver.py) for every run; surfacing
-    them here lets the frontend show "not proven optimal" for a FEASIBLE
-    (as opposed to OPTIMAL) result without changing any solve behavior.
-    """
     if not isinstance(result, dict):
         return {
             'warnings': [],
             'anier_building_179_diagnostics': {},
             'solver_status': None,
             'optimality_proven': False,
+            'objective_value': None,
+            'best_objective_bound': None,
+            'absolute_gap': None,
+            'relative_gap': None,
         }
     return {
         'warnings': result.get('warnings', []),
         'anier_building_179_diagnostics': result.get('anier_building_179_diagnostics', {}),
         'solver_status': result.get('solver_status'),
         'optimality_proven': bool(result.get('optimality_proven', False)),
+        'objective_value': result.get('objective_value'),
+        'best_objective_bound': result.get('best_objective_bound'),
+        'absolute_gap': result.get('absolute_gap'),
+        'relative_gap': result.get('relative_gap'),
     }
 
 
@@ -4062,7 +4058,8 @@ def run_allocation(request):
         result = run_improved_ortools_allocation(
             students=students,
             rooms=rooms,
-            constraints_config=constraints_config
+            constraints_config=constraints_config,
+            enable_group_capacity_cuts=True,
         ) or {}
 
         print(
@@ -4388,6 +4385,7 @@ def retry_unassigned_allocation_run(request, run_id):
             rooms=rooms,
             constraints_config=constraints_config,
             allocation_run_id=retry_run.id,
+            enable_group_capacity_cuts=True,
         ) or {}
 
         roommate_matches = result.get('roommate_matches')
@@ -4684,13 +4682,9 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                 constraints_config=constraints_config,
                 allocation_run_id=allocation_run_id,
                 max_seconds=max_seconds,
+                enable_group_capacity_cuts=True,
             ) or {}
 
-            # Persisted immediately (not held in process memory) so this
-            # data survives a worker restart and is visible to any worker
-            # handling the later GET /api/allocation/runs/<id>/ request —
-            # regardless of whether the run below turns out COMPLETED or
-            # gets cancelled to STOPPED.
             AllocationRun.objects.filter(pk=allocation_run_id).update(
                 diagnostics={
                     **_run_diagnostics_payload(result),
