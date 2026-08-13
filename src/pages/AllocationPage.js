@@ -30,6 +30,16 @@ import {
   Info,
 } from 'lucide-react';
 
+// Mirrors the backend's MIN_USER_SOLVER_TIME_SECONDS / MAX_USER_SOLVER_TIME_SECONDS
+// (allocation/solver.py) so the frontend can validate before ever sending a
+// request - the backend re-validates independently regardless, so a
+// malformed/bypassed request can never hand CP-SAT an unreasonable duration.
+const MIN_SOLVER_SECONDS = 1;
+const MAX_SOLVER_SECONDS = 36000; // 10 hours
+const DEFAULT_SOLVER_SECONDS = 500;
+const SOLVER_UNIT_TO_SECONDS = { seconds: 1, minutes: 60, hours: 3600 };
+const PREVIEW_POLL_INTERVAL_MS = 5000;
+
 // ─────────────────────────────────────────────
 // Sub-components
 // ─────────────────────────────────────────────
@@ -40,6 +50,7 @@ function StatusBadge({ statusKey, t }) {
     queued:      { label: t.statusQueued,      cls: 'badge-blue', dot: true },
     running:     { label: t.statusRunning,     cls: 'badge-blue', dot: true, pulse: true },
     cancellation_requested: { label: t.statusStopping, cls: 'badge-amber', dot: true, pulse: true },
+    stop_and_save_requested: { label: t.statusStopSaveRequested, cls: 'badge-amber', dot: true, pulse: true },
     stopped:     { label: t.statusStopped,    cls: 'badge-gray', dot: false },
     completed:   { label: t.statusCompleted,  cls: 'badge-green', dot: false },
     failed:      { label: t.statusFailed,     cls: 'badge-red', dot: false },
@@ -81,6 +92,110 @@ function ConfirmDialog({ modal, t, onClose }) {
           <button className="ap-modal-cancel" onClick={onClose}>{t.cancel}</button>
           <button className="ap-modal-confirm" onClick={modal.onConfirm}>{t.confirm}</button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function PreviewPanel({ open, loading, errorMsg, snapshot, hasNewer, t, onClose, onRefresh, formatElapsed }) {
+  if (!open) return null;
+
+  const assignments = Array.isArray(snapshot?.assignments) ? snapshot.assignments : [];
+  const assignedCount = snapshot?.assigned_count ?? assignments.length;
+  const unassignedCount = snapshot?.unassigned_count ?? 0;
+  const solverStatus = snapshot?.solver_status;
+  const wallTime = Number(snapshot?.wall_time_seconds) || 0;
+
+  return (
+    <div className="ap-modal-overlay" role="dialog" aria-modal="true">
+      <div className="ap-preview-box">
+        <div className="ap-preview-header">
+          <div>
+            <h3 className="ap-preview-title">{t.previewTitle}</h3>
+            <p className="ap-preview-subtitle">{t.previewSubtitle}</p>
+          </div>
+          <button className="ap-preview-close" onClick={onClose} aria-label={t.previewClose}>×</button>
+        </div>
+
+        {hasNewer && (
+          <div className="ap-preview-newer-banner">
+            <span>{t.previewNewerAvailable}</span>
+            <button className="ap-btn ap-btn-primary ap-btn-sm" onClick={onRefresh}>
+              <RefreshCw size={13} />
+              {t.previewRefresh}
+            </button>
+          </div>
+        )}
+
+        {loading && !snapshot ? (
+          <div className="ap-preview-empty">
+            <Loader size={20} className="ap-spin" />
+            <span>{t.previewLoadingMsg}</span>
+          </div>
+        ) : errorMsg && !snapshot ? (
+          <div className="ap-preview-empty">
+            <XCircle size={20} />
+            <span>{errorMsg}</span>
+          </div>
+        ) : !snapshot ? (
+          <div className="ap-preview-empty">
+            <Info size={20} />
+            <span>{t.previewUnavailable}</span>
+          </div>
+        ) : (
+          <>
+            <div className="ap-preview-stats">
+              <div className="ap-preview-stat">
+                <div className="ap-preview-stat-val ap-stat-green-text">{assignedCount}</div>
+                <div className="ap-preview-stat-lbl">{t.previewAssignedLabel}</div>
+              </div>
+              <div className="ap-preview-stat">
+                <div className="ap-preview-stat-val ap-stat-amber-text">{unassignedCount}</div>
+                <div className="ap-preview-stat-lbl">{t.previewUnassignedLabel}</div>
+              </div>
+              <div className="ap-preview-stat">
+                <div className="ap-preview-stat-val">
+                  {solverStatus === 'OPTIMAL' ? t.previewOptimalState : t.previewFeasibleState}
+                </div>
+                <div className="ap-preview-stat-lbl">{t.previewSolverStateLabel}</div>
+              </div>
+              <div className="ap-preview-stat">
+                <div className="ap-preview-stat-val">{formatElapsed(Math.round(wallTime))}</div>
+                <div className="ap-preview-stat-lbl">{t.previewElapsedLabel}</div>
+              </div>
+            </div>
+
+            <div className="ap-preview-table-wrap">
+              {assignments.length === 0 ? (
+                <div className="ap-empty-hint">
+                  <Info size={14} />
+                  <span>{t.previewTableEmpty}</span>
+                </div>
+              ) : (
+                <table className="ap-preview-table">
+                  <thead>
+                    <tr>
+                      <th>{t.previewStudentCol}</th>
+                      <th>{t.previewApartmentCol}</th>
+                      <th>{t.previewRoomCol}</th>
+                      <th>{t.previewBedCol}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {assignments.map((row) => (
+                      <tr key={row.student_db_id ?? `${row.bed_id}-${row.student_id}`}>
+                        <td>{row.student_name}</td>
+                        <td>{row.apartment_code}</td>
+                        <td>{row.room_code}</td>
+                        <td>{row.bed_label}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -170,17 +285,21 @@ function InventoryTypeRow({ typeKey, label, item, expandedType, onToggle, t }) {
   );
 }
 
-function CriticalConditionCard({ condKey, t }) {
+function CriticalConditionCard({ condKey, t, titleKey, highlight }) {
+  const resolvedTitleKey = titleKey || condKey;
+  const title = t[resolvedTitleKey] || resolvedTitleKey;
+  const desc = t[`${resolvedTitleKey}Desc`];
+  const desc2 = t[`${resolvedTitleKey}Desc2`];
+
   return (
-    <div className="ap-cond-card ap-cond-critical">
+    <div className={`ap-cond-card ap-cond-critical${highlight ? ' ap-cond-highlight' : ''}`}>
       <div className="ap-cond-icon-wrap ap-cond-icon-critical">
         <Lock size={13} />
       </div>
       <div className="ap-cond-body">
-        <div className="ap-cond-name">{t[condKey] || condKey}</div>
-        {t[`${condKey}Desc`] && (
-          <div className="ap-cond-desc">{t[`${condKey}Desc`]}</div>
-        )}
+        <div className="ap-cond-name">{title}</div>
+        {desc && <div className="ap-cond-desc">{desc}</div>}
+        {desc2 && <div className="ap-cond-desc ap-cond-desc-2">{desc2}</div>}
         <div className="ap-cond-meta">
           <span className="ap-cond-badge ap-cond-badge-critical">
             <ShieldCheck size={11} /> {t.hardConstraint}
@@ -270,7 +389,20 @@ function AllocationPage({ language = 'he' }) {
   const [runId, setRunId]           = useState(null);
   const [runStatus, setRunStatus]   = useState(null);
   const [isStopping, setIsStopping] = useState(false);
+  const [isStoppingSave, setIsStoppingSave] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // ── Max Solver Time State ("זמן חיפוש מרבי") ──
+  const [maxSolverValue, setMaxSolverValue] = useState(String(DEFAULT_SOLVER_SECONDS));
+  const [maxSolverUnit, setMaxSolverUnit]   = useState('seconds');
+  const [maxSolverError, setMaxSolverError] = useState('');
+
+  // ── Current-Result Preview State ("צפה בתוצאה הנוכחית") ──
+  const [isPreviewOpen, setIsPreviewOpen]     = useState(false);
+  const [previewSnapshot, setPreviewSnapshot] = useState(null);
+  const [previewLoading, setPreviewLoading]   = useState(false);
+  const [previewErrorMsg, setPreviewErrorMsg] = useState('');
+  const [previewHasNewer, setPreviewHasNewer] = useState(false);
 
   // ── UI State ────────────────────────────────
   const [confirmModal, setConfirmModal] = useState(null);
@@ -298,6 +430,9 @@ function AllocationPage({ language = 'he' }) {
   const mountedRef = useRef(true);
   const runStartRef = useRef(null);
   const timerRef = useRef(null);
+  const previewPollRef = useRef(null);
+  const previewSequenceRef = useRef(0);
+  const previewHasContentRef = useRef(false);
 
   // ── Translations ────────────────────────────
   const t = useMemo(() => {
@@ -307,8 +442,8 @@ function AllocationPage({ language = 'he' }) {
         subtitle: '',
         runAllocation: 'הפעל שיבוץ',
         running: 'מריץ שיבוץ...',
-        stopAllocation: 'עצור שיבוץ',
-        stoppingStopping: 'עוצר...',
+        stopAllocation: 'בטל הרצה',
+        stoppingStopping: 'מבטל...',
         deleteResults: 'מחק תוצאות',
         deletingResults: 'מוחק...',
         viewResults: 'צפה בתוצאות',
@@ -361,8 +496,12 @@ function AllocationPage({ language = 'he' }) {
         // Constraint names
         sameGender:        'אותו מגדר בדירה',
         sameGenderDesc:    'סטודנטים מוקצים לדירות מגדריות מתאימות',
-        priorityFirst:     'סטודנטים בעדיפות קודמים',
-        priorityFirstDesc: 'סטודנטים אנייר זכאים בכפר הסמכה משובצים בעדיפות לבניין 179; כאשר אין בבניין 179 מיטה פנויה מתאימה, הם משובצים בבניין אחר בתוך כפר הסמכה. שאר סטודנטי העדיפות יכולים להישבץ בכל סוג מעונות ומקובצים יחד ככל האפשר',
+        priorityFirst:     'סטודנטים בעדיפות',
+        priorityFirstDesc: 'סטודנטים בעדיפות יקבלו קדימות בשיבוץ.',
+        priorityFirstDesc2: 'כאשר ניתן, המערכת תעדיף ריכוז באותו בניין.',
+        priorityFirstAnier:     'עדיפות אניר',
+        priorityFirstAnierDesc: 'סטודנטים באניר יקבלו עדיפות לבניין 179 כאשר יש זמינות.',
+        priorityFirstAnierDesc2: 'אם אין זמינות, יישקלו פתרונות מתאימים נוספים.',
         roommatePositiveOnly: '100% תשובות חיוביות לשותפים',
         roommatePositiveOnlyDesc: 'רק בקשות שותפים הדדיות מאושרות מלאות',
         ReligiousTogether: '100% התאמות דתיות',
@@ -377,6 +516,46 @@ function AllocationPage({ language = 'he' }) {
         avoidYearMix_1_with_3_4Desc: 'מונע שיבוץ של סטודנטי שנה ראשונה עם שנה שלישית/רביעית',
         avoidAtudaimWithHasmaha: 'לא לשבץ הסמכה עם עתודאים',
         avoidAtudaimWithHashmahaDesc: 'מונע שיבוץ משותף של סטודנטי הסמכה ועתודאים',
+        // Max search time (before run)
+        maxSearchTimeLabel: 'זמן חיפוש מרבי',
+        maxSearchTimeHint: 'השיבוץ עשוי להסתיים מוקדם יותר אם יימצא פתרון מיטבי',
+        maxSearchTimeUnitSeconds: 'שניות',
+        maxSearchTimeUnitMinutes: 'דקות',
+        maxSearchTimeUnitHours: 'שעות',
+        maxSearchTimeInvalid: 'יש להזין זמן חיפוש תקין',
+        maxSearchTimeTooLow: 'זמן החיפוש המינימלי הוא שנייה אחת',
+        maxSearchTimeTooHigh: 'זמן החיפוש המרבי הוא 10 שעות',
+        maxSearchTimeConfiguredLabel: 'זמן מרבי מוגדר',
+        // Current-result preview ("צפה בתוצאה הנוכחית")
+        viewCurrentResult: 'צפה בתוצאה הנוכחית',
+        previewTitle: 'תוצאה זמנית',
+        previewSubtitle: 'האלגוריתם עדיין ממשיך לחפש פתרון טוב יותר',
+        previewLoadingMsg: 'טוען תוצאה נוכחית...',
+        previewUnavailable: 'טרם נמצא פתרון ראשוני. נסו שוב בעוד רגע.',
+        previewAssignedLabel: 'שובצו',
+        previewUnassignedLabel: 'לא שובצו',
+        previewSolverStateLabel: 'מצב הפתרון',
+        previewElapsedLabel: 'זמן חלף',
+        previewNewerAvailable: 'נמצאה תוצאה חדשה יותר',
+        previewRefresh: 'רענן תוצאה',
+        previewClose: 'סגור',
+        previewErrorMsg: 'שגיאה בטעינת התוצאה הנוכחית',
+        previewFeasibleState: 'פתרון תקין (טרם הוכח כאופטימלי)',
+        previewOptimalState: 'פתרון אופטימלי',
+        previewStudentCol: 'סטודנט',
+        previewApartmentCol: 'דירה',
+        previewRoomCol: 'חדר',
+        previewBedCol: 'מיטה',
+        previewTableEmpty: 'אין עדיין שיבוצים בפתרון הזמני',
+        // Stop & Save ("עצור ושמור תוצאה") - distinct from Cancel
+        stopAndSave: 'עצור ושמור תוצאה',
+        stoppingSave: 'עוצר ושומר...',
+        stopAndSaveConfirmTitle: 'עצירה ושמירת תוצאה',
+        stopAndSaveConfirmMsg: 'האם לעצור את חיפוש הפתרון ולשמור את הפתרון הטוב ביותר שנמצא עד כה? ייתכן שהפתרון לא יהיה האופטימלי ביותר האפשרי.',
+        stopAndSaveSuccess: 'בקשת עצירה עם שמירה נשלחה. הפתרון הטוב ביותר שנמצא יישמר.',
+        stopAndSaveError: 'שגיאה בעצירה ושמירת התוצאה',
+        stoppedEarlyBadge: 'נעצר ידנית — לא הוכח כאופטימלי',
+        statusStopSaveRequested: 'עוצר ושומר',
         // Results
         resultsTitle:      'תוצאות השיבוץ',
         successfulAssign:  'שובצו בהצלחה',
@@ -403,12 +582,12 @@ function AllocationPage({ language = 'he' }) {
         missingRunId:    'לא נמצא מזהה הרצה',
         cancel:          'ביטול',
         confirm:         'אישור',
-        stopConfirmTitle:'עצור שיבוץ',
-        stopConfirmMsg:  'האם לעצור את השיבוץ הפעיל? כל ההקצאות החלקיות יימחקו.',
+        stopConfirmTitle:'ביטול הרצת שיבוץ',
+        stopConfirmMsg:  'האם לבטל את השיבוץ הפעיל? השיבוץ ייעצר וכל ההקצאות החלקיות יימחקו — פעולה זו אינה שומרת תוצאה. אם ברצונך לשמור את הפתרון הטוב ביותר שנמצא עד כה, השתמש/י ב"עצור ושמור תוצאה" במקום.',
         deleteConfirmTitle: 'מחיקת תוצאות שיבוץ',
         deleteConfirmMsg: 'האם למחוק את תוצאות השיבוץ? פעולה זו תבטל את כל ההקצאות שנוצרו.',
-        stopSuccess:     'השיבוץ עוצר. ניקוי נתונים בתהליך...',
-        stopError:       'שגיאה בעצירת השיבוץ',
+        stopSuccess:     'בקשת הביטול נשלחה. השיבוץ ייעצר בהקדם והנתונים החלקיים יימחקו.',
+        stopError:       'שגיאה בביטול השיבוץ',
         deleteSuccess:   'תוצאות השיבוץ נמחקו בהצלחה',
         deleteError:     'שגיאה במחיקת תוצאות השיבוץ',
         approvedCannotDelete: 'לא ניתן למחוק הקצאה שאושרה סופית',
@@ -443,8 +622,8 @@ function AllocationPage({ language = 'he' }) {
         subtitle: '',
         runAllocation: 'Run Allocation',
         running: 'Running...',
-        stopAllocation: 'Stop Run',
-        stoppingStopping: 'Stopping...',
+        stopAllocation: 'Cancel Run',
+        stoppingStopping: 'Cancelling...',
         deleteResults: 'Delete Results',
         deletingResults: 'Deleting...',
         viewResults: 'View Results',
@@ -497,8 +676,12 @@ function AllocationPage({ language = 'he' }) {
         // Constraint names + descriptions
         sameGender:        'Same gender in apartment',
         sameGenderDesc:    'Students are assigned to gender-appropriate apartments',
-        priorityFirst:     'Priority students first',
-        priorityFirstDesc: 'Eligible Hasmaha (כפר הסמכה) ANIR students are preferentially assigned to Building 179 first; when Building 179 has no compatible bed available, they are assigned to another building within the Hasmaha dorm type instead. Other priority students may be placed across any dorm type and are grouped together where possible',
+        priorityFirst:     'Priority students',
+        priorityFirstDesc: 'Priority students receive placement precedence.',
+        priorityFirstDesc2: 'When possible, the system favors grouping them in one building.',
+        priorityFirstAnier:     'ANIR priority',
+        priorityFirstAnierDesc: 'ANIR students get priority for Building 179 when available.',
+        priorityFirstAnierDesc2: 'If unavailable, suitable alternatives are considered.',
         roommatePositiveOnly: '100% positive roommate matches',
         roommatePositiveOnlyDesc: 'Only confirmed mutual roommate requests are fulfilled',
         ReligiousTogether: '100% religious apartment matches',
@@ -513,6 +696,46 @@ function AllocationPage({ language = 'he' }) {
         avoidYearMix_1_with_3_4Desc: 'Prevents placing first-year with third/fourth-year students',
         avoidAtudaimWithHasmaha: 'Avoid mixing graduate with atudaim',
         avoidAtudaimWithHashmahaDesc: 'Prevents co-locating graduate and atudaim students',
+        // Max search time (before run)
+        maxSearchTimeLabel: 'Maximum search time',
+        maxSearchTimeHint: 'The allocation may finish earlier if an optimal solution is found',
+        maxSearchTimeUnitSeconds: 'seconds',
+        maxSearchTimeUnitMinutes: 'minutes',
+        maxSearchTimeUnitHours: 'hours',
+        maxSearchTimeInvalid: 'Enter a valid search time',
+        maxSearchTimeTooLow: 'Minimum search time is 1 second',
+        maxSearchTimeTooHigh: 'Maximum search time is 10 hours',
+        maxSearchTimeConfiguredLabel: 'Configured max time',
+        // Current-result preview
+        viewCurrentResult: 'View Current Result',
+        previewTitle: 'Temporary Result',
+        previewSubtitle: 'The algorithm is still searching for a better solution',
+        previewLoadingMsg: 'Loading current result...',
+        previewUnavailable: 'No feasible solution found yet. Try again shortly.',
+        previewAssignedLabel: 'Assigned',
+        previewUnassignedLabel: 'Unassigned',
+        previewSolverStateLabel: 'Solution state',
+        previewElapsedLabel: 'Elapsed',
+        previewNewerAvailable: 'A newer result is available',
+        previewRefresh: 'Refresh Result',
+        previewClose: 'Close',
+        previewErrorMsg: 'Failed to load the current result',
+        previewFeasibleState: 'Feasible (not yet proven optimal)',
+        previewOptimalState: 'Optimal',
+        previewStudentCol: 'Student',
+        previewApartmentCol: 'Apartment',
+        previewRoomCol: 'Room',
+        previewBedCol: 'Bed',
+        previewTableEmpty: 'No assignments in the temporary result yet',
+        // Stop & Save - distinct from Cancel
+        stopAndSave: 'Stop & Save Result',
+        stoppingSave: 'Stopping & saving...',
+        stopAndSaveConfirmTitle: 'Stop & Save Result',
+        stopAndSaveConfirmMsg: 'Stop searching and keep the best result found so far? It may not be the most optimal possible solution.',
+        stopAndSaveSuccess: 'Stop & Save requested. The best result found will be kept.',
+        stopAndSaveError: 'Failed to stop and save the result',
+        stoppedEarlyBadge: 'Stopped manually — not proven optimal',
+        statusStopSaveRequested: 'Stopping & saving',
         // Results
         resultsTitle:      'Allocation Results',
         successfulAssign:  'Successfully Assigned',
@@ -539,12 +762,12 @@ function AllocationPage({ language = 'he' }) {
         missingRunId:    'No active run identifier found',
         cancel:          'Cancel',
         confirm:         'Confirm',
-        stopConfirmTitle:'Stop Allocation',
-        stopConfirmMsg:  'Stop the active allocation? All partial assignments will be deleted.',
+        stopConfirmTitle:'Cancel Allocation Run',
+        stopConfirmMsg:  'Cancel the active allocation run? It will stop and all partial assignments will be deleted — this does not save a result. To keep the best result found so far, use "Stop & Save Result" instead.',
         deleteConfirmTitle: 'Delete Allocation Results',
         deleteConfirmMsg: 'Delete the current allocation results? All assignments from this run will be cancelled.',
-        stopSuccess:     'Allocation stopping. Cleanup in progress...',
-        stopError:       'Failed to stop allocation',
+        stopSuccess:     'Cancellation requested. The run will stop shortly and partial data will be deleted.',
+        stopError:       'Failed to cancel the allocation run',
         deleteSuccess:   'Allocation results deleted successfully',
         deleteError:     'Failed to delete allocation results',
         approvedCannotDelete: 'Approved allocations cannot be deleted',
@@ -695,6 +918,92 @@ function AllocationPage({ language = 'he' }) {
     }
   }, []);
 
+  const stopPreviewPolling = useCallback(() => {
+    if (previewPollRef.current) {
+      clearInterval(previewPollRef.current);
+      previewPollRef.current = null;
+    }
+  }, []);
+
+  const closePreview = useCallback(() => {
+    setIsPreviewOpen(false);
+    stopPreviewPolling();
+  }, [stopPreviewPolling]);
+
+  // Fetches the current-best-solution snapshot without ever stopping the
+  // solver or touching BedAssignment/Student - a pure read (see backend
+  // get_allocation_run_preview). `force` accepts whatever the server has
+  // right now even if it's newer than what's displayed (used by the
+  // "רענן תוצאה" button); otherwise a newer snapshot than what's already
+  // shown just flips previewHasNewer instead of silently swapping the
+  // table out from under the user.
+  const fetchPreview = useCallback(async ({ silent = false, force = false } = {}) => {
+    if (!runId) return;
+    if (!silent) setPreviewLoading(true);
+    if (!silent) setPreviewErrorMsg('');
+
+    try {
+      const data = await allocationAPI.getPreview(runId);
+      if (!mountedRef.current) return;
+
+      if (!data?.available || !data.snapshot) {
+        return;
+      }
+
+      const incomingSeq = Number(data.snapshot.sequence) || 0;
+      const shouldReplace =
+        force || !previewHasContentRef.current || incomingSeq === previewSequenceRef.current;
+
+      if (shouldReplace) {
+        previewSequenceRef.current = incomingSeq;
+        previewHasContentRef.current = true;
+        setPreviewSnapshot(data.snapshot);
+        setPreviewHasNewer(false);
+      } else if (incomingSeq > previewSequenceRef.current) {
+        setPreviewHasNewer(true);
+      }
+    } catch (err) {
+      if (!silent) setPreviewErrorMsg(getErrorMessage(err) || t.previewErrorMsg);
+    } finally {
+      if (!silent) setPreviewLoading(false);
+    }
+  }, [runId, t.previewErrorMsg]);
+
+  const openPreview = useCallback(() => {
+    if (!runId) return;
+    setIsPreviewOpen(true);
+    fetchPreview();
+    stopPreviewPolling();
+    previewPollRef.current = setInterval(() => {
+      fetchPreview({ silent: true }).catch(() => {});
+    }, PREVIEW_POLL_INTERVAL_MS);
+  }, [runId, fetchPreview, stopPreviewPolling]);
+
+  const refreshPreviewToLatest = useCallback(() => {
+    fetchPreview({ force: true }).catch(() => {});
+  }, [fetchPreview]);
+
+  // Validates the "זמן חיפוש מרבי" input against the same bounds the
+  // backend enforces (MIN_USER_SOLVER_TIME_SECONDS/MAX_USER_SOLVER_TIME_SECONDS
+  // in allocation/solver.py) so an invalid value is caught before ever
+  // reaching the server.
+  const validateMaxSolverTime = useCallback(() => {
+    const numeric = Number(maxSolverValue);
+    if (!maxSolverValue || !Number.isFinite(numeric) || numeric <= 0) {
+      return t.maxSearchTimeInvalid;
+    }
+    const seconds = numeric * (SOLVER_UNIT_TO_SECONDS[maxSolverUnit] || 1);
+    if (seconds < MIN_SOLVER_SECONDS) return t.maxSearchTimeTooLow;
+    if (seconds > MAX_SOLVER_SECONDS) return t.maxSearchTimeTooHigh;
+    return '';
+  }, [maxSolverValue, maxSolverUnit, t]);
+
+  const maxSolverSecondsValue = useMemo(() => {
+    const numeric = Number(maxSolverValue);
+    if (!Number.isFinite(numeric) || numeric <= 0) return null;
+    return numeric * (SOLVER_UNIT_TO_SECONDS[maxSolverUnit] || 1);
+  }, [maxSolverValue, maxSolverUnit]);
+
   const formatElapsed = (secs) => {
     const m = Math.floor(secs / 60);
     const s = secs % 60;
@@ -729,6 +1038,13 @@ function AllocationPage({ language = 'he' }) {
     () => Object.entries(constraints).filter(([, v]) => !v.critical),
     [constraints]
   );
+
+  // Building 179 / ANIR preferential placement only applies within the
+  // Upper dorm region (גוש עליון, region id "gush-elyon" — the region that
+  // owns DormType code=15 / כפר הסמכה, see allocation.solver
+  // _may_use_building_179_automatically). Every other region shows the
+  // generic priority-placement message instead.
+  const isUpperDorm = summary?.region?.id === 'gush-elyon';
   const effectiveConfig = useMemo(() => {
     const out = {};
     Object.entries(constraints).forEach(([k, v]) => {
@@ -764,6 +1080,10 @@ function AllocationPage({ language = 'he' }) {
       return 'cancellation_requested';
     }
 
+    if (isRunning && isStoppingSave) {
+      return 'stop_and_save_requested';
+    }
+
     if (isRunning) {
       return runStatus || 'running';
     }
@@ -781,14 +1101,34 @@ function AllocationPage({ language = 'he' }) {
     runStatus,
     isRunning,
     isStopping,
+    isStoppingSave,
     hasCurrentAllocation,
   ]);
 
-  const showStopBtn =
+  // Cancel ("בטל הרצה") and Stop & Save ("עצור ושמור תוצאה") are mutually
+  // exclusive requests once one is in flight - both hide as soon as
+  // either isStopping or isStoppingSave becomes true, matching the
+  // backend's own race guard (whichever request wins the row lock first
+  // "claims" the stop; the other gets 409).
+  const isStopRequested = isStopping || isStoppingSave;
+
+  const showCancelBtn =
     isRunning &&
-    !isStopping &&
+    !isStopRequested &&
     Boolean(runId) &&
     canRun;
+
+  const showStopSaveBtn =
+    isRunning &&
+    !isStopRequested &&
+    Boolean(runId) &&
+    canRun;
+
+  // Viewing the current result stays available even while a stop is in
+  // flight (it's a harmless read of the last known snapshot).
+  const showPreviewBtn =
+    isRunning &&
+    Boolean(runId);
 
   const showDelBtn =
     hasCurrentAllocation &&
@@ -868,8 +1208,10 @@ function AllocationPage({ language = 'he' }) {
 
         if (st === 'completed') {
           stopPolling();
+          closePreview();
           setIsRunning(false);
           setIsStopping(false);
+          setIsStoppingSave(false);
           setProgress(100);
           setResult({
             successful_assignments: data.successful_assignments ?? runData?.successful_assignments ?? 0,
@@ -877,13 +1219,19 @@ function AllocationPage({ language = 'he' }) {
             conflicts:              data.conflicts ?? runData?.conflicts ?? 0,
             assignments:            data.assignments ?? [],
             population_summary:     safePopulationSummary(data.population_summary),
+            solver_status:          data.solver_status ?? null,
+            optimality_proven:      Boolean(data.optimality_proven),
+            stopped_early_by_user:  Boolean(data.stopped_early_by_user),
             run:                    runData,
           });
           loadPage().catch(() => {});
+          if (data.stopped_early_by_user) showToast(t.stopAndSaveSuccess, 'success');
         } else if (st === 'stopped' || st === 'failed' || st === 'deleted') {
           stopPolling();
+          closePreview();
           setIsRunning(false);
           setIsStopping(false);
+          setIsStoppingSave(false);
           setProgress(0);
           setResult(null);
           setRunId(null);
@@ -894,6 +1242,9 @@ function AllocationPage({ language = 'he' }) {
         } else if (st === 'cancellation_requested') {
           setIsStopping(true);
           setProgress((prev) => Math.min(prev + 2, 95));
+        } else if (st === 'stop_and_save_requested') {
+          setIsStoppingSave(true);
+          setProgress((prev) => Math.min(prev + 2, 95));
         } else if (st === 'running' || st === 'queued') {
           setProgress((prev) => Math.min(prev + 3, 92));
         }
@@ -901,7 +1252,7 @@ function AllocationPage({ language = 'he' }) {
         console.warn('Polling error:', err);
       }
     }, 3000);
-  }, [stopPolling, loadPage, showToast, t.stoppedStatus, t.unknownError, safePopulationSummary]);
+  }, [stopPolling, closePreview, loadPage, showToast, t.stoppedStatus, t.unknownError, t.stopAndSaveSuccess, safePopulationSummary]);
 
   const recoverActiveRun = useCallback(
   async (regionId, currentSummary = null) => {
@@ -929,6 +1280,7 @@ function AllocationPage({ language = 'he' }) {
         'queued',
         'running',
         'cancellation_requested',
+        'stop_and_save_requested',
       ];
 
       /*
@@ -945,6 +1297,13 @@ function AllocationPage({ language = 'he' }) {
           'cancellation_requested'
         ) {
           setIsStopping(true);
+        }
+
+        if (
+          run.status ===
+          'stop_and_save_requested'
+        ) {
+          setIsStoppingSave(true);
         }
 
         startPolling(run.id);
@@ -1051,8 +1410,9 @@ function AllocationPage({ language = 'he' }) {
     return () => {
       mountedRef.current = false;
       stopPolling();
+      stopPreviewPolling();
     };
-  }, [stopPolling]);
+  }, [stopPolling, stopPreviewPolling]);
 
     useEffect(() => {
     let cancelled = false;
@@ -1099,13 +1459,25 @@ function AllocationPage({ language = 'he' }) {
 
 
   const runAllocation = async () => {
-    if (isRunning || isStopping || isDeleting) return;
+    if (isRunning || isStopping || isStoppingSave || isDeleting) return;
+
+    const maxTimeError = validateMaxSolverTime();
+    if (maxTimeError) {
+      setMaxSolverError(maxTimeError);
+      return;
+    }
+    setMaxSolverError('');
+
     setIsRunning(true);
     setProgress(0);
     setResult(null);
     setError(null);
     setRunId(null);
     setRunStatus(null);
+    setPreviewSnapshot(null);
+    setPreviewHasNewer(false);
+    previewSequenceRef.current = 0;
+    previewHasContentRef.current = false;
 
     const regionId = resolveRegionId();
     if (!regionId) {
@@ -1115,7 +1487,10 @@ function AllocationPage({ language = 'he' }) {
     }
 
     try {
-      const responseRaw = await allocationAPI.startRun(regionId, { constraints: effectiveConfig });
+      const responseRaw = await allocationAPI.startRun(regionId, {
+        constraints: effectiveConfig,
+        max_solver_seconds: maxSolverSecondsValue,
+      });
       const response = unwrapResponse(responseRaw);
       const id = response?.run_id || response?.run?.id;
       if (!id) throw new Error(t.missingRunId);
@@ -1137,6 +1512,7 @@ function AllocationPage({ language = 'he' }) {
 
   const requestStopAllocation = () => {
     if (!runId) { showToast(t.missingRunId, 'error'); return; }
+    if (isStopping || isStoppingSave) return;
     setConfirmModal({
       title: t.stopConfirmTitle,
       message: t.stopConfirmMsg,
@@ -1150,6 +1526,27 @@ function AllocationPage({ language = 'he' }) {
         } catch (err) {
           showToast(getErrorMessage(err) || t.stopError, 'error');
           setIsStopping(false);
+        }
+      },
+    });
+  };
+
+  const requestStopAndSave = () => {
+    if (!runId) { showToast(t.missingRunId, 'error'); return; }
+    if (isStopping || isStoppingSave) return;
+    setConfirmModal({
+      title: t.stopAndSaveConfirmTitle,
+      message: t.stopAndSaveConfirmMsg,
+      onConfirm: async () => {
+        setConfirmModal(null);
+        setIsStoppingSave(true);
+        try {
+          await allocationAPI.stopAndSave(runId);
+          showToast(t.stopAndSaveSuccess, 'info');
+          setRunStatus('stop_and_save_requested');
+        } catch (err) {
+          showToast(getErrorMessage(err) || t.stopAndSaveError, 'error');
+          setIsStoppingSave(false);
         }
       },
     });
@@ -1263,6 +1660,17 @@ showToast(
     <div className="ap-page">
       <ToastNotification toast={toast} />
       <ConfirmDialog modal={confirmModal} t={t} onClose={() => setConfirmModal(null)} />
+      <PreviewPanel
+        open={isPreviewOpen}
+        loading={previewLoading}
+        errorMsg={previewErrorMsg}
+        snapshot={previewSnapshot}
+        hasNewer={previewHasNewer}
+        t={t}
+        onClose={closePreview}
+        onRefresh={refreshPreviewToLatest}
+        formatElapsed={formatElapsed}
+      />
 
       <div className="ap-shell">
 
@@ -1422,6 +1830,55 @@ showToast(
           );
         })()}
 
+        {/* ── 1c. Max Search Time (before run) ── */}
+        {!isRunning && (
+          <div className="ap-card ap-maxtime-card">
+            <div className="ap-maxtime-row">
+              <label className="ap-maxtime-label" htmlFor="ap-maxtime-value">
+                {t.maxSearchTimeLabel}
+              </label>
+              <div className="ap-maxtime-inputs">
+                <input
+                  id="ap-maxtime-value"
+                  type="number"
+                  min="1"
+                  step="1"
+                  className="ap-number-input"
+                  value={maxSolverValue}
+                  onChange={(e) => {
+                    setMaxSolverValue(e.target.value);
+                    if (maxSolverError) setMaxSolverError('');
+                  }}
+                  disabled={isRunning}
+                  aria-label={t.maxSearchTimeLabel}
+                />
+                <select
+                  className="ap-unit-select"
+                  value={maxSolverUnit}
+                  onChange={(e) => {
+                    setMaxSolverUnit(e.target.value);
+                    if (maxSolverError) setMaxSolverError('');
+                  }}
+                  disabled={isRunning}
+                  aria-label={t.maxSearchTimeLabel}
+                >
+                  <option value="seconds">{t.maxSearchTimeUnitSeconds}</option>
+                  <option value="minutes">{t.maxSearchTimeUnitMinutes}</option>
+                  <option value="hours">{t.maxSearchTimeUnitHours}</option>
+                </select>
+              </div>
+            </div>
+            {maxSolverError ? (
+              <div className="ap-maxtime-error">
+                <AlertTriangle size={13} />
+                <span>{maxSolverError}</span>
+              </div>
+            ) : (
+              <p className="ap-maxtime-hint">{t.maxSearchTimeHint}</p>
+            )}
+          </div>
+        )}
+
         {/* ── 2. Controls Bar ────────────────── */}
         <div className="ap-controls-bar">
           <div className="ap-controls-left">
@@ -1433,39 +1890,55 @@ showToast(
               title={!hasStudents ? t.noStudents : !canRun ? t.noPermission : ''}
             >
               {isRunning ? (
-                <><RefreshCw size={15} className="ap-spin" /> {isStopping ? t.stoppingStopping : t.running}</>
+                <>
+                  <RefreshCw size={15} className="ap-spin" />
+                  {isStopping ? t.stoppingStopping : isStoppingSave ? t.stoppingSave : t.running}
+                </>
               ) : (
                 <><Play size={15} /> {t.runAllocation}</>
               )}
             </button>
 
-            {/* Stop */}
-            {showStopBtn && (
-              <button className="ap-btn ap-btn-danger" onClick={requestStopAllocation} disabled={isStopping}>
+            {/* View Current Result ("צפה בתוצאה הנוכחית") - never stops the solver */}
+            {showPreviewBtn && (
+              <button className="ap-btn ap-btn-ghost" onClick={openPreview}>
+                <Info size={15} />
+                {t.viewCurrentResult}
+              </button>
+            )}
+
+            {/* Stop & Save ("עצור ושמור תוצאה") - keeps the best feasible result */}
+            {showStopSaveBtn && (
+              <button className="ap-btn ap-btn-warning" onClick={requestStopAndSave} disabled={isStopRequested}>
                 <Square size={15} />
+                {t.stopAndSave}
+              </button>
+            )}
+
+            {/* Cancel ("בטל הרצה") - discards any partial work, smaller/secondary */}
+            {showCancelBtn && (
+              <button className="ap-btn ap-btn-ghost-danger ap-btn-sm" onClick={requestStopAllocation} disabled={isStopRequested}>
+                <Square size={13} />
                 {t.stopAllocation}
               </button>
             )}
 
             {/* Stopping indicator */}
-            {isStopping && !showStopBtn && (
+            {isStopRequested && !showStopSaveBtn && (
               <div className="ap-inline-chip ap-chip-amber">
                 <Loader size={13} className="ap-spin" />
-                {t.stoppingStopping}
+                {isStoppingSave ? t.stoppingSave : t.stoppingStopping}
               </div>
             )}
           </div>
 
           <div className="ap-controls-right">
-            {/* View Results */}
+            {/* View Results - always available: it shows the current
+                effective allocation stored in the DB, not just the result
+                of a run just executed in this browser session. */}
             <button
               className="ap-btn ap-btn-ghost"
               onClick={handleViewResults}
-              disabled={
-  !hasCurrentAllocation ||
-  !result ||
-  runStatus !== 'completed'
-}
             >
               <ExternalLink size={15} />
               {t.viewResults}
@@ -1490,7 +1963,9 @@ showToast(
             <div className="ap-progress-header">
               <div className="ap-progress-status">
                 <Activity size={15} />
-                <span>{isStopping ? t.stoppingStopping : t.progressTitle}</span>
+                <span>
+                  {isStopping ? t.stoppingStopping : isStoppingSave ? t.stoppingSave : t.progressTitle}
+                </span>
               </div>
               <div className="ap-progress-timer">
                 <Clock size={13} />
@@ -1511,8 +1986,12 @@ showToast(
                 {summary?.unassigned_students || 0} {t.students}
               </span>
               <span className="ap-progress-chip ap-chip-blue">
-                <BarChart3 size={12} />
-                {t.progressTitle}
+                <Clock size={12} />
+                {t.maxSearchTimeConfiguredLabel}: {maxSolverValue} {
+                  maxSolverUnit === 'seconds' ? t.maxSearchTimeUnitSeconds
+                  : maxSolverUnit === 'minutes' ? t.maxSearchTimeUnitMinutes
+                  : t.maxSearchTimeUnitHours
+                }
               </span>
             </div>
           </div>
@@ -1614,7 +2093,13 @@ showToast(
               </div>
               <div className="ap-cond-grid-2">
                 {hardConstraints.map(([key]) => (
-                  <CriticalConditionCard key={key} condKey={key} t={t} />
+                  <CriticalConditionCard
+                    key={key}
+                    condKey={key}
+                    t={t}
+                    titleKey={key === 'priorityFirst' && isUpperDorm ? 'priorityFirstAnier' : undefined}
+                    highlight={key === 'priorityFirst'}
+                  />
                 ))}
               </div>
             </div>
@@ -2068,6 +2553,19 @@ const styles = `  /* ── Variables ──────────────
     border-color: var(--ap-red-border);
   }
   .ap-btn-ghost-danger:hover:not(:disabled) { background: rgba(220,38,38,0.13); }
+
+  .ap-btn-warning {
+    background: linear-gradient(135deg, #f59e0b, #d97706);
+    color: #fff;
+    border-color: rgba(217,119,6,0.25);
+    box-shadow: 0 4px 12px rgba(217,119,6,0.22);
+  }
+  .ap-btn-warning:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.04); }
+
+  .ap-btn-sm {
+    padding: 7px 12px;
+    font-size: 12.5px;
+  }
 
   /* ── Inline Chip ─────────────────────────── */
   .ap-inline-chip {
@@ -2561,6 +3059,21 @@ const styles = `  /* ── Variables ──────────────
     font-weight: 500;
   }
 
+  .ap-cond-desc-2 {
+    margin-top: 1px;
+  }
+
+  .ap-cond-highlight {
+    background: linear-gradient(135deg, rgba(217,119,6,0.05), rgba(217,119,6,0.015));
+    border-color: rgba(217,119,6,0.16);
+  }
+
+  .ap-cond-highlight .ap-cond-icon-critical {
+    background: rgba(217,119,6,0.10);
+    border-color: rgba(217,119,6,0.20);
+    color: var(--ap-amber);
+  }
+
   .ap-cond-meta {
     display: flex;
     align-items: center;
@@ -2810,6 +3323,197 @@ const styles = `  /* ── Variables ──────────────
     transition: filter 0.14s;
   }
   .ap-modal-confirm:hover { filter: brightness(1.06); }
+
+  /* ── Max Search Time ("זמן חיפוש מרבי") ──── */
+  .ap-maxtime-card {
+    padding: 16px 20px;
+  }
+  .ap-maxtime-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .ap-maxtime-label {
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--ap-text);
+  }
+  .ap-maxtime-inputs {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .ap-number-input {
+    width: 96px;
+    padding: 8px 12px;
+    border-radius: var(--ap-radius-xs);
+    border: 1px solid var(--ap-border-m);
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--ap-text);
+    font-family: inherit;
+    background: var(--ap-surface);
+    text-align: center;
+  }
+  .ap-number-input:focus, .ap-unit-select:focus {
+    outline: none;
+    border-color: var(--ap-blue-border);
+    box-shadow: 0 0 0 3px var(--ap-blue-soft);
+  }
+  .ap-unit-select {
+    padding: 8px 12px;
+    border-radius: var(--ap-radius-xs);
+    border: 1px solid var(--ap-border-m);
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--ap-text);
+    font-family: inherit;
+    background: var(--ap-surface);
+    cursor: pointer;
+  }
+  .ap-maxtime-hint {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--ap-muted);
+    font-weight: 500;
+  }
+  .ap-maxtime-error {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--ap-red);
+  }
+
+  /* ── Preview Panel ("תוצאה זמנית") ────────── */
+  .ap-preview-box {
+    background: var(--ap-surface);
+    border-radius: 18px;
+    box-shadow: 0 20px 60px rgba(15,23,42,0.22);
+    padding: 24px;
+    max-width: 720px;
+    width: 100%;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    animation: ap-modal-in 0.2s ease;
+  }
+  .ap-preview-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 6px;
+  }
+  .ap-preview-title {
+    margin: 0 0 4px;
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--ap-text);
+  }
+  .ap-preview-subtitle {
+    margin: 0;
+    font-size: 13px;
+    color: var(--ap-amber);
+    font-weight: 600;
+  }
+  .ap-preview-close {
+    background: rgba(15,23,42,0.05);
+    border: none;
+    border-radius: 8px;
+    width: 30px;
+    height: 30px;
+    font-size: 18px;
+    line-height: 1;
+    color: var(--ap-text-2);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .ap-preview-close:hover { background: rgba(15,23,42,0.1); }
+
+  .ap-preview-newer-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 14px;
+    margin: 10px 0;
+    border-radius: var(--ap-radius-sm);
+    background: var(--ap-amber-soft);
+    border: 1px solid var(--ap-amber-border);
+    color: var(--ap-amber);
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .ap-preview-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 48px 16px;
+    color: var(--ap-muted);
+    font-size: 13.5px;
+    font-weight: 600;
+  }
+
+  .ap-preview-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin: 14px 0;
+  }
+  .ap-preview-stat {
+    text-align: center;
+    padding: 10px 8px;
+    border-radius: var(--ap-radius-sm);
+    background: var(--ap-surface-2);
+    border: 1px solid var(--ap-border);
+  }
+  .ap-preview-stat-val {
+    font-size: 16px;
+    font-weight: 800;
+    color: var(--ap-text);
+  }
+  .ap-preview-stat-lbl {
+    font-size: 11px;
+    color: var(--ap-muted);
+    font-weight: 600;
+    margin-top: 2px;
+  }
+
+  .ap-preview-table-wrap {
+    overflow-y: auto;
+    border-radius: var(--ap-radius-sm);
+    border: 1px solid var(--ap-border);
+  }
+  .ap-preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .ap-preview-table thead th {
+    position: sticky;
+    top: 0;
+    background: var(--ap-surface-2);
+    text-align: right;
+    padding: 9px 12px;
+    font-weight: 700;
+    color: var(--ap-text-2);
+    border-bottom: 1px solid var(--ap-border);
+  }
+  .ap-preview-table tbody td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--ap-border);
+    color: var(--ap-text);
+  }
+  .ap-preview-table tbody tr:last-child td { border-bottom: none; }
+  .ap-preview-table tbody tr:hover { background: var(--ap-surface-2); }
 
   /* ── Spin ────────────────────────────────── */
   .ap-spin {

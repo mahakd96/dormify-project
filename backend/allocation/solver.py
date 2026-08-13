@@ -1,12 +1,14 @@
 from collections import defaultdict
 from itertools import combinations
 import re
+import threading
 import unicodedata
 
 from django.db import close_old_connections, transaction
 from django.utils import timezone
 
-from api.models import Apartment, Bed, BedAssignment, Room, Student
+from api.models import AllocationRun, Apartment, Bed, BedAssignment, Room, Student
+from allocation import live_registry
 
 try:
     from ortools.sat.python import cp_model
@@ -17,8 +19,38 @@ except ImportError:
 
 BASE_ASSIGNMENT_SCORE = 1000
 WEIGHT_UNIT = 10
-MAX_SOLVER_TIME_SECONDS = 500
+# Existing behavior, unchanged: what the solver uses when the caller does
+# not specify max_seconds at all (e.g. the sync legacy endpoint / most
+# tests). This is a DEFAULT, not an upper bound - a user-selected "max
+# search time" can be smaller or much larger, see the MIN/MAX bounds below.
+DEFAULT_SOLVER_TIME_SECONDS = 500
 NUM_SEARCH_WORKERS = 2
+
+# Reasonable bounds for a user-selected "max search time" (זמן חיפוש
+# מרבי). These are the backend-side belt-and-suspenders check:
+# start_allocation_run (views.py) validates the same bounds before ever
+# creating an AllocationRun or spawning the background thread, but
+# run_improved_ortools_allocation re-validates independently so a
+# malformed/bypassed request can never reach CpSolver with an
+# unreasonable duration. 1 second minimum (an operator may deliberately
+# want a very fast/best-effort run), 10 hours (36000s) maximum.
+MIN_USER_SOLVER_TIME_SECONDS = 1
+MAX_USER_SOLVER_TIME_SECONDS = 36000
+
+# Throttling for the live solution callback (_LiveSolutionCallback). These
+# bound how often it does any work at all, since CP-SAT can invoke
+# on_solution_callback very frequently early in a search - see the class
+# docstring for the full rationale. The very first snapshot is always
+# captured immediately regardless of these intervals (see
+# _has_memory_snapshot / _has_db_snapshot).
+_LIVE_STOP_FLAG_POLL_INTERVAL_SECONDS = 1.5
+_LIVE_MEMORY_SNAPSHOT_INTERVAL_SECONDS = 2.0
+_LIVE_DB_SNAPSHOT_INTERVAL_SECONDS = 8.0
+
+# Poll interval for _run_stop_watcher - the independent, always-running
+# thread that detects Cancel/Stop & Save requests regardless of whether
+# CP-SAT is currently finding new solutions (see its docstring).
+_STOP_WATCHER_POLL_INTERVAL_SECONDS = 1.0
 
 
 
@@ -1897,6 +1929,340 @@ def _build_assignment_payload(student, bed):
     }
 
 
+def _extract_current_solution(
+    value_provider,
+    students,
+    student_candidates,
+    assignment_vars,
+    room_pairing_apartment_ids,
+    student_room_candidates,
+    room_assignment_vars,
+    inventory,
+    students_by_id,
+):
+    """
+    Resolve which apartment/room/bed each student is assigned to in the
+    solution currently held by `value_provider`.
+
+    `value_provider` is anything exposing a `.Value(boolvar) -> int` method
+    with the same contract as CpSolver.Value() - either the CpSolver itself
+    (called once, after solver.Solve() returns, for the final result) or a
+    CpSolverSolutionCallback instance mid-solve (self.Value(...), reading
+    the current incumbent). Using one function for both means a live
+    preview snapshot can never drift from the shape/logic of the real
+    final result - it is not a re-implementation.
+
+    Bed-level resolution (which specific bed within an apartment/room) uses
+    the exact same deterministic tie-break (sorted by student identifier /
+    bed label) the final persistence path has always used, so a preview's
+    assignments are the same beds the final result would pick given
+    today's incumbent solution.
+
+    Returns (selected_apartment_by_student, selected_room_by_student,
+    selected_bed_by_student) - all dicts keyed by student.id.
+    """
+    selected_apartment_by_student = {}
+
+    for student in students:
+        for apartment_id in student_candidates.get(student.id, []):
+            variable = assignment_vars.get((student.id, apartment_id))
+            if variable is not None and value_provider.Value(variable) == 1:
+                selected_apartment_by_student[student.id] = apartment_id
+                break
+
+    # For room-pairing apartments, the CP-SAT model itself already decided
+    # the exact room (that is the whole point of the room-level layer);
+    # read it back instead of re-deriving it from an arbitrary sort.
+    selected_room_by_student = {}
+    for student in students:
+        apartment_id = selected_apartment_by_student.get(student.id)
+        if apartment_id is None or apartment_id not in room_pairing_apartment_ids:
+            continue
+        for room_id in student_room_candidates.get(student.id, []):
+            variable = room_assignment_vars.get((student.id, room_id))
+            if variable is not None and value_provider.Value(variable) == 1:
+                selected_room_by_student[student.id] = room_id
+                break
+
+    selected_students_by_apartment = defaultdict(list)
+    for student_id, apartment_id in selected_apartment_by_student.items():
+        selected_students_by_apartment[apartment_id].append(student_id)
+
+    selected_bed_by_student = {}
+
+    for apartment_id, student_ids in selected_students_by_apartment.items():
+        if apartment_id in room_pairing_apartment_ids:
+            students_by_selected_room = defaultdict(list)
+            for student_id in student_ids:
+                room_id = selected_room_by_student.get(student_id)
+                students_by_selected_room[room_id].append(student_id)
+
+            for room_id, room_student_ids in students_by_selected_room.items():
+                ordered_room_student_ids = sorted(
+                    room_student_ids,
+                    key=lambda student_id: (
+                        _get_student_identifier(students_by_id[student_id]),
+                        student_id,
+                    ),
+                )
+                available_room_beds = sorted(
+                    inventory["free_beds_by_room"].get(room_id, []),
+                    key=lambda bed: (_safe_str(bed.label), bed.id),
+                )
+
+                if len(available_room_beds) < len(ordered_room_student_ids):
+                    raise RuntimeError(
+                        f"Room {room_id} has insufficient free beds during persistence."
+                    )
+
+                for student_id, bed in zip(ordered_room_student_ids, available_room_beds):
+                    selected_bed_by_student[student_id] = bed
+            continue
+
+        ordered_student_ids = sorted(
+            student_ids,
+            key=lambda student_id: (
+                _get_student_identifier(students_by_id[student_id]),
+                student_id,
+            ),
+        )
+        available_beds = sorted(
+            inventory["free_beds_by_apartment"].get(apartment_id, []),
+            key=lambda bed: (
+                _safe_str(bed.room.name),
+                _safe_str(bed.label),
+                bed.id,
+            ),
+        )
+
+        if len(available_beds) < len(ordered_student_ids):
+            raise RuntimeError(
+                f"Apartment {apartment_id} has insufficient free beds during persistence."
+            )
+
+        for student_id, bed in zip(ordered_student_ids, available_beds):
+            selected_bed_by_student[student_id] = bed
+
+    return selected_apartment_by_student, selected_room_by_student, selected_bed_by_student
+
+
+class _LiveSolutionCallback(cp_model.CpSolverSolutionCallback if ORTOOLS_AVAILABLE else object):
+    """
+    CP-SAT solution callback whose PRIMARY job is capturing feasible
+    solutions: each time CP-SAT finds a new incumbent, it publishes a
+    lightweight "current best solution so far" snapshot for the
+    /preview/ endpoint to read (in-process live_registry immediately,
+    plus a throttled AllocationRun.live_snapshot DB write as a
+    cross-process fallback).
+
+    The FIRST feasible solution is captured immediately, unthrottled
+    (both the in-memory snapshot and the DB fallback) — a preview must
+    become available as soon as anything feasible exists, not after an
+    arbitrary warm-up delay. Every snapshot after the first is throttled
+    by wall-clock time (_LIVE_MEMORY_SNAPSHOT_INTERVAL_SECONDS /
+    _LIVE_DB_SNAPSHOT_INTERVAL_SECONDS) because on_solution_callback can
+    fire very frequently once solutions start improving - this callback
+    must stay cheap.
+
+    Stopping the search is NOT this callback's primary responsibility -
+    see _run_stop_watcher below, which polls AllocationRun.status on its
+    own independent timer regardless of whether CP-SAT is finding new
+    solutions. This callback only does an opportunistic, best-effort
+    stop-flag check (cheap, since it is already awake) so a stop can take
+    effect slightly earlier when solutions happen to be arriving
+    frequently; it must never be relied on as the only way a stop
+    request is noticed, because on_solution_callback only fires when a
+    NEW IMPROVING solution is found - if the search goes a long stretch
+    without improving, this callback simply does not run during that
+    stretch.
+
+    Never raises: any failure while checking the stop flag or building a
+    snapshot is swallowed, because a bug here must never abort the solve.
+    """
+
+    def __init__(
+        self,
+        allocation_run_id,
+        students,
+        student_candidates,
+        assignment_vars,
+        room_pairing_apartment_ids,
+        student_room_candidates,
+        room_assignment_vars,
+        inventory,
+        students_by_id,
+    ):
+        cp_model.CpSolverSolutionCallback.__init__(self)
+        self._allocation_run_id = allocation_run_id
+        self._students = students
+        self._student_candidates = student_candidates
+        self._assignment_vars = assignment_vars
+        self._room_pairing_apartment_ids = room_pairing_apartment_ids
+        self._student_room_candidates = student_room_candidates
+        self._room_assignment_vars = room_assignment_vars
+        self._inventory = inventory
+        self._students_by_id = students_by_id
+
+        self._sequence = 0
+        self._last_stop_check = 0.0
+        self._last_memory_snapshot = 0.0
+        self._last_db_snapshot = 0.0
+        self._has_memory_snapshot = False
+        self._has_db_snapshot = False
+
+    def on_solution_callback(self):
+        if self._allocation_run_id is None:
+            return
+
+        try:
+            now = self.WallTime()
+        except Exception:
+            now = None
+
+        # Opportunistic/secondary stop check only - see class docstring.
+        # _run_stop_watcher is the authoritative, always-running mechanism.
+        if now is not None and now - self._last_stop_check >= _LIVE_STOP_FLAG_POLL_INTERVAL_SECONDS:
+            self._last_stop_check = now
+            self._maybe_stop_search()
+
+        is_first_snapshot = not self._has_memory_snapshot
+        if not is_first_snapshot and (
+            now is None
+            or now - self._last_memory_snapshot < _LIVE_MEMORY_SNAPSHOT_INTERVAL_SECONDS
+        ):
+            return
+
+        try:
+            snapshot = self._build_snapshot(now if now is not None else self.WallTime())
+        except Exception:
+            return
+
+        self._last_memory_snapshot = now if now is not None else snapshot["wall_time_seconds"]
+        self._has_memory_snapshot = True
+        live_registry.set(self._allocation_run_id, snapshot)
+
+        is_first_db_snapshot = not self._has_db_snapshot
+        due_for_db_write = is_first_db_snapshot or (
+            now is not None
+            and now - self._last_db_snapshot >= _LIVE_DB_SNAPSHOT_INTERVAL_SECONDS
+        )
+        if due_for_db_write:
+            self._last_db_snapshot = self._last_memory_snapshot
+            self._has_db_snapshot = True
+            try:
+                AllocationRun.objects.filter(pk=self._allocation_run_id).update(
+                    live_snapshot=snapshot,
+                )
+            except Exception:
+                pass
+
+    def _maybe_stop_search(self):
+        try:
+            current_status = (
+                AllocationRun.objects.filter(pk=self._allocation_run_id)
+                .values_list("status", flat=True)
+                .first()
+            )
+        except Exception:
+            return
+
+        if current_status in {
+            AllocationRun.Status.CANCELLATION_REQUESTED,
+            AllocationRun.Status.STOP_AND_SAVE_REQUESTED,
+        }:
+            self.StopSearch()
+
+    def _build_snapshot(self, wall_time):
+        (
+            selected_apartment_by_student,
+            _selected_room_by_student,
+            selected_bed_by_student,
+        ) = _extract_current_solution(
+            self,
+            self._students,
+            self._student_candidates,
+            self._assignment_vars,
+            self._room_pairing_apartment_ids,
+            self._student_room_candidates,
+            self._room_assignment_vars,
+            self._inventory,
+            self._students_by_id,
+        )
+
+        assignments = [
+            _build_assignment_payload(self._students_by_id[student_id], bed)
+            for student_id, bed in sorted(selected_bed_by_student.items())
+        ]
+
+        self._sequence += 1
+
+        return {
+            "sequence": self._sequence,
+            "assignments": assignments,
+            "assigned_count": len(assignments),
+            "unassigned_count": len(self._students) - len(assignments),
+            "objective_value": float(self.ObjectiveValue()),
+            "wall_time_seconds": float(wall_time),
+            "solver_status": "FEASIBLE",
+            "captured_at": timezone.now().isoformat(),
+        }
+
+
+def _run_stop_watcher(allocation_run_id, solver, stop_event):
+    """
+    Runs in its own daemon thread for the duration of a single solve,
+    polling AllocationRun.status on a fixed timer - independent of
+    CP-SAT's solution-driven callback - and calling solver.StopSearch()
+    the moment it observes a Cancel or Stop & Save request.
+
+    This is the AUTHORITATIVE, process-agnostic way a stop request takes
+    effect. It exists specifically because
+    _LiveSolutionCallback.on_solution_callback only runs when CP-SAT
+    finds a NEW IMPROVING solution - if the search goes a long stretch
+    without improving, that callback simply does not run during the
+    stretch, and a stop request would otherwise sit unnoticed until the
+    next incumbent (or the time limit). This watcher has no such
+    dependency: it checks the DB on its own schedule regardless of
+    solver progress, so a stop request is noticed within roughly
+    _STOP_WATCHER_POLL_INTERVAL_SECONDS no matter what CP-SAT is doing.
+    (live_registry.request_stop_search additionally lets a same-process
+    HTTP request trigger StopSearch() immediately, without waiting even
+    for this watcher's next tick - see stop_and_save_allocation_run /
+    stop_allocation_run in api/views.py.)
+
+    `stop_event` is a threading.Event the caller sets once solver.Solve()
+    returns, so this loop exits promptly instead of polling forever.
+    """
+    from django.db import close_old_connections, connection as db_conn
+
+    try:
+        while not stop_event.wait(timeout=_STOP_WATCHER_POLL_INTERVAL_SECONDS):
+            try:
+                close_old_connections()
+                current_status = (
+                    AllocationRun.objects.filter(pk=allocation_run_id)
+                    .values_list("status", flat=True)
+                    .first()
+                )
+            except Exception:
+                continue
+
+            if current_status in {
+                AllocationRun.Status.CANCELLATION_REQUESTED,
+                AllocationRun.Status.STOP_AND_SAVE_REQUESTED,
+            }:
+                try:
+                    solver.StopSearch()
+                except Exception:
+                    pass
+                return
+    finally:
+        try:
+            db_conn.close()
+        except Exception:
+            pass
+
+
 def run_improved_ortools_allocation(
     students,
     rooms,
@@ -1913,15 +2279,18 @@ def run_improved_ortools_allocation(
         raise ImportError("OR-Tools is not installed.")
 
     if max_seconds is None:
-        max_seconds = MAX_SOLVER_TIME_SECONDS
+        max_seconds = DEFAULT_SOLVER_TIME_SECONDS
 
     try:
         max_seconds = float(max_seconds)
     except (TypeError, ValueError) as exc:
         raise ValueError("max_seconds must be a positive number.") from exc
 
-    if max_seconds <= 0:
-        raise ValueError("max_seconds must be greater than zero.")
+    if max_seconds < MIN_USER_SOLVER_TIME_SECONDS or max_seconds > MAX_USER_SOLVER_TIME_SECONDS:
+        raise ValueError(
+            "max_seconds must be between "
+            f"{MIN_USER_SOLVER_TIME_SECONDS} and {MAX_USER_SOLVER_TIME_SECONDS} seconds."
+        )
 
     if solve_mode not in {"best-effort", "optimal-required"}:
         raise ValueError("solve_mode must be 'best-effort' or 'optimal-required'.")
@@ -2569,7 +2938,51 @@ def run_improved_ortools_allocation(
         hinted_assignments=hinted_assignments,
     )
 
-    status = solver.Solve(model)
+    # Live preview snapshots + real mid-solve stopping only make sense
+    # when there is an AllocationRun row to publish/poll against - skip
+    # all of this entirely for the sync legacy endpoint / management
+    # command / tests that call this function without allocation_run_id,
+    # so those callers see zero behavior change.
+    if allocation_run_id is not None:
+        live_callback = _LiveSolutionCallback(
+            allocation_run_id,
+            students,
+            student_candidates,
+            assignment_vars,
+            room_pairing_apartment_ids,
+            student_room_candidates,
+            room_assignment_vars,
+            inventory,
+            students_by_id,
+        )
+
+        # Registering the solver lets a same-process HTTP request
+        # (live_registry.request_stop_search, called from
+        # stop_and_save_allocation_run / stop_allocation_run) invoke
+        # StopSearch() immediately. The watcher thread is the
+        # process-agnostic fallback/authority: it polls AllocationRun's
+        # DB status on its own fixed timer, independent of whether
+        # CP-SAT is currently finding new solutions - see
+        # _run_stop_watcher's docstring for why the callback alone is
+        # not sufficient.
+        live_registry.register_solver(allocation_run_id, solver)
+        stop_watcher_event = threading.Event()
+        stop_watcher_thread = threading.Thread(
+            target=_run_stop_watcher,
+            args=(allocation_run_id, solver, stop_watcher_event),
+            daemon=True,
+        )
+        stop_watcher_thread.start()
+
+        try:
+            status = solver.Solve(model, live_callback)
+        finally:
+            stop_watcher_event.set()
+            stop_watcher_thread.join(timeout=_STOP_WATCHER_POLL_INTERVAL_SECONDS + 1.0)
+            live_registry.unregister_solver(allocation_run_id)
+            live_registry.clear(allocation_run_id)
+    else:
+        status = solver.Solve(model)
     wall_time = float(solver.WallTime())
 
     status_map = {
@@ -2616,87 +3029,21 @@ def run_improved_ortools_allocation(
         status == cp_model.OPTIMAL and absolute_gap <= 1e-9
     )
 
-    selected_apartment_by_student = {}
-
-    for student in students:
-        for apartment_id in student_candidates.get(student.id, []):
-            variable = assignment_vars.get((student.id, apartment_id))
-            if variable is not None and solver.Value(variable) == 1:
-                selected_apartment_by_student[student.id] = apartment_id
-                break
-
-    # For room-pairing apartments, the CP-SAT model itself already decided
-    # the exact room (that is the whole point of the room-level layer);
-    # read it back instead of re-deriving it from an arbitrary sort.
-    selected_room_by_student = {}
-    for student in students:
-        apartment_id = selected_apartment_by_student.get(student.id)
-        if apartment_id is None or apartment_id not in room_pairing_apartment_ids:
-            continue
-        for room_id in student_room_candidates.get(student.id, []):
-            variable = room_assignment_vars.get((student.id, room_id))
-            if variable is not None and solver.Value(variable) == 1:
-                selected_room_by_student[student.id] = room_id
-                break
-
-    selected_students_by_apartment = defaultdict(list)
-    for student_id, apartment_id in selected_apartment_by_student.items():
-        selected_students_by_apartment[apartment_id].append(student_id)
-
-    selected_bed_by_student = {}
-
-    for apartment_id, student_ids in selected_students_by_apartment.items():
-        if apartment_id in room_pairing_apartment_ids:
-            students_by_selected_room = defaultdict(list)
-            for student_id in student_ids:
-                room_id = selected_room_by_student.get(student_id)
-                students_by_selected_room[room_id].append(student_id)
-
-            for room_id, room_student_ids in students_by_selected_room.items():
-                ordered_room_student_ids = sorted(
-                    room_student_ids,
-                    key=lambda student_id: (
-                        _get_student_identifier(students_by_id[student_id]),
-                        student_id,
-                    ),
-                )
-                available_room_beds = sorted(
-                    inventory["free_beds_by_room"].get(room_id, []),
-                    key=lambda bed: (_safe_str(bed.label), bed.id),
-                )
-
-                if len(available_room_beds) < len(ordered_room_student_ids):
-                    raise RuntimeError(
-                        f"Room {room_id} has insufficient free beds during persistence."
-                    )
-
-                for student_id, bed in zip(ordered_room_student_ids, available_room_beds):
-                    selected_bed_by_student[student_id] = bed
-            continue
-
-        ordered_student_ids = sorted(
-            student_ids,
-            key=lambda student_id: (
-                _get_student_identifier(students_by_id[student_id]),
-                student_id,
-            ),
-        )
-        available_beds = sorted(
-            inventory["free_beds_by_apartment"].get(apartment_id, []),
-            key=lambda bed: (
-                _safe_str(bed.room.name),
-                _safe_str(bed.label),
-                bed.id,
-            ),
-        )
-
-        if len(available_beds) < len(ordered_student_ids):
-            raise RuntimeError(
-                f"Apartment {apartment_id} has insufficient free beds during persistence."
-            )
-
-        for student_id, bed in zip(ordered_student_ids, available_beds):
-            selected_bed_by_student[student_id] = bed
+    (
+        selected_apartment_by_student,
+        selected_room_by_student,
+        selected_bed_by_student,
+    ) = _extract_current_solution(
+        solver,
+        students,
+        student_candidates,
+        assignment_vars,
+        room_pairing_apartment_ids,
+        student_room_candidates,
+        room_assignment_vars,
+        inventory,
+        students_by_id,
+    )
 
     proposed_assignments = [
         _build_assignment_payload(students_by_id[student_id], bed)

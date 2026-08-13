@@ -310,6 +310,8 @@ function AllocationResultsPage({ language = 'he' }) {
   const [resultsError, setResultsError] =
     useState(null);
 
+  const [retryToken, setRetryToken] = useState(0);
+
   const [serverResult, setServerResult] = useState(
     routeResult || {
       assignments: [],
@@ -371,7 +373,7 @@ function AllocationResultsPage({ language = 'he' }) {
         availableBedsTitle: 'מיטות שנשארו פנויות',
 
         noAssignmentsTable:
-          'אין תוצאות שיבוץ להצגה',
+          'אין כרגע תוצאות שיבוץ להצגה',
         noUnassignedStudents:
           'אין סטודנטים שלא שובצו',
         noAvailableBeds:
@@ -450,6 +452,7 @@ function AllocationResultsPage({ language = 'he' }) {
         loadingResults: 'טוען תוצאות...',
         errorLoadingResults:
           'שגיאה בטעינת תוצאות השיבוץ',
+        retryLoadResults: 'נסה שוב',
       },
 
       en: {
@@ -469,7 +472,7 @@ function AllocationResultsPage({ language = 'he' }) {
         availableBedsTitle: 'Available Beds',
 
         noAssignmentsTable:
-          'No assignment results to display',
+          'No allocation results to display right now',
         noUnassignedStudents:
           'No unassigned students',
         noAvailableBeds:
@@ -548,6 +551,7 @@ function AllocationResultsPage({ language = 'he' }) {
         loadingResults: 'Loading results...',
         errorLoadingResults:
           'Error loading allocation results',
+        retryLoadResults: 'Retry',
       },
     };
 
@@ -668,7 +672,12 @@ function AllocationResultsPage({ language = 'he' }) {
     summary?.region_id,
     routeResult,
     t.errorLoadingResults,
+    retryToken,
   ]);
+
+  const handleRetryLoadResults = () => {
+    setRetryToken((previous) => previous + 1);
+  };
 
   /* =======================================================
      Derived data
@@ -1982,6 +1991,14 @@ const formattedLastAllocationDate =
               <div className="empty-state error">
                 <AlertTriangle size={18}/>
                 <span>{resultsError}</span>
+                <button
+                  type="button"
+                  className="retry-load-btn"
+                  onClick={handleRetryLoadResults}
+                >
+                  <RefreshCw size={14}/>
+                  {t.retryLoadResults}
+                </button>
               </div>
           ) : activeView === 'assigned' ? (
               renderAssignedStudents()
@@ -2679,6 +2696,22 @@ const styles = `
       rgba(220, 38, 38, 0.20);
     background: var(--red-soft);
     color: var(--red);
+  }
+
+  .retry-load-btn {
+    margin-inline-start: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 13px;
+    border: none;
+    border-radius: 10px;
+    background: var(--red);
+    color: #fff;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 800;
+    cursor: pointer;
   }
 
   @media (max-width: 900px) {
