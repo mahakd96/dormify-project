@@ -906,49 +906,16 @@ class AllocationRun(models.Model):
 
     error_message = models.TextField(blank=True)
 
-    # Effective CP-SAT max_time_in_seconds used for this run (either the
-    # user-selected value from the "max search time" control, or the
-    # solver's own default when none was supplied). Recorded at creation
-    # so it is visible in the UI while the run is still QUEUED/RUNNING,
-    # without needing to inspect the solver call site.
+
     max_search_seconds = models.PositiveIntegerField(null=True, blank=True)
 
-    # When CP-SAT's solver.Solve() actually began for this run — set by
-    # allocation.solver immediately before calling Solve(), which is
-    # meaningfully LATER than `started_at` (row creation) once DB loading,
-    # candidate generation and model building are accounted for. This is
-    # the authoritative anchor for "how much of max_search_seconds has
-    # been consumed": AllocationRunSerializer derives elapsed_search_seconds
-    # / remaining_search_seconds from it so the frontend can reconstruct
-    # correct timing after navigating away, refreshing, or opening the
-    # page in a new tab, instead of re-deriving it from local React state
-    # that resets on every mount. None while QUEUED/still preparing (the
-    # solver has not started searching yet) and while a run failed before
-    # ever reaching Solve() (e.g. no students/rooms).
+ 
     search_started_at = models.DateTimeField(null=True, blank=True)
 
-    # Throttled, compact "current best solution so far" snapshot written
-    # by the CP-SAT solution callback while a run is in progress (see
-    # allocation.solver._LiveSolutionCallback). This is a lightweight
-    # cross-worker-safe fallback for the /preview/ endpoint when the
-    # fast in-process live_registry cache has nothing for this run_id
-    # (e.g. a different worker process, or this worker restarted) — the
-    # same rationale as `diagnostics` below. It is NEVER used to persist
-    # real BedAssignment/Student rows; only the final solver persistence
-    # transaction does that. Always cleared (None) once the run reaches
-    # a terminal status.
+
     live_snapshot = models.JSONField(null=True, blank=True, default=None)
 
-    # Solver-produced diagnostics that do not fit any of the counter
-    # fields above: warnings (e.g. an existing Building-179 occupant who
-    # is not an eligible Hasmaha ANIR student) and the Building-179/ANIR
-    # counters (imported/eligible ANIR counts, whether the reserved
-    # building was found, its available beds, and the post-solve
-    # preferred/overflow/unassigned outcome counts). Persisted here so
-    # both the synchronous and background-thread allocation paths survive
-    # a process restart and are visible across workers — an in-memory
-    # store would silently lose this data outside a single process.
-    # Shape: {"warnings": [...], "anier_building_179_diagnostics": {...}}.
+
     diagnostics = models.JSONField(default=dict, blank=True)
 
     class Meta:

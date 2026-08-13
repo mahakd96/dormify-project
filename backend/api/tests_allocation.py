@@ -1,11 +1,4 @@
-"""
-Tests for Stop Allocation and Delete Results features.
 
-Run with the test database (never the production Azure DB):
-    python manage.py test api.tests_allocation --settings=dormify.settings_test
-    # or if no separate test settings:
-    python manage.py test api.tests_allocation
-"""
 
 from collections import defaultdict
 from datetime import timedelta
@@ -6293,8 +6286,6 @@ class AllocationRunTimingSerializerTest(TestCase):
         self.assertIsNone(data['remaining_search_seconds'])
 
 
-# ---------------------------------------------------------------------------
-# Tests: live "current result" snapshot (_LiveSolutionCallback)
 # ---------------------------------------------------------------------------
 
 class LiveSnapshotCallbackTest(TestCase):

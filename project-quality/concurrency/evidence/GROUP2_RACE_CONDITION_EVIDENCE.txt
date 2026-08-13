@@ -1,0 +1,37 @@
+--- ConcurrentBedContentionAcrossRequestsTests.test_two_students_racing_for_the_last_bed ---
+thread A (student A) response: (400, b'{"error":"No available bed in selected room."}')
+thread B (student B) response: (200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x90\xd7\x95\xd7\xa9\xd7\xa8\xd7\x94 \xd7\x91\xd7\x94\xd7\xa6\xd7\x9c\xd7\x97\xd7\x94","request":{"id":52,"request_number":null,"request_type":"room","request_type_display":"\xd7\xa9\xd7\x99\xd7\xa0\xd7\x95\xd7\x99 \xd7\x97\xd7\x93\xd7\xa8","reason":"contend-b","status":"approved","status_display":"\xd7\x90\xd7\x95\xd7\xa9\xd7\xa8","priority":"normal","priority_display":"Normal","other_description":"","same_')
+status_codes (sorted): [200, 400]
+active BedAssignment rows in the contested room (must be exactly 1 - no double-booking): 1
+
+--- DuplicateStudentCreationRaceTests.test_concurrent_add_student_approvals_same_student_id ---
+thread A response: (200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x90\xd7\x95\xd7\xa9\xd7\xa8\xd7\x94 \xd7\x91\xd7\x94\xd7\xa6\xd7\x9c\xd7\x97\xd7\x94","request":{"id":53,"request_number":null,"request_type":"add_student","request_type_display":"\xd7\x94\xd7\x95\xd7\xa1\xd7\xa4\xd7\xaa \xd7\xa1\xd7\x98\xd7\x95\xd7\x93\xd7\xa0\xd7\x98","reason":"race-a","status":"approved","status_display":"\xd7\x90\xd7\x95\xd7\xa9\xd7\xa8","priority":"normal","priority_display":"Normal","other_description":"","same_apartment":null,"removal_notes":"","removal_reason":"","student":103,"student_name":"Race Case","student_id_number":"RACE-DUP-1","student_phone":"","student_data":{"gender":"male","last_name')
+thread B response: (500, b'\n<!doctype html>\n<html lang="en">\n<head>\n  <title>Server Error (500)</title>\n</head>\n<body>\n  <h1>Server Error (500)</h1><p></p>\n</body>\n</html>\n')
+status_codes (sorted): [200, 500]
+Student.objects.filter(student_id="RACE-DUP-1").count(): 1
+
+FINDING CONFIRMED: the losing concurrent approve() request received an unhandled 500 instead of a clean 4xx - the IntegrityError from the Student.student_id unique constraint is not caught anywhere on this path.
+
+--- MultiRegionConcurrentManagerTests.test_concurrent_same_region_approvals_do_not_interfere ---
+boss_a (region g2-mr-region-a) response: (200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x90\xd7\x95\xd7\xa9\xd7\xa8\xd7\x94 \xd7\x91\xd7\x94\xd7\xa6\xd7\x9c\xd7\x97\xd7\x94","request":{"id":55,"request_number":null,"request_type":"room","request_type_display":"\xd7\xa9\xd7\x99\xd7\xa0\xd7\x95\xd7\x99 \xd7\x97\xd7\x93\xd7\xa8","reason":"mr-a","status":"approved","status_display":"\xd7\x90\xd7\x95\xd7\xa9\xd7\xa8","priority":"normal","priority_display":"Normal","other_description":"","same_apart')  time_ms=248.90
+boss_b (region g2-mr-region-b) response: (200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x90\xd7\x95\xd7\xa9\xd7\xa8\xd7\x94 \xd7\x91\xd7\x94\xd7\xa6\xd7\x9c\xd7\x97\xd7\x94","request":{"id":56,"request_number":null,"request_type":"room","request_type_display":"\xd7\xa9\xd7\x99\xd7\xa0\xd7\x95\xd7\x99 \xd7\x97\xd7\x93\xd7\xa8","reason":"mr-b","status":"approved","status_display":"\xd7\x90\xd7\x95\xd7\xa9\xd7\xa8","priority":"normal","priority_display":"Normal","other_description":"","same_apart')  time_ms=269.22
+wall_clock_for_both_concurrently_ms: 271.01  (sum_if_fully_serialized_ms: 518.11)
+student_a.assigned_room == room_a: True
+student_b.assigned_room == room_b: True
+
+--- RegionInboxDoubleMarkTests.test_concurrent_mark_processed_does_not_crash_or_corrupt ---
+status_codes: [200, 200]
+final inbox status: processed
+
+--- StudentRequestDoubleApprovalRaceTests.test_concurrent_approve_same_room_request_single_bed ---
+thread A response: (200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x90\xd7\x95\xd7\xa9\xd7\xa8\xd7\x94 \xd7\x91\xd7\x94\xd7\xa6\xd7\x9c\xd7\x97\xd7\x94","request":{"id":57,"request_number":null,"request_type":"room","request_type_display":"\xd7\xa9\xd7\x99\xd7\xa0\xd7\x95\xd7\x99 \xd7\x97\xd7\x93\xd7\xa8","reason":"race","status":"approved","status_display":"\xd7\x90\xd7\x95\xd7\xa9\xd7\xa8","priority":"normal","priority_display":"Normal","other_description":"","same_apart')
+thread B response: (400, b'{"error":"No available bed in selected room."}')
+status_codes (sorted): [200, 400]
+final request.status: approved
+active BedAssignment count for student (must be exactly 1): 1
+
+--- TransferViewSetBrokenByMissingFieldTests.test_approve_crashes_with_500_on_a_single_sequential_request ---
+single (non-concurrent) approve() response status: 500
+transfer.status after the crash (must still be PENDING - transaction.atomic() correctly rolled back the partial transfer.status=APPROVED write): pending
+INCIDENTAL FINDING: TransferViewSet.approve() unconditionally raises AttributeError: 'Transfer' object has no attribute 'movement_type' - this is a pre-existing, non-concurrency correctness bug (reproduces on every single request, not timing-dependent) affecting the ENTIRE legacy Transfer approval feature. Out of Group 2 scope; not fixed here. The one positive note: transaction.atomic() still correctly rolled back the partial write, so the crash does not leave corrupted data.
+

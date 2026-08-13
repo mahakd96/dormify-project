@@ -30,18 +30,13 @@ import {
   Info,
 } from 'lucide-react';
 
-// Mirrors the backend's MIN_USER_SOLVER_TIME_SECONDS / MAX_USER_SOLVER_TIME_SECONDS
-// (allocation/solver.py) so the frontend can validate before ever sending a
-// request - the backend re-validates independently regardless, so a
-// malformed/bypassed request can never hand CP-SAT an unreasonable duration.
+
 const MIN_SOLVER_SECONDS = 1;
 const MAX_SOLVER_SECONDS = 36000; // 10 hours
 const DEFAULT_SOLVER_SECONDS = 500;
 const SOLVER_UNIT_TO_SECONDS = { seconds: 1, minutes: 60, hours: 3600 };
 
-// Statuses for which a run is still "live" (search timing should keep
-// ticking / backend polling should continue). Matches the backend's own
-// notion of an in-progress AllocationRun (see get_active_allocation_run).
+
 const LIVE_RUN_STATUSES = ['queued', 'running', 'cancellation_requested', 'stop_and_save_requested'];
 const PREVIEW_POLL_INTERVAL_MS = 5000;
 
