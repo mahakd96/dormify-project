@@ -1,0 +1,66 @@
+--- ConcurrentBedContentionAcrossRequestsTests.test_two_students_racing_for_the_last_bed ---
+thread A (student A) response: (400, b'{"error":"No available bed in selected room."}')
+thread B (student B) response: (200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x90\xd7\x95\xd7\xa9\xd7\xa8\xd7\x94 \xd7\x91\xd7\x94\xd7\xa6\xd7\x9c\xd7\x97\xd7\x94","request":{"id":52,"request_number":null,"request_type":"room","request_type_display":"\xd7\xa9\xd7\x99\xd7\xa0\xd7\x95\xd7\x99 \xd7\x97\xd7\x93\xd7\xa8","reason":"contend-b","status":"approved","status_display":"\xd7\x90\xd7\x95\xd7\xa9\xd7\xa8","priority":"normal","priority_display":"Normal","other_description":"","same_')
+status_codes (sorted): [200, 400]
+active BedAssignment rows in the contested room (must be exactly 1 - no double-booking): 1
+
+--- DuplicateStudentCreationRaceTests.test_concurrent_add_student_approvals_same_student_id (AFTER FIX) ---
+thread A response: (400, b'{"error":"\xd7\xa1\xd7\x98\xd7\x95\xd7\x93\xd7\xa0\xd7\x98 \xd7\xa2\xd7\x9d \xd7\xaa.\xd7\x96 RACE-DUP-1 \xd7\x9b\xd7\x91\xd7\xa8 \xd7\xa7\xd7\x99\xd7\x99\xd7\x9d \xd7\x91\xd7\x9e\xd7\xa2\xd7\xa8\xd7\x9b\xd7\xaa."}')
+thread B response: (200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x90\xd7\x95\xd7\xa9\xd7\xa8\xd7\x94 \xd7\x91\xd7\x94\xd7\xa6\xd7\x9c\xd7\x97\xd7\x94","request":{"id":54,"request_number":null,"request_type":"add_student","request_type_display":"\xd7\x94\xd7\x95\xd7\xa1\xd7\xa4\xd7\xaa \xd7\xa1\xd7\x98\xd7\x95\xd7\x93\xd7\xa0\xd7\x98","reason":"race-b","status":"approved","status_display":"\xd7\x90\xd7\x95\xd7\xa9\xd7\xa8","priority":"normal","priority_display":"Normal","other_description":"","same_apartment":null,"removal_notes":"","removal_reason":"","student":103,"student_name":"Race Case","student_id_number":"RACE-DUP-1","student_phone":"","student_data":{"gender":"male","last_name')
+status_codes (sorted): [200, 400]
+Student.objects.filter(student_id="RACE-DUP-1").count(): 1
+
+winner: 200, loser (clean 4xx body): b'{"error":"\xd7\xa1\xd7\x98\xd7\x95\xd7\x93\xd7\xa0\xd7\x98 \xd7\xa2\xd7\x9d \xd7\xaa.\xd7\x96 RACE-DUP-1 \xd7\x9b\xd7\x91\xd7\xa8 \xd7\xa7\xd7\x99\xd7\x99\xd7\x9d \xd7\x91\xd7\x9e\xd7\xa2\xd7\xa8\xd7\x9b\xd7\xaa."}'
+
+--- MultiRegionConcurrentManagerTests.test_concurrent_same_region_approvals_do_not_interfere ---
+boss_a (region g2-mr-region-a) response: (200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x90\xd7\x95\xd7\xa9\xd7\xa8\xd7\x94 \xd7\x91\xd7\x94\xd7\xa6\xd7\x9c\xd7\x97\xd7\x94","request":{"id":55,"request_number":null,"request_type":"room","request_type_display":"\xd7\xa9\xd7\x99\xd7\xa0\xd7\x95\xd7\x99 \xd7\x97\xd7\x93\xd7\xa8","reason":"mr-a","status":"approved","status_display":"\xd7\x90\xd7\x95\xd7\xa9\xd7\xa8","priority":"normal","priority_display":"Normal","other_description":"","same_apart')  time_ms=303.70
+boss_b (region g2-mr-region-b) response: (200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x90\xd7\x95\xd7\xa9\xd7\xa8\xd7\x94 \xd7\x91\xd7\x94\xd7\xa6\xd7\x9c\xd7\x97\xd7\x94","request":{"id":56,"request_number":null,"request_type":"room","request_type_display":"\xd7\xa9\xd7\x99\xd7\xa0\xd7\x95\xd7\x99 \xd7\x97\xd7\x93\xd7\xa8","reason":"mr-b","status":"approved","status_display":"\xd7\x90\xd7\x95\xd7\xa9\xd7\xa8","priority":"normal","priority_display":"Normal","other_description":"","same_apart')  time_ms=334.94
+wall_clock_for_both_concurrently_ms: 337.62  (sum_if_fully_serialized_ms: 638.64)
+student_a.assigned_room == room_a: True
+student_b.assigned_room == room_b: True
+
+--- RegionInboxDoubleMarkTests.test_concurrent_mark_processed_does_not_crash_or_corrupt ---
+status_codes: [200, 200]
+final inbox status: processed
+
+--- StudentRequestApproveRejectConflictTests.test_concurrent_approve_and_reject_same_request ---
+results: [('approve', 400, b'{"error":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x9b\xd7\x91\xd7\xa8 \xd7\x98\xd7\x95\xd7\xa4\xd7\x9c\xd7\x94"}'), ('reject', 200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\xa0\xd7\x93\xd7\x97\xd7\xaa\xd7\x94","request":{"id":57,"request_number":null,"request_type":"room","request_type_display":"\xd7\xa9\xd7\x99\xd7\xa0\xd7\x95\xd7\x99 \xd7\x97\xd7\x93\xd7\xa8","reason":"conflict","status":"rejected","status_display":"\xd7\xa0\xd7\x93\xd7\x97\xd7\x94","priority":"normal","priority_display":"Normal","other_description":"","same_apartment":nul')]
+final request.status: rejected
+
+--- StudentRequestDoubleApprovalRaceTests.test_concurrent_approve_same_room_request_ample_capacity ---
+thread A response: (200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x90\xd7\x95\xd7\xa9\xd7\xa8\xd7\x94 \xd7\x91\xd7\x94\xd7\xa6\xd7\x9c\xd7\x97\xd7\x94","request":{"id":58,"request_number":null,"request_type":"room","request_type_display":"\xd7\xa9\xd7\x99\xd7\xa0\xd7\x95\xd7\x99 \xd7\x97\xd7\x93\xd7\xa8","reason":"race-ample","status":"approved","status_display":"\xd7\x90\xd7\x95\xd7\xa9\xd7\xa8","priority":"normal","priority_display":"Normal","other_description":"","same')
+thread B response: (400, b'{"error":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x9b\xd7\x91\xd7\xa8 \xd7\x98\xd7\x95\xd7\xa4\xd7\x9c\xd7\x94"}')
+status_codes (sorted): [200, 400]
+active BedAssignment count for student (must be exactly 1): 1
+TOTAL BedAssignment rows created against to_room (must be exactly 1 - no double-processing): 1
+
+--- StudentRequestDoubleApprovalRaceTests.test_concurrent_approve_same_room_request_single_bed ---
+thread A response: (400, b'{"error":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x9b\xd7\x91\xd7\xa8 \xd7\x98\xd7\x95\xd7\xa4\xd7\x9c\xd7\x94"}')
+thread B response: (200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x90\xd7\x95\xd7\xa9\xd7\xa8\xd7\x94 \xd7\x91\xd7\x94\xd7\xa6\xd7\x9c\xd7\x97\xd7\x94","request":{"id":59,"request_number":null,"request_type":"room","request_type_display":"\xd7\xa9\xd7\x99\xd7\xa0\xd7\x95\xd7\x99 \xd7\x97\xd7\x93\xd7\xa8","reason":"race","status":"approved","status_display":"\xd7\x90\xd7\x95\xd7\xa9\xd7\xa8","priority":"normal","priority_display":"Normal","other_description":"","same_apart')
+status_codes (sorted): [200, 400]
+final request.status: approved
+active BedAssignment count for student (must be exactly 1): 1
+
+--- TransferCreateAndApproveSequentialTests.test_approve_transfer_via_put_no_longer_crashes ---
+PUT /api/transfers/1/approve/ status: 200
+body: b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x90\xd7\x95\xd7\xa9\xd7\xa8\xd7\x94 \xd7\x91\xd7\x94\xd7\xa6\xd7\x9c\xd7\x97\xd7\x94","transfer":{"id":1,"student":109,"student_name":"F L","student_id_number":"XFER-SEQ-1","from_room":37,"from_room_name":"1","from_building_number":1,"from_apartment_number":"1","to_room":38,"to_room_name":"1","to_building_number":2,"to_apartment_number":"1","reason":"sequential regression test","status":"approved","status_display":"\xd7\x90\xd7\x95\xd7\xa9\xd7\xa8","requeste'
+
+--- TransferCreateAndApproveSequentialTests.test_create_transfer_via_post_no_longer_crashes ---
+POST /api/transfers/ status: 201
+body: b'{"id":2,"student":110,"student_name":"F L","student_id_number":"XFER-SEQ-1","from_room":39,"from_room_name":"1","from_building_number":1,"from_apartment_number":"1","to_room":40,"to_room_name":"1","to_building_number":2,"to_apartment_number":"1","reason":"sequential regression test","status":"pending","status_display":"\xd7\x9e\xd7\x9e\xd7\xaa\xd7\x99\xd7\x9f","requested_by":16,"requested_by_name":"T User","reviewed_by":null,"'
+
+--- TransferCreateAndApproveSequentialTests.test_reject_transfer_via_put_no_longer_crashes ---
+PUT /api/transfers/3/reject/ status: 200
+body: b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\xa0\xd7\x93\xd7\x97\xd7\xaa\xd7\x94","transfer":{"id":3,"student":111,"student_name":"F L","student_id_number":"XFER-SEQ-1","from_room":41,"from_room_name":"1","from_building_number":1,"from_apartment_number":"1","to_room":42,"to_room_name":"1","to_building_number":2,"to_apartment_number":"1","reason":"sequential regression test","status":"rejected","status_display":"\xd7\xa0\xd7\x93\xd7\x97\xd7\x94","requested_by":17,"req'
+
+--- TransferDoubleApprovalRaceTests.test_concurrent_approve_and_reject_same_transfer ---
+results: [('approve', 400, b'{"error":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x9b\xd7\x91\xd7\xa8 \xd7\x98\xd7\x95\xd7\xa4\xd7\x9c\xd7\x94"}'), ('reject', 200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\xa0\xd7\x93\xd7\x97\xd7\xaa\xd7\x94","transfer":{"id":4,"student":112,"student_name":"F L","student_id_number":"XFER-RACE-1","from_room":43,"from_room_name":"1","from_building_number":1,"from_apartment_number":"1","to_room":44,"to_room_name":"1","to_building_number":2,"to_apartment_number":"1","reason')]
+final transfer.status: rejected
+
+--- TransferDoubleApprovalRaceTests.test_concurrent_approve_same_transfer_single_bed ---
+thread A response: (400, b'{"error":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x9b\xd7\x91\xd7\xa8 \xd7\x98\xd7\x95\xd7\xa4\xd7\x9c\xd7\x94"}')
+thread B response: (200, b'{"message":"\xd7\x94\xd7\x91\xd7\xa7\xd7\xa9\xd7\x94 \xd7\x90\xd7\x95\xd7\xa9\xd7\xa8\xd7\x94 \xd7\x91\xd7\x94\xd7\xa6\xd7\x9c\xd7\x97\xd7\x94","transfer":{"id":5,"student":113,"student_name":"F L","student_id_number":"XFER-RACE-1","from_room":45,"from_room_name":"1","from_building_number":1,"from_apartment_number":"1","to_room":46,"to_room_name":"1","to_building_number":2,"to_apartment_number')
+status_codes (sorted): [200, 400]
+final transfer.status: approved
+active BedAssignment count for student (must be exactly 1): 1
+

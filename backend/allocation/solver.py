@@ -60,6 +60,32 @@ _LIVE_DB_SNAPSHOT_INTERVAL_SECONDS = 8.0
 # CP-SAT is currently finding new solutions (see its docstring).
 _STOP_WATCHER_POLL_INTERVAL_SECONDS = 1.0
 
+# Reasonable bounds for a user-selected "max search time" (זמן חיפוש
+# מרבי). These are the backend-side belt-and-suspenders check:
+# start_allocation_run (views.py) validates the same bounds before ever
+# creating an AllocationRun or spawning the background thread, but
+# run_improved_ortools_allocation re-validates independently so a
+# malformed/bypassed request can never reach CpSolver with an
+# unreasonable duration. 1 second minimum (an operator may deliberately
+# want a very fast/best-effort run), 10 hours (36000s) maximum.
+MIN_USER_SOLVER_TIME_SECONDS = 1
+MAX_USER_SOLVER_TIME_SECONDS = 36000
+
+# Throttling for the live solution callback (_LiveSolutionCallback). These
+# bound how often it does any work at all, since CP-SAT can invoke
+# on_solution_callback very frequently early in a search - see the class
+# docstring for the full rationale. The very first snapshot is always
+# captured immediately regardless of these intervals (see
+# _has_memory_snapshot / _has_db_snapshot).
+_LIVE_STOP_FLAG_POLL_INTERVAL_SECONDS = 1.5
+_LIVE_MEMORY_SNAPSHOT_INTERVAL_SECONDS = 2.0
+_LIVE_DB_SNAPSHOT_INTERVAL_SECONDS = 8.0
+
+# Poll interval for _run_stop_watcher - the independent, always-running
+# thread that detects Cancel/Stop & Save requests regardless of whether
+# CP-SAT is currently finding new solutions (see its docstring).
+_STOP_WATCHER_POLL_INTERVAL_SECONDS = 1.0
+
 
 
 EXCLUSIVE_HOUSING_TYPES = {
@@ -2246,23 +2272,7 @@ class _LiveSolutionCallback(cp_model.CpSolverSolutionCallback if ORTOOLS_AVAILAB
 
         self._sequence += 1
 
-        # objective_value/best_objective_bound are both readable from
-        # CpSolverSolutionCallback in the installed OR-Tools version
-        # (confirmed: 9.10.4067 exposes BestObjectiveBound() on the
-        # callback itself, not just on CpSolver after Solve() returns).
-        # Gap formula intentionally identical to the post-solve
-        # calculation below (see absolute_gap/relative_gap after
-        # solver.Solve() returns) so a live snapshot's gap is directly
-        # comparable to the final result's gap, never a different metric.
-        #
-        # Important limitation: on_solution_callback only fires when
-        # CP-SAT finds a NEW INCUMBENT (better feasible solution). CP-SAT
-        # can also tighten best_objective_bound with NO new incumbent
-        # (pure bound improvement during proof-of-optimality search) -
-        # this installed version's public API has no separate bound-only
-        # callback, so bound tightening that happens between incumbents is
-        # invisible to us. What we capture here is "the bound as of the
-        # last incumbent event", not a continuously live bound.
+       
         objective_value = float(self.ObjectiveValue())
         best_objective_bound = float(self.BestObjectiveBound())
         absolute_gap = max(0.0, best_objective_bound - objective_value)
