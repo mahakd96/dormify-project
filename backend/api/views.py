@@ -3624,15 +3624,22 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
 def _run_diagnostics_payload(result):
     """
     Build the {"warnings": [...], "anier_building_179_diagnostics": {...},
-    "solver_status": ..., "optimality_proven": ...} shape persisted on
-    AllocationRun.diagnostics, from a solver result dict. Shared by both
-    the sync and async allocation entry points so neither path can
-    silently drop this data or diverge in shape.
+    "solver_status": ..., "optimality_proven": ..., "objective_value": ...,
+    "best_objective_bound": ..., "absolute_gap": ..., "relative_gap": ...}
+    shape persisted on AllocationRun.diagnostics, from a solver result
+    dict. Shared by both the sync and async allocation entry points so
+    neither path can silently drop this data or diverge in shape.
 
-    solver_status/optimality_proven are already computed by
-    run_improved_ortools_allocation (solver.py) for every run; surfacing
-    them here lets the frontend show "not proven optimal" for a FEASIBLE
-    (as opposed to OPTIMAL) result without changing any solve behavior.
+    solver_status/optimality_proven/objective_value/best_objective_bound/
+    absolute_gap/relative_gap are already computed by
+    run_improved_ortools_allocation (solver.py) for every OPTIMAL/FEASIBLE
+    run — surfacing them here lets a run be diagnosed after the fact
+    (e.g. "how far from proven-optimal was this?") without needing to
+    have been watching it live while it was still solving, since the
+    in-process live_registry / live_snapshot are gone once the run ends.
+    None for a run that never reached OPTIMAL/FEASIBLE (e.g. INFEASIBLE,
+    or cancelled before Solve() produced anything) — solver.py itself
+    only sets these on the result dict in that case, never a fixed 0.
     """
     if not isinstance(result, dict):
         return {
@@ -3640,12 +3647,20 @@ def _run_diagnostics_payload(result):
             'anier_building_179_diagnostics': {},
             'solver_status': None,
             'optimality_proven': False,
+            'objective_value': None,
+            'best_objective_bound': None,
+            'absolute_gap': None,
+            'relative_gap': None,
         }
     return {
         'warnings': result.get('warnings', []),
         'anier_building_179_diagnostics': result.get('anier_building_179_diagnostics', {}),
         'solver_status': result.get('solver_status'),
         'optimality_proven': bool(result.get('optimality_proven', False)),
+        'objective_value': result.get('objective_value'),
+        'best_objective_bound': result.get('best_objective_bound'),
+        'absolute_gap': result.get('absolute_gap'),
+        'relative_gap': result.get('relative_gap'),
     }
 
 
@@ -3956,7 +3971,8 @@ def run_allocation(request):
         result = run_improved_ortools_allocation(
             students=students,
             rooms=rooms,
-            constraints_config=constraints_config
+            constraints_config=constraints_config,
+            enable_group_capacity_cuts=True,
         ) or {}
 
         print(
@@ -4282,6 +4298,7 @@ def retry_unassigned_allocation_run(request, run_id):
             rooms=rooms,
             constraints_config=constraints_config,
             allocation_run_id=retry_run.id,
+            enable_group_capacity_cuts=True,
         ) or {}
 
         roommate_matches = result.get('roommate_matches')
@@ -4578,6 +4595,7 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                 constraints_config=constraints_config,
                 allocation_run_id=allocation_run_id,
                 max_seconds=max_seconds,
+                enable_group_capacity_cuts=True,
             ) or {}
 
             # Persisted immediately (not held in process memory) so this

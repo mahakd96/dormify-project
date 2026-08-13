@@ -913,6 +913,20 @@ class AllocationRun(models.Model):
     # without needing to inspect the solver call site.
     max_search_seconds = models.PositiveIntegerField(null=True, blank=True)
 
+    # When CP-SAT's solver.Solve() actually began for this run — set by
+    # allocation.solver immediately before calling Solve(), which is
+    # meaningfully LATER than `started_at` (row creation) once DB loading,
+    # candidate generation and model building are accounted for. This is
+    # the authoritative anchor for "how much of max_search_seconds has
+    # been consumed": AllocationRunSerializer derives elapsed_search_seconds
+    # / remaining_search_seconds from it so the frontend can reconstruct
+    # correct timing after navigating away, refreshing, or opening the
+    # page in a new tab, instead of re-deriving it from local React state
+    # that resets on every mount. None while QUEUED/still preparing (the
+    # solver has not started searching yet) and while a run failed before
+    # ever reaching Solve() (e.g. no students/rooms).
+    search_started_at = models.DateTimeField(null=True, blank=True)
+
     # Throttled, compact "current best solution so far" snapshot written
     # by the CP-SAT solution callback while a run is in progress (see
     # allocation.solver._LiveSolutionCallback). This is a lightweight
