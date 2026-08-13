@@ -3729,16 +3729,29 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
 
 def _run_diagnostics_payload(result):
     """
-    Build the {"warnings": [...], "anier_building_179_diagnostics": {...}}
-    shape persisted on AllocationRun.diagnostics, from a solver result
-    dict. Shared by both the sync and async allocation entry points so
-    neither path can silently drop this data or diverge in shape.
+    Build the {"warnings": [...], "anier_building_179_diagnostics": {...},
+    "solver_status": ..., "optimality_proven": ...} shape persisted on
+    AllocationRun.diagnostics, from a solver result dict. Shared by both
+    the sync and async allocation entry points so neither path can
+    silently drop this data or diverge in shape.
+
+    solver_status/optimality_proven are already computed by
+    run_improved_ortools_allocation (solver.py) for every run; surfacing
+    them here lets the frontend show "not proven optimal" for a FEASIBLE
+    (as opposed to OPTIMAL) result without changing any solve behavior.
     """
     if not isinstance(result, dict):
-        return {'warnings': [], 'anier_building_179_diagnostics': {}}
+        return {
+            'warnings': [],
+            'anier_building_179_diagnostics': {},
+            'solver_status': None,
+            'optimality_proven': False,
+        }
     return {
         'warnings': result.get('warnings', []),
         'anier_building_179_diagnostics': result.get('anier_building_179_diagnostics', {}),
+        'solver_status': result.get('solver_status'),
+        'optimality_proven': bool(result.get('optimality_proven', False)),
     }
 
 
@@ -4552,11 +4565,15 @@ def _cleanup_run_assignments(run_id, mark_status):
 
 
 def _execute_allocation_background(allocation_run_id, region_id, constraints_config,
-                                    include_assigned, allocation_scope):
+                                    include_assigned, allocation_scope, max_seconds=None):
     """
     Run the allocation solver in a background thread so the HTTP response
     can return the run_id immediately.  The thread updates AllocationRun
-    status as it progresses and checks for cancellation_requested.
+    status as it progresses and checks for cancellation_requested (and,
+    as of the Stop & Save feature, stop_and_save_requested - see the
+    post-solve branch below and _run_stop_watcher/_LiveSolutionCallback
+    in allocation/solver.py for how a stop request actually interrupts
+    CP-SAT instead of only being noticed after it finishes naturally).
     """
     from django.db import close_old_connections, connection as db_conn
 
@@ -4666,6 +4683,7 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                 rooms=rooms,
                 constraints_config=constraints_config,
                 allocation_run_id=allocation_run_id,
+                max_seconds=max_seconds,
             ) or {}
 
             # Persisted immediately (not held in process memory) so this
@@ -4684,7 +4702,18 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                 },
             )
 
-            # Check for cancellation after solver completes
+            # Check for a stop request noticed while the solver was
+            # running. Both CANCELLATION_REQUESTED and
+            # STOP_AND_SAVE_REQUESTED already triggered a real
+            # solver.StopSearch() well before this point (see
+            # _run_stop_watcher / _LiveSolutionCallback in
+            # allocation/solver.py) - this check only decides what to DO
+            # with whatever result the (possibly early-stopped) solve
+            # produced: Cancel always discards it; Stop & Save keeps it
+            # if - and only if - best-effort persistence already saved a
+            # FEASIBLE/OPTIMAL result (unchanged solver.py logic; if
+            # nothing was feasible yet, nothing was persisted, so there
+            # is nothing to clean up).
             post_status = AllocationRun.objects.filter(
                 pk=allocation_run_id
             ).values_list('status', flat=True).first()
@@ -4693,6 +4722,22 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                 _cleanup_run_assignments(
                     allocation_run_id,
                     mark_status=AllocationRun.Status.STOPPED,
+                )
+                AllocationRun.objects.filter(pk=allocation_run_id).update(live_snapshot=None)
+                return
+
+            stopped_early_by_user = post_status == AllocationRun.Status.STOP_AND_SAVE_REQUESTED
+
+            if stopped_early_by_user and not result.get('solution_persisted'):
+                AllocationRun.objects.filter(pk=allocation_run_id).update(
+                    status=AllocationRun.Status.STOPPED,
+                    completed_at=timezone.now(),
+                    live_snapshot=None,
+                    diagnostics={
+                        'warnings': [],
+                        'anier_building_179_diagnostics': dict(EMPTY_ANIER_BUILDING_179_DIAGNOSTICS),
+                        'stop_reason': 'no_feasible_solution_before_stop',
+                    },
                 )
                 return
 
@@ -4703,14 +4748,32 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                     + result.get('one_sided_roommate_matches', 0)
                 )
 
-            AllocationRun.objects.filter(pk=allocation_run_id).update(
-                status=AllocationRun.Status.COMPLETED,
-                students_processed=result.get('students_processed', students_count),
-                successful_assignments=result.get('successful_assignments', 0),
-                roommate_matches=roommate_matches,
-                conflicts=result.get('conflicts', 0),
-                completed_at=timezone.now(),
-            )
+            update_fields = {
+                'status': AllocationRun.Status.COMPLETED,
+                'students_processed': result.get('students_processed', students_count),
+                'successful_assignments': result.get('successful_assignments', 0),
+                'roommate_matches': roommate_matches,
+                'conflicts': result.get('conflicts', 0),
+                'completed_at': timezone.now(),
+                'live_snapshot': None,
+            }
+            if stopped_early_by_user:
+                # Same diagnostics shape already written above, plus the
+                # one extra marker - so a stop-and-save result is
+                # indistinguishable from a natural completion except for
+                # this flag (used by the frontend to show "not proven
+                # optimal, stopped early" instead of a plain success).
+                update_fields['diagnostics'] = {
+                    **_run_diagnostics_payload(result),
+                    'population_summary': {
+                        **population_summary,
+                        'assigned': result.get('successful_assignments', 0),
+                        'unassigned': result.get('conflicts', 0),
+                    },
+                    'stopped_early_by_user': True,
+                }
+
+            AllocationRun.objects.filter(pk=allocation_run_id).update(**update_fields)
 
             print(
                 f">>> ASYNC_ALLOCATION_DONE run_id={allocation_run_id} "
@@ -4725,6 +4788,7 @@ def _execute_allocation_background(allocation_run_id, region_id, constraints_con
                     status=AllocationRun.Status.FAILED,
                     error_message=str(exc)[:5000],
                     completed_at=timezone.now(),
+                    live_snapshot=None,
                 )
             except Exception:
                 traceback.print_exc()
@@ -4786,6 +4850,41 @@ def start_allocation_run(request):
     include_assigned = request.data.get('include_assigned') is True
     allocation_scope = request.data.get('allocation_scope')
 
+    from allocation.solver import (
+        MIN_USER_SOLVER_TIME_SECONDS,
+        MAX_USER_SOLVER_TIME_SECONDS,
+        DEFAULT_SOLVER_TIME_SECONDS,
+    )
+
+    # "Maximum search duration" (זמן חיפוש מרבי) chosen by the operator
+    # before starting the run - a MAXIMUM, not a target: if CP-SAT proves
+    # OPTIMAL earlier, it still finishes immediately (unchanged solver
+    # behavior, solver.py:max_time_in_seconds). Validated here (view
+    # layer) AND again, independently, inside run_improved_ortools_allocation
+    # itself - so a malformed/bypassed request can never hand CP-SAT an
+    # unreasonable duration even if this check were ever skipped.
+    max_solver_seconds_raw = request.data.get('max_solver_seconds')
+    if max_solver_seconds_raw in (None, ''):
+        max_solver_seconds = DEFAULT_SOLVER_TIME_SECONDS
+    else:
+        try:
+            max_solver_seconds = float(max_solver_seconds_raw)
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'זמן חיפוש מרבי חייב להיות מספר'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not (MIN_USER_SOLVER_TIME_SECONDS <= max_solver_seconds <= MAX_USER_SOLVER_TIME_SECONDS):
+            return Response(
+                {
+                    'error': (
+                        f'זמן חיפוש מרבי חייב להיות בין {MIN_USER_SOLVER_TIME_SECONDS} '
+                        f'ל-{MAX_USER_SOLVER_TIME_SECONDS} שניות'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
     with transaction.atomic():
         Region.objects.select_for_update().get(pk=region.pk)
 
@@ -4795,6 +4894,7 @@ def start_allocation_run(request):
                 AllocationRun.Status.QUEUED,
                 AllocationRun.Status.RUNNING,
                 AllocationRun.Status.CANCELLATION_REQUESTED,
+                AllocationRun.Status.STOP_AND_SAVE_REQUESTED,
             ],
         ).order_by('-started_at').first()
 
@@ -4812,11 +4912,13 @@ def start_allocation_run(request):
             region=region,
             run_by=request.user,
             status=AllocationRun.Status.QUEUED,
+            max_search_seconds=int(max_solver_seconds),
         )
 
     print(
         f">>> ASYNC_ALLOCATION_START run_id={allocation_run.id} "
-        f"region={region.id} user={request.user.email}",
+        f"region={region.id} user={request.user.email} "
+        f"max_solver_seconds={max_solver_seconds}",
         flush=True,
     )
 
@@ -4826,6 +4928,7 @@ def start_allocation_run(request):
         constraints_config=constraints_config,
         include_assigned=include_assigned,
         allocation_scope=allocation_scope,
+        max_seconds=max_solver_seconds,
     )
 
     return Response({
@@ -4885,15 +4988,69 @@ def get_allocation_run_detail(request, run_id):
         # run specifically, as persisted at solve time (see
         # _population_summary_for_region).
         'population_summary': run_diagnostics.get('population_summary', {}),
+        # solver_status/optimality_proven are already computed by the
+        # solver for every run (see _run_diagnostics_payload); surfacing
+        # them here lets the frontend show "stopped early, not proven
+        # optimal" for a Stop & Save result without any new backend
+        # computation. stopped_early_by_user is only ever set True by the
+        # Stop & Save finalize branch in _execute_allocation_background.
+        'solver_status': run_diagnostics.get('solver_status'),
+        'optimality_proven': bool(run_diagnostics.get('optimality_proven', False)),
+        'stopped_early_by_user': bool(run_diagnostics.get('stopped_early_by_user', False)),
     }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_allocation_run_preview(request, run_id):
+    """
+    Return the current best-feasible-solution-so-far snapshot for a
+    RUNNING allocation run, WITHOUT touching the solver or the DB
+    assignment tables - "צפה בתוצאה הנוכחית" (View Current Result).
+
+    Deliberately a separate, heavier endpoint from
+    get_allocation_run_detail: normal 3s status polling stays
+    lightweight (it already is - that endpoint never returns assignment
+    rows for a non-COMPLETED run), and this richer preview is only
+    fetched when the operator explicitly asks to see it.
+
+    Tries the in-process live_registry first (instant, zero DB cost when
+    this process is the one running the solve); falls back to
+    AllocationRun.live_snapshot (a throttled, cross-process-safe copy -
+    see _LiveSolutionCallback in allocation/solver.py) when nothing is
+    registered here, e.g. a different worker process is running the
+    solve. Returns {'available': False} - not 404/500 - when no feasible
+    solution has been found yet; that is an expected, normal state while
+    a run is still searching for its first solution.
+    """
+    try:
+        run = AllocationRun.objects.select_related('region').get(pk=run_id)
+    except AllocationRun.DoesNotExist:
+        return Response({'error': 'הרצה לא נמצאה'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not request.user.is_central_admin:
+        if request.user.region != run.region:
+            return Response({'error': 'אין גישה להרצה זו'}, status=status.HTTP_403_FORBIDDEN)
+
+    from allocation import live_registry
+
+    snapshot = live_registry.get(run_id) or run.live_snapshot
+
+    if not snapshot:
+        return Response({'available': False, 'snapshot': None}, status=status.HTTP_200_OK)
+
+    return Response({'available': True, 'snapshot': snapshot}, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def stop_allocation_run(request, run_id):
     """
-    Request cancellation of an in-progress allocation run.
-    Idempotent: safe to call more than once.
+    Request cancellation (discard) of an in-progress allocation run -
+    the "בטל הרצה" action. Distinct from stop_and_save_allocation_run
+    ("עצור ושמור תוצאה"), which keeps the best feasible result found so
+    far instead of discarding it. Idempotent: safe to call more than
+    once.
     """
     if not (request.user.is_boss or request.user.is_central_admin):
         return Response({'error': 'אין הרשאה לעצור שיבוץ'}, status=status.HTTP_403_FORBIDDEN)
@@ -4930,6 +5087,16 @@ def stop_allocation_run(request, run_id):
                     'status': run.status,
                 }, status=status.HTTP_200_OK)
 
+            if run.status == AllocationRun.Status.STOP_AND_SAVE_REQUESTED:
+                # Race protection: a Stop & Save request already won the
+                # row lock first - do not silently override it with a
+                # discard.
+                return Response({
+                    'error': 'כבר התבקשה עצירה עם שמירת תוצאה עבור הרצה זו',
+                    'run_id': run_id,
+                    'status': run.status,
+                }, status=status.HTTP_409_CONFLICT)
+
             AllocationRun.objects.filter(pk=run_id).update(
                 status=AllocationRun.Status.CANCELLATION_REQUESTED,
             )
@@ -4937,8 +5104,98 @@ def stop_allocation_run(request, run_id):
     except AllocationRun.DoesNotExist:
         return Response({'error': 'הרצה לא נמצאה'}, status=status.HTTP_404_NOT_FOUND)
 
+    # Best-effort same-process fast path: if the solver for this run
+    # happens to be running in this exact process, interrupt it
+    # immediately instead of waiting for _run_stop_watcher's next poll
+    # tick. Harmless no-op otherwise (cross-process case) - the DB flag
+    # just written above is what _run_stop_watcher/_LiveSolutionCallback
+    # actually rely on to notice the request everywhere else.
+    from allocation import live_registry
+    live_registry.request_stop_search(run_id)
+
     return Response({
-        'message': 'בקשת עצירה נשלחה. ניקוי נתונים יתבצע בסיום הסולבר.',
+        'message': 'בקשת עצירה נשלחה. השיבוץ ייעצר בהקדם והנתונים החלקיים יימחקו.',
+        'run_id': run_id,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def stop_and_save_allocation_run(request, run_id):
+    """
+    Request an early stop that KEEPS the best feasible result found so
+    far - the "עצור ושמור תוצאה" action. Distinct from
+    stop_allocation_run ("בטל הרצה"), which discards any partial work.
+
+    Interrupts the running CpSolver via StopSearch() (same-process fast
+    path here, plus the always-running _run_stop_watcher inside the
+    solve itself regardless of process - see allocation/solver.py), then
+    lets the existing best-effort persistence logic in
+    run_improved_ortools_allocation decide the outcome exactly as it
+    always has: a FEASIBLE or OPTIMAL result is persisted via the
+    unchanged transaction.atomic/select_for_update/bulk_create/
+    bulk_update block; UNKNOWN (no incumbent found yet) persists
+    nothing. See _execute_allocation_background's post-solve branch for
+    how the run is finalized either way. Idempotent: safe to call more
+    than once.
+    """
+    if not (request.user.is_boss or request.user.is_central_admin):
+        return Response({'error': 'אין הרשאה לעצור שיבוץ'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        with transaction.atomic():
+            run = AllocationRun.objects.select_for_update().get(pk=run_id)
+
+            if not request.user.is_central_admin:
+                if request.user.region != run.region:
+                    return Response(
+                        {'error': 'אין הרשאה לעצור הרצה זו'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
+            terminal = {
+                AllocationRun.Status.STOPPED,
+                AllocationRun.Status.COMPLETED,
+                AllocationRun.Status.FAILED,
+                AllocationRun.Status.DELETED,
+                AllocationRun.Status.APPROVED,
+            }
+
+            if run.status in terminal:
+                return Response({
+                    'error': 'הרצה זו כבר הסתיימה',
+                    'status': run.status,
+                }, status=status.HTTP_409_CONFLICT)
+
+            if run.status == AllocationRun.Status.STOP_AND_SAVE_REQUESTED:
+                return Response({
+                    'message': 'בקשת עצירה ושמירה כבר נשלחה',
+                    'run_id': run_id,
+                    'status': run.status,
+                }, status=status.HTTP_200_OK)
+
+            if run.status == AllocationRun.Status.CANCELLATION_REQUESTED:
+                # Race protection: a Cancel request already won the row
+                # lock first - do not resurrect the run into a
+                # save-on-stop path underneath it.
+                return Response({
+                    'error': 'כבר התבקש ביטול הרצה זו',
+                    'run_id': run_id,
+                    'status': run.status,
+                }, status=status.HTTP_409_CONFLICT)
+
+            AllocationRun.objects.filter(pk=run_id).update(
+                status=AllocationRun.Status.STOP_AND_SAVE_REQUESTED,
+            )
+
+    except AllocationRun.DoesNotExist:
+        return Response({'error': 'הרצה לא נמצאה'}, status=status.HTTP_404_NOT_FOUND)
+
+    from allocation import live_registry
+    live_registry.request_stop_search(run_id)
+
+    return Response({
+        'message': 'בקשת עצירה עם שמירת תוצאה נשלחה. הפתרון הטוב ביותר שנמצא יישמר.',
         'run_id': run_id,
     }, status=status.HTTP_200_OK)
 
