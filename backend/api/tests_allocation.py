@@ -12,7 +12,7 @@ from rest_framework import status
 
 from api.models import (
     User, Region, AllocationRun, BedAssignment, Student, DormType,
-    Building, Apartment, Room, Bed,
+    Building, Apartment, Room, Bed, ImportBatch,
 )
 from api.serializers import AllocationRunSerializer
 
@@ -5223,7 +5223,13 @@ class AccessibilityAllocationExclusionTest(TestCase):
             content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         )
 
-        response = client.post('/api/upload/excel/', {'file': upload_file}, format='multipart')
+        init_response = client.post('/api/upload/batches/init/', {'kind': 'main'}, format='json')
+        self.assertEqual(init_response.status_code, 201, init_response.data)
+        batch_id = init_response.data['batch_id']
+
+        response = client.post(
+            '/api/upload/excel/', {'file': upload_file, 'batch_id': batch_id}, format='multipart'
+        )
         self.assertEqual(response.status_code, 200, response.data)
 
         student = Student.objects.get(student_id='ACC_UP1')
@@ -5485,7 +5491,13 @@ class AnierImportMappingTest(TestCase):
             'anier.xlsx', buffer.read(),
             content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         )
-        response = client.post('/api/upload/excel/', {'file': upload_file}, format='multipart')
+        init_response = client.post('/api/upload/batches/init/', {'kind': 'main'}, format='json')
+        self.assertEqual(init_response.status_code, 201, init_response.data)
+        batch_id = init_response.data['batch_id']
+
+        response = client.post(
+            '/api/upload/excel/', {'file': upload_file, 'batch_id': batch_id}, format='multipart'
+        )
         self.assertEqual(response.status_code, 200, response.data)
 
         student = Student.objects.get(student_id='ANIER_UP1')
@@ -5554,7 +5566,13 @@ class AdditionsUploadSharedMappingTest(TestCase):
             'additions.xlsx', buffer.read(),
             content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         )
-        response = client.post('/api/upload/additions-excel/', {'file': upload_file}, format='multipart')
+        init_response = client.post('/api/upload/batches/init/', {'kind': 'additions'}, format='json')
+        self.assertEqual(init_response.status_code, 201, init_response.data)
+        batch_id = init_response.data['batch_id']
+
+        response = client.post(
+            '/api/upload/additions-excel/', {'file': upload_file, 'batch_id': batch_id}, format='multipart'
+        )
         self.assertEqual(response.status_code, 200, response.data)
 
         student = Student.objects.get(student_id='ADD_ANIER1')
@@ -6713,4 +6731,276 @@ class StopSaveVsCancelRaceTest(TestCase):
 
         run.refresh_from_db()
         self.assertEqual(run.status, AllocationRun.Status.CANCELLATION_REQUESTED)
+
+
+# ---------------------------------------------------------------------------
+# Import batch lifecycle: init handshake, live status/progress, Stop,
+# Stop & Delete, Delete - covers the two-step batch_id handshake, the
+# PENDING/PROCESSING/CANCELLATION_REQUESTED/STOP_AND_DELETE_REQUESTED/
+# STOPPED state machine, created_in_batch-scoped deletion safety, and that
+# Stop genuinely interrupts a synchronous upload request from a concurrent
+# request (not just a DB flag nobody ever reads).
+# ---------------------------------------------------------------------------
+class ImportBatchLifecycleTest(TransactionTestCase):
+    """TransactionTestCase (not TestCase) because the concurrency tests below
+    run the upload in a real background thread against the SAME database -
+    TestCase's per-test wrapping transaction would hide the thread's writes
+    from the main thread (and vice versa)."""
+
+    def setUp(self):
+        self.admin = _make_central_admin(email='batchadmin@test.com')
+        self.other_admin = _make_central_admin(email='otheradmin@test.com')
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    @staticmethod
+    def _make_xlsx_bytes(row_count, sheet_name='נכנסים חדשים', student_id_prefix='LC'):
+        import io
+        import pandas as pd
+
+        buffer = io.BytesIO()
+        pd.DataFrame([
+            {
+                'ת"ז ישראלית': f'{student_id_prefix}{i:05d}',
+                'שם פרטי': 'Test',
+                'שם משפחה': f'Row{i}',
+                'תיאור סוג מגורים': 'רווקות',
+            }
+            for i in range(row_count)
+        ]).to_excel(buffer, index=False, sheet_name=sheet_name)
+        buffer.seek(0)
+        return buffer.read()
+
+    def _init(self, kind='main', client=None):
+        client = client or self.client
+        resp = client.post('/api/upload/batches/init/', {'kind': kind}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        return resp.data['batch_id']
+
+    def test_init_creates_pending_batch(self):
+        batch_id = self._init(kind='main')
+        batch = ImportBatch.objects.get(pk=batch_id)
+        self.assertEqual(batch.status, ImportBatch.Status.PENDING)
+        self.assertEqual(batch.kind, ImportBatch.Kind.MAIN)
+        self.assertIsNone(batch.started_at)
+
+    def test_upload_without_batch_id_is_rejected(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        upload_file = SimpleUploadedFile(
+            'x.xlsx', self._make_xlsx_bytes(1),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        resp = self.client.post('/api/upload/excel/', {'file': upload_file}, format='multipart')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_upload_rejects_wrong_kind(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        batch_id = self._init(kind='additions')
+        upload_file = SimpleUploadedFile(
+            'x.xlsx', self._make_xlsx_bytes(1),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        resp = self.client.post(
+            '/api/upload/excel/', {'file': upload_file, 'batch_id': batch_id}, format='multipart'
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_upload_rejects_other_admins_batch(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        other_client = APIClient()
+        other_client.force_authenticate(user=self.other_admin)
+        batch_id = self._init(kind='main', client=other_client)
+
+        upload_file = SimpleUploadedFile(
+            'x.xlsx', self._make_xlsx_bytes(1),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        resp = self.client.post(
+            '/api/upload/excel/', {'file': upload_file, 'batch_id': batch_id}, format='multipart'
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_happy_path_completes_and_persists_result(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        batch_id = self._init(kind='main')
+        upload_file = SimpleUploadedFile(
+            'x.xlsx', self._make_xlsx_bytes(5, student_id_prefix='HP'),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        resp = self.client.post(
+            '/api/upload/excel/', {'file': upload_file, 'batch_id': batch_id}, format='multipart'
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        batch = ImportBatch.objects.get(pk=batch_id)
+        self.assertEqual(batch.status, ImportBatch.Status.COMPLETED)
+        self.assertIsNotNone(batch.started_at)
+        self.assertIsNotNone(batch.finished_at)
+        self.assertEqual(batch.processed_rows, 5)
+        self.assertEqual(batch.total_rows, 5)
+        self.assertIsNotNone(batch.result)
+        self.assertEqual(Student.objects.filter(created_in_batch=batch).count(), 5)
+
+        status_resp = self.client.get(f'/api/upload/batches/{batch_id}/status/')
+        self.assertEqual(status_resp.status_code, 200)
+        self.assertEqual(status_resp.data['status'], ImportBatch.Status.COMPLETED)
+        self.assertIsNotNone(status_resp.data['result'])
+
+    def test_delete_removes_only_created_students_not_updated(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        pre_existing = Student.objects.create(
+            student_id='PREEXIST1', first_name='Pre', last_name='Existing',
+            gender=Student.Gender.FEMALE, housing_type=Student.HousingType.SINGLE_FEMALE,
+        )
+
+        import io
+        import pandas as pd
+        buffer = io.BytesIO()
+        pd.DataFrame([
+            {'ת"ז ישראלית': 'PREEXIST1', 'שם פרטי': 'Pre', 'שם משפחה': 'Existing', 'תיאור סוג מגורים': 'רווקות'},
+            {'ת"ז ישראלית': 'BRANDNEW1', 'שם פרטי': 'Brand', 'שם משפחה': 'New', 'תיאור סוג מגורים': 'רווקות'},
+        ]).to_excel(buffer, index=False, sheet_name='נכנסים חדשים')
+        buffer.seek(0)
+
+        batch_id = self._init(kind='main')
+        upload_file = SimpleUploadedFile(
+            'x.xlsx', buffer.read(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        resp = self.client.post(
+            '/api/upload/excel/', {'file': upload_file, 'batch_id': batch_id}, format='multipart'
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(Student.objects.filter(pk=pre_existing.pk).exists())
+        self.assertTrue(Student.objects.filter(student_id='BRANDNEW1').exists())
+
+        delete_resp = self.client.post(f'/api/upload/batches/{batch_id}/delete/')
+        self.assertEqual(delete_resp.status_code, 200, delete_resp.data)
+
+        # The pre-existing student (merely updated by this batch) survives.
+        self.assertTrue(Student.objects.filter(pk=pre_existing.pk).exists())
+        # The genuinely new student (created by this batch) is gone.
+        self.assertFalse(Student.objects.filter(student_id='BRANDNEW1').exists())
+
+        deletion = delete_resp.data['result']['deletion']
+        self.assertEqual(deletion['deleted_count'], 1)
+        self.assertEqual(deletion['protected_count'], 0)
+
+    def test_delete_rejected_while_processing(self):
+        batch_id = self._init(kind='main')
+        # Still PENDING (never uploaded) - delete is only valid once terminal.
+        resp = self.client.post(f'/api/upload/batches/{batch_id}/delete/')
+        self.assertEqual(resp.status_code, 409)
+
+    def test_stop_rejected_when_not_processing(self):
+        batch_id = self._init(kind='main')
+        resp = self.client.post(f'/api/upload/batches/{batch_id}/stop/')
+        self.assertEqual(resp.status_code, 409)
+
+    def test_stop_and_delete_on_pending_batch_resolves_immediately(self):
+        batch_id = self._init(kind='main')
+        resp = self.client.post(f'/api/upload/batches/{batch_id}/stop-and-delete/')
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        batch = ImportBatch.objects.get(pk=batch_id)
+        self.assertEqual(batch.status, ImportBatch.Status.STOPPED)
+        self.assertEqual(batch.result['deletion']['deleted_count'], 0)
+
+    def _run_upload_in_thread(self, batch_id, row_count, student_id_prefix, upload_url='/api/upload/excel/'):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from django.db import connections
+
+        result_holder = {}
+
+        def _run():
+            thread_client = APIClient()
+            thread_client.force_authenticate(user=self.admin)
+            upload_file = SimpleUploadedFile(
+                'big.xlsx',
+                self._make_xlsx_bytes(row_count, student_id_prefix=student_id_prefix),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+            resp = thread_client.post(
+                upload_url, {'file': upload_file, 'batch_id': batch_id}, format='multipart'
+            )
+            result_holder['status_code'] = resp.status_code
+            result_holder['data'] = resp.data
+            connections.close_all()
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        return thread, result_holder
+
+    def _wait_for_progress(self, batch_id, min_processed=20, timeout=20):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            processed = ImportBatch.objects.filter(pk=batch_id).values_list(
+                'processed_rows', flat=True
+            ).first()
+            if processed is not None and processed >= min_processed:
+                return processed
+            time.sleep(0.05)
+        self.fail(
+            f"Batch {batch_id} did not reach {min_processed} processed_rows "
+            f"within {timeout}s (concurrency/visibility problem, or the row "
+            "loop is not actually running/committing progress)."
+        )
+
+    def test_stop_genuinely_interrupts_a_running_upload(self):
+        """Proves the Decision-4 concurrency claim for real: a second
+        request (this test's main thread) can flip the batch's status to
+        CANCELLATION_REQUESTED WHILE a separate thread's upload request is
+        still inside its row loop, and that loop actually notices and
+        halts before processing every row."""
+        batch_id = self._init(kind='main')
+        thread, result_holder = self._run_upload_in_thread(batch_id, row_count=4000, student_id_prefix='ST')
+
+        self._wait_for_progress(batch_id, min_processed=20)
+
+        stop_client = APIClient()
+        stop_client.force_authenticate(user=self.admin)
+        stop_resp = stop_client.post(f'/api/upload/batches/{batch_id}/stop/')
+        self.assertEqual(stop_resp.status_code, 200, stop_resp.data)
+
+        thread.join(timeout=60)
+        self.assertFalse(thread.is_alive(), "upload thread did not finish after being stopped")
+        self.assertEqual(result_holder.get('status_code'), 200, result_holder.get('data'))
+
+        batch = ImportBatch.objects.get(pk=batch_id)
+        self.assertEqual(batch.status, ImportBatch.Status.STOPPED)
+        self.assertIsNotNone(batch.finished_at)
+        # The whole point of the test: it stopped meaningfully early, not
+        # by coincidentally finishing all 4000 rows first.
+        self.assertLess(batch.processed_rows, 4000)
+        self.assertGreater(batch.processed_rows, 0)
+        # Whatever rows WERE processed before the stop are real, committed
+        # Student rows - not corrupted/partial counters.
+        self.assertEqual(
+            Student.objects.filter(created_in_batch=batch).count(),
+            batch.result['created'],
+        )
+
+    def test_stop_and_delete_removes_students_created_before_the_stop(self):
+        batch_id = self._init(kind='main')
+        thread, result_holder = self._run_upload_in_thread(batch_id, row_count=4000, student_id_prefix='SD')
+
+        self._wait_for_progress(batch_id, min_processed=20)
+
+        stop_client = APIClient()
+        stop_client.force_authenticate(user=self.admin)
+        stop_resp = stop_client.post(f'/api/upload/batches/{batch_id}/stop-and-delete/')
+        self.assertEqual(stop_resp.status_code, 200, stop_resp.data)
+
+        thread.join(timeout=60)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result_holder.get('status_code'), 200, result_holder.get('data'))
+
+        batch = ImportBatch.objects.get(pk=batch_id)
+        self.assertEqual(batch.status, ImportBatch.Status.STOPPED)
+        self.assertLess(batch.processed_rows, 4000)
+        self.assertIn('deletion', batch.result)
+        self.assertGreater(batch.result['deletion']['deleted_count'], 0)
+        # Everything this batch created was actually removed.
+        self.assertEqual(Student.objects.filter(created_in_batch=batch).count(), 0)
 

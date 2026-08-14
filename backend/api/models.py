@@ -459,6 +459,19 @@ class Student(models.Model):
         blank=True,
         related_name='students'
     )
+
+    # Set ONLY at creation time, never reassigned on update - unlike `batch`
+    # above (which tracks "last touched by"), this is the sole reliable way
+    # to know "did THIS batch create this student row." Used to scope the
+    # upload-workflow delete controls so they can never remove a
+    # pre-existing student that a batch merely updated.
+    created_in_batch = models.ForeignKey(
+        'ImportBatch',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_students',
+    )
     religious = models.CharField(
         max_length=20,
         choices=Religious.choices,
@@ -962,24 +975,54 @@ class AllocationRun(models.Model):
 
 class ImportBatch(models.Model):
     class Status(models.TextChoices):
+        PENDING = 'pending', _('ממתין להעלאה')
         PROCESSING = 'processing', _('מעבד')
+        CANCELLATION_REQUESTED = 'cancellation_requested', _('בקשת עצירה')
+        STOP_AND_DELETE_REQUESTED = 'stop_and_delete_requested', _('בקשת עצירה ומחיקה')
+        STOPPED = 'stopped', _('נעצר')
         COMPLETED = 'completed', _('הושלם')
         FAILED = 'failed', _('נכשל')
+
+    class Kind(models.TextChoices):
+        MAIN = 'main', _('קובץ שיבוץ ראשי')
+        ADDITIONS = 'additions', _('קובץ מתווספים')
 
     uploaded_by = models.ForeignKey(
         User,
         on_delete=models.PROTECT,
         related_name='import_batches'
     )
-    filename = models.CharField(max_length=255)
+    kind = models.CharField(max_length=20, choices=Kind.choices, default=Kind.MAIN)
+    # Blank until the actual file arrives - a batch is created (PENDING) via
+    # the init handshake before the caller has even chosen/sent a file.
+    filename = models.CharField(max_length=255, blank=True, default='')
     total_students = models.PositiveIntegerField(default=0)
     status = models.CharField(
-        max_length=20,
+        max_length=30,
         choices=Status.choices,
-        default=Status.PROCESSING
+        default=Status.PENDING
     )
     error_message = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    # Authoritative timestamps for the frontend timer and for distinguishing
+    # "created but never submitted" (started_at is null) from "actually ran."
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    # Lightweight live-progress counters, updated once per row as it's
+    # processed. Not a resumable cursor (no per-sheet position is stored) -
+    # only enough for a progress display and for the frontend to know
+    # processing is actually advancing.
+    total_rows = models.PositiveIntegerField(default=0)
+    processed_rows = models.PositiveIntegerField(default=0)
+
+    # Full terminal summary (same shape as the synchronous upload response),
+    # persisted so a page refresh/re-poll can recover it after the original
+    # request has already returned. Also holds the deletion outcome
+    # (`result['deletion']`) when Delete/Stop & Delete actually removes
+    # students - deliberately not a separate status value.
+    result = models.JSONField(null=True, blank=True)
 
     class Meta:
         verbose_name = _('קובץ יבוא')
@@ -990,14 +1033,13 @@ class ImportBatch(models.Model):
         return f"Batch {self.id} - {self.filename} ({self.created_at.strftime('%Y-%m-%d %H:%M')})"
 
     def clean(self):
-        if self.status == self.Status.PROCESSING and self.error_message:
-            raise ValidationError('Processing batch cannot have error_message.')
-
-        if self.status == self.Status.COMPLETED and self.error_message:
-            raise ValidationError('Completed batch should not have error_message.')
-
-        if self.status == self.Status.FAILED and not self.error_message:
-            raise ValidationError('Failed batch should include error_message.')
+        if self.status == self.Status.FAILED:
+            if not self.error_message:
+                raise ValidationError('Failed batch should include error_message.')
+        elif self.error_message:
+            raise ValidationError(
+                f'{self.get_status_display()} batch cannot have error_message.'
+            )
 
     def save(self, *args, **kwargs):
         self.full_clean()
