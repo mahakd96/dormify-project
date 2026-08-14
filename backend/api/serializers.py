@@ -1563,12 +1563,18 @@ class ImportBatchSerializer(serializers.ModelSerializer):
             'id',
             'uploaded_by',
             'uploaded_by_name',
+            'kind',
             'filename',
             'total_students',
             'status',
             'status_display',
             'error_message',
             'created_at',
+            'started_at',
+            'finished_at',
+            'total_rows',
+            'processed_rows',
+            'result',
             'region_breakdown',
         ]
         read_only_fields = ['id', 'created_at']
@@ -1593,19 +1599,14 @@ class ImportBatchSerializer(serializers.ModelSerializer):
         status = attrs.get('status', getattr(instance, 'status', None))
         error_message = attrs.get('error_message', getattr(instance, 'error_message', ''))
 
-        if status == ImportBatch.Status.PROCESSING and error_message:
+        if status == ImportBatch.Status.FAILED:
+            if not error_message:
+                raise serializers.ValidationError({
+                    'error_message': 'Failed batch should include error_message.'
+                })
+        elif error_message:
             raise serializers.ValidationError({
-                'error_message': 'Processing batch cannot have error_message.'
-            })
-
-        if status == ImportBatch.Status.COMPLETED and error_message:
-            raise serializers.ValidationError({
-                'error_message': 'Completed batch should not have error_message.'
-            })
-
-        if status == ImportBatch.Status.FAILED and not error_message:
-            raise serializers.ValidationError({
-                'error_message': 'Failed batch should include error_message.'
+                'error_message': f'{status} batch cannot have error_message.'
             })
 
         return attrs

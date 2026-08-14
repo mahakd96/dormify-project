@@ -13,26 +13,58 @@ import {
   UserPlus,
   ChevronDown,
   ChevronUp,
+  StopCircle,
+  Trash2,
+  XOctagon,
 } from 'lucide-react';
+
+// Batch statuses during which processing is still (or may still be) active -
+// the frontend keeps polling and the timer keeps ticking for any of these.
+const ACTIVE_BATCH_STATUSES = [
+  'pending',
+  'processing',
+  'cancellation_requested',
+  'stop_and_delete_requested',
+];
+const TERMINAL_BATCH_STATUSES = ['completed', 'stopped', 'failed'];
+
+// Per-tab-only memory of "which batch is this card currently tracking" -
+// used solely to restore the status poll/timer after a refresh. Never used
+// to decide which batch an action targets (every action call always sends
+// an explicit batch_id already held in state).
+const PRIMARY_BATCH_STORAGE_KEY = 'dormify_upload_batch_main';
+const ADDITIONS_BATCH_STORAGE_KEY = 'dormify_upload_batch_additions';
+const BATCH_POLL_INTERVAL_MS = 1500;
 
 function UploadPage({ language = 'he' }) {
   const { canUploadExcel } = useAuth();
   const isHebrew = language === 'he';
 
   const [file, setFile] = useState(null);
-  const [uploading, setUploading] = useState(false);
+  const [batchId, setBatchId] = useState(null);
+  const [batchStatus, setBatchStatus] = useState(null);
+  const [startedAtMs, setStartedAtMs] = useState(null);
+  const [finishedAtMs, setFinishedAtMs] = useState(null);
   const [uploadResult, setUploadResult] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState(null);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [displayElapsed, setDisplayElapsed] = useState(0);
   const [showDetails, setShowDetails] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
 
   const [additionsFile, setAdditionsFile] = useState(null);
-  const [uploadingAdditions, setUploadingAdditions] = useState(false);
+  const [additionsBatchId, setAdditionsBatchId] = useState(null);
+  const [additionsBatchStatus, setAdditionsBatchStatus] = useState(null);
+  const [additionsStartedAtMs, setAdditionsStartedAtMs] = useState(null);
+  const [additionsFinishedAtMs, setAdditionsFinishedAtMs] = useState(null);
   const [additionsResult, setAdditionsResult] = useState(null);
   const [additionsError, setAdditionsError] = useState(null);
   const [additionsDragOver, setAdditionsDragOver] = useState(false);
-  const [additionsElapsedSeconds, setAdditionsElapsedSeconds] = useState(0);
+  const [additionsDisplayElapsed, setAdditionsDisplayElapsed] = useState(0);
+  const [additionsActionBusy, setAdditionsActionBusy] = useState(false);
+
+  const uploading = ACTIVE_BATCH_STATUSES.includes(batchStatus);
+  const uploadingAdditions = ACTIVE_BATCH_STATUSES.includes(additionsBatchStatus);
 
   const t = {
     he: {
@@ -52,12 +84,14 @@ function UploadPage({ language = 'he' }) {
       waiting: 'טרם נבחר קובץ',
       completed: 'הושלם',
       failed: 'נכשל',
+      stopped: 'נעצר',
       noAccess: 'אין הרשאה להעלות קבצים',
       accessHint: 'הפעולה זמינה למנהל/ת מרכזי/ת בלבד.',
       invalidFile: 'יש לבחור קובץ Excel מסוג xlsx או xls.',
       uploadError: 'העלאת הקובץ נכשלה',
       primarySuccess: 'קובץ השיבוץ נקלט בהצלחה',
       additionsSuccess: 'קובץ המתווספים נקלט בהצלחה',
+      stoppedMessage: 'העיבוד נעצר לבקשתכם באמצע התהליך',
       batchId: 'אצווה',
       totalStudents: 'נקלטו',
       created: 'נוצרו',
@@ -79,6 +113,22 @@ function UploadPage({ language = 'he' }) {
       sharedApartmentSingles: 'רווקים/ות בדירת זוגות',
       couplesApartments: 'דירות זוגות',
       familiesApartments: 'דירות משפחות',
+
+      stopButton: 'עצור',
+      stopAndDeleteButton: 'עצור ומחק',
+      deleteCreatedButton: 'מחק סטודנטים שנוספו בהעלאה זו',
+      stopError: 'עצירת ההעלאה נכשלה',
+      deleteError: 'מחיקת הסטודנטים נכשלה',
+      confirmStopAndDelete:
+        'לעצור את ההעלאה ולמחוק את הסטודנטים שכבר נוספו בה? הפעולה בלתי הפיכה. סטודנטים קיימים שעודכנו על ידי הקובץ לא ישוחזרו.',
+      confirmDelete:
+        'למחוק את הסטודנטים שנוספו בהעלאה זו? הפעולה בלתי הפיכה. סטודנטים קיימים שהקובץ רק עדכן לא יימחקו ולא ישוחזרו לערכים הקודמים.',
+      deletionOutcome: 'תוצאת המחיקה',
+      deletedCount: 'נמחקו',
+      protectedCount: 'לא ניתן למחוק (משובצים)',
+      deleteNote:
+        'המחיקה מסירה רק סטודנטים שנוצרו על ידי העלאה זו. סטודנטים קיימים שהקובץ עדכן אינם מושפעים ולא ישוחזרו.',
+      processedProgress: 'שורות שעובדו',
     },
     en: {
       title: 'Upload Files',
@@ -97,12 +147,14 @@ function UploadPage({ language = 'he' }) {
       waiting: 'No file selected',
       completed: 'Completed',
       failed: 'Failed',
+      stopped: 'Stopped',
       noAccess: 'You do not have permission to upload files',
       accessHint: 'This action is available only to central administrators.',
       invalidFile: 'Choose an Excel file in xlsx or xls format.',
       uploadError: 'File upload failed',
       primarySuccess: 'Allocation file imported successfully',
       additionsSuccess: 'Additions file imported successfully',
+      stoppedMessage: 'Processing was stopped by request, partway through',
       batchId: 'Batch',
       totalStudents: 'Imported',
       created: 'Created',
@@ -124,56 +176,192 @@ function UploadPage({ language = 'he' }) {
       sharedApartmentSingles: 'Singles in shared/couple apartments',
       couplesApartments: 'Couple apartments',
       familiesApartments: 'Family apartments',
+
+      stopButton: 'Stop',
+      stopAndDeleteButton: 'Stop & Delete',
+      deleteCreatedButton: 'Delete students added by this upload',
+      stopError: 'Failed to stop the upload',
+      deleteError: 'Failed to delete students',
+      confirmStopAndDelete:
+        'Stop this upload and delete the students it already added? This cannot be undone. Existing students it updated will not be reverted.',
+      confirmDelete:
+        'Delete the students added by this upload? This cannot be undone. Existing students this file only updated will not be deleted or reverted.',
+      deletionOutcome: 'Deletion outcome',
+      deletedCount: 'Deleted',
+      protectedCount: 'Could not delete (already housed)',
+      deleteNote:
+        'Deletion removes only students created by this upload. Existing students it updated are not affected and are not reverted.',
+      processedProgress: 'Rows processed',
     },
   }[isHebrew ? 'he' : 'en'];
 
+  // Timer: authoritative backend timestamps, not a client-side counter -
+  // survives refresh/navigation. Same single-timer visual appearance as
+  // before, just re-anchored on every tick instead of incrementing blindly.
   useEffect(() => {
-    if (!uploading) return undefined;
+    if (!startedAtMs) {
+      setDisplayElapsed(0);
+      return undefined;
+    }
 
-    const intervalId = window.setInterval(() => {
-      setElapsedSeconds((previous) => previous + 1);
-    }, 1000);
+    const recompute = () => {
+      const end = finishedAtMs || Date.now();
+      setDisplayElapsed(Math.max(0, Math.floor((end - startedAtMs) / 1000)));
+    };
 
+    recompute();
+    if (finishedAtMs) return undefined;
+
+    const intervalId = window.setInterval(recompute, 1000);
     return () => window.clearInterval(intervalId);
-  }, [uploading]);
+  }, [startedAtMs, finishedAtMs]);
 
   useEffect(() => {
-    if (!uploadingAdditions) return undefined;
+    if (!additionsStartedAtMs) {
+      setAdditionsDisplayElapsed(0);
+      return undefined;
+    }
 
-    const intervalId = window.setInterval(() => {
-      setAdditionsElapsedSeconds((previous) => previous + 1);
-    }, 1000);
+    const recompute = () => {
+      const end = additionsFinishedAtMs || Date.now();
+      setAdditionsDisplayElapsed(Math.max(0, Math.floor((end - additionsStartedAtMs) / 1000)));
+    };
 
+    recompute();
+    if (additionsFinishedAtMs) return undefined;
+
+    const intervalId = window.setInterval(recompute, 1000);
     return () => window.clearInterval(intervalId);
-  }, [uploadingAdditions]);
+  }, [additionsStartedAtMs, additionsFinishedAtMs]);
 
   const formatElapsed = (seconds) => {
-    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
     const remainingSeconds = seconds % 60;
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+    }
     return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
   };
 
   const formattedElapsed = useMemo(
-    () => formatElapsed(elapsedSeconds),
-    [elapsedSeconds]
+    () => formatElapsed(displayElapsed),
+    [displayElapsed]
   );
 
   const formattedAdditionsElapsed = useMemo(
-    () => formatElapsed(additionsElapsedSeconds),
-    [additionsElapsedSeconds]
+    () => formatElapsed(additionsDisplayElapsed),
+    [additionsDisplayElapsed]
   );
+
+  // Applies a batch's serialized state (from status/stop/stop-and-delete/
+  // delete - they all return the same ImportBatchSerializer shape) to the
+  // primary card. Single choke point so every source (polling, the upload
+  // request's own resolution, refresh recovery, action buttons) stays
+  // consistent.
+  const applyBatchStatus = (data) => {
+    if (!data) return;
+    setBatchStatus(data.status);
+    setStartedAtMs(data.started_at ? new Date(data.started_at).getTime() : null);
+    setFinishedAtMs(data.finished_at ? new Date(data.finished_at).getTime() : null);
+
+    if (TERMINAL_BATCH_STATUSES.includes(data.status)) {
+      if (data.result) {
+        setUploadResult(data.result);
+      } else if (data.status === 'failed') {
+        setError(data.error_message || t.uploadError);
+      }
+    }
+  };
+
+  const applyAdditionsBatchStatus = (data) => {
+    if (!data) return;
+    setAdditionsBatchStatus(data.status);
+    setAdditionsStartedAtMs(data.started_at ? new Date(data.started_at).getTime() : null);
+    setAdditionsFinishedAtMs(data.finished_at ? new Date(data.finished_at).getTime() : null);
+
+    if (TERMINAL_BATCH_STATUSES.includes(data.status)) {
+      if (data.result) {
+        setAdditionsResult(data.result);
+      } else if (data.status === 'failed') {
+        setAdditionsError(data.error_message || t.uploadError);
+      }
+    }
+  };
+
+  // Refresh/navigation recovery: restore this tab's own last batch_id (not
+  // "latest batch by admin" - purely local memory of our own prior action)
+  // and re-poll it once.
+  useEffect(() => {
+    const saved = sessionStorage.getItem(PRIMARY_BATCH_STORAGE_KEY);
+    const savedId = Number(saved);
+    if (!saved || !Number.isFinite(savedId)) return;
+
+    setBatchId(savedId);
+    uploadAPI
+      .getBatchStatus(savedId)
+      .then(applyBatchStatus)
+      .catch(() => sessionStorage.removeItem(PRIMARY_BATCH_STORAGE_KEY));
+  }, []);
+
+  useEffect(() => {
+    const saved = sessionStorage.getItem(ADDITIONS_BATCH_STORAGE_KEY);
+    const savedId = Number(saved);
+    if (!saved || !Number.isFinite(savedId)) return;
+
+    setAdditionsBatchId(savedId);
+    uploadAPI
+      .getBatchStatus(savedId)
+      .then(applyAdditionsBatchStatus)
+      .catch(() => sessionStorage.removeItem(ADDITIONS_BATCH_STORAGE_KEY));
+  }, []);
+
+  // Live progress polling - independent of whichever request actually
+  // started the upload, so it also works after a refresh.
+  useEffect(() => {
+    if (!batchId || !uploading) return undefined;
+    let cancelled = false;
+
+    const poll = () => {
+      uploadAPI
+        .getBatchStatus(batchId)
+        .then((data) => {
+          if (!cancelled) applyBatchStatus(data);
+        })
+        .catch(() => {});
+    };
+
+    const intervalId = window.setInterval(poll, BATCH_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [batchId, uploading]);
+
+  useEffect(() => {
+    if (!additionsBatchId || !uploadingAdditions) return undefined;
+    let cancelled = false;
+
+    const poll = () => {
+      uploadAPI
+        .getBatchStatus(additionsBatchId)
+        .then((data) => {
+          if (!cancelled) applyAdditionsBatchStatus(data);
+        })
+        .catch(() => {});
+    };
+
+    const intervalId = window.setInterval(poll, BATCH_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [additionsBatchId, uploadingAdditions]);
 
   const isValidExcelFile = (candidateFile) => {
     if (!candidateFile) return false;
     const lowerName = candidateFile.name.toLowerCase();
     return lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls');
-  };
-
-  const normalizeResult = (response) => {
-    if (response && typeof response === 'object' && 'data' in response) {
-      return response.data;
-    }
-    return response;
   };
 
   const selectPrimaryFile = (selectedFile) => {
@@ -189,8 +377,12 @@ function UploadPage({ language = 'he' }) {
     setFile(selectedFile);
     setUploadResult(null);
     setError(null);
-    setElapsedSeconds(0);
+    setBatchId(null);
+    setBatchStatus(null);
+    setStartedAtMs(null);
+    setFinishedAtMs(null);
     setShowDetails(false);
+    sessionStorage.removeItem(PRIMARY_BATCH_STORAGE_KEY);
   };
 
   const selectAdditionsFile = (selectedFile) => {
@@ -206,17 +398,24 @@ function UploadPage({ language = 'he' }) {
     setAdditionsFile(selectedFile);
     setAdditionsResult(null);
     setAdditionsError(null);
-    setAdditionsElapsedSeconds(0);
+    setAdditionsBatchId(null);
+    setAdditionsBatchStatus(null);
+    setAdditionsStartedAtMs(null);
+    setAdditionsFinishedAtMs(null);
+    sessionStorage.removeItem(ADDITIONS_BATCH_STORAGE_KEY);
   };
 
   const resetPrimary = (event) => {
     event?.stopPropagation();
     setFile(null);
-    setUploading(false);
     setUploadResult(null);
     setError(null);
-    setElapsedSeconds(0);
+    setBatchId(null);
+    setBatchStatus(null);
+    setStartedAtMs(null);
+    setFinishedAtMs(null);
     setShowDetails(false);
+    sessionStorage.removeItem(PRIMARY_BATCH_STORAGE_KEY);
 
     const input = document.getElementById('primary-file-input');
     if (input) input.value = '';
@@ -225,10 +424,13 @@ function UploadPage({ language = 'he' }) {
   const resetAdditions = (event) => {
     event?.stopPropagation();
     setAdditionsFile(null);
-    setUploadingAdditions(false);
     setAdditionsResult(null);
     setAdditionsError(null);
-    setAdditionsElapsedSeconds(0);
+    setAdditionsBatchId(null);
+    setAdditionsBatchStatus(null);
+    setAdditionsStartedAtMs(null);
+    setAdditionsFinishedAtMs(null);
+    sessionStorage.removeItem(ADDITIONS_BATCH_STORAGE_KEY);
 
     const input = document.getElementById('additions-file-input');
     if (input) input.value = '';
@@ -237,52 +439,139 @@ function UploadPage({ language = 'he' }) {
   const handleUpload = async () => {
     if (!file || uploading) return;
 
-    setUploading(true);
-    setUploadResult(null);
     setError(null);
-    setElapsedSeconds(0);
+    setUploadResult(null);
     setShowDetails(false);
 
+    let newBatchId = null;
     try {
-      const response = await uploadAPI.uploadExcel(file);
-      setUploadResult(normalizeResult(response) || { success: true });
+      const initData = await uploadAPI.initBatch('main');
+      newBatchId = initData.batch_id;
+      setBatchId(newBatchId);
+      setBatchStatus(initData.status);
+      setStartedAtMs(null);
+      setFinishedAtMs(null);
+      sessionStorage.setItem(PRIMARY_BATCH_STORAGE_KEY, String(newBatchId));
+
+      await uploadAPI.uploadExcel(file, newBatchId);
+
+      const finalStatus = await uploadAPI.getBatchStatus(newBatchId);
+      applyBatchStatus(finalStatus);
     } catch (err) {
-      setError(
-        err?.response?.data?.message ||
-        err?.response?.data?.error ||
-        err?.message ||
-        t.uploadError
-      );
-    } finally {
-      setUploading(false);
+      setError(err?.message || t.uploadError);
+      if (newBatchId) {
+        uploadAPI.getBatchStatus(newBatchId).then(applyBatchStatus).catch(() => {});
+      }
     }
   };
 
   const handleUploadAdditions = async () => {
     if (!additionsFile || uploadingAdditions) return;
 
-    setUploadingAdditions(true);
-    setAdditionsResult(null);
     setAdditionsError(null);
-    setAdditionsElapsedSeconds(0);
+    setAdditionsResult(null);
 
+    let newBatchId = null;
     try {
-      const response = await uploadAPI.uploadAdditionsExcel(additionsFile);
-      setAdditionsResult(normalizeResult(response) || { success: true });
+      const initData = await uploadAPI.initBatch('additions');
+      newBatchId = initData.batch_id;
+      setAdditionsBatchId(newBatchId);
+      setAdditionsBatchStatus(initData.status);
+      setAdditionsStartedAtMs(null);
+      setAdditionsFinishedAtMs(null);
+      sessionStorage.setItem(ADDITIONS_BATCH_STORAGE_KEY, String(newBatchId));
+
+      await uploadAPI.uploadAdditionsExcel(additionsFile, newBatchId);
+
+      const finalStatus = await uploadAPI.getBatchStatus(newBatchId);
+      applyAdditionsBatchStatus(finalStatus);
     } catch (err) {
-      setAdditionsError(
-        err?.response?.data?.message ||
-        err?.response?.data?.error ||
-        err?.message ||
-        t.uploadError
-      );
-    } finally {
-      setUploadingAdditions(false);
+      setAdditionsError(err?.message || t.uploadError);
+      if (newBatchId) {
+        uploadAPI.getBatchStatus(newBatchId).then(applyAdditionsBatchStatus).catch(() => {});
+      }
     }
   };
 
-  const getStatus = ({ isUploading, result, currentError, selectedFile }) => {
+  const handleStop = async () => {
+    if (!batchId || actionBusy) return;
+    setActionBusy(true);
+    try {
+      applyBatchStatus(await uploadAPI.stopBatch(batchId));
+    } catch (err) {
+      setError(err?.message || t.stopError);
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleStopAndDelete = async () => {
+    if (!batchId || actionBusy) return;
+    if (!window.confirm(t.confirmStopAndDelete)) return;
+    setActionBusy(true);
+    try {
+      applyBatchStatus(await uploadAPI.stopAndDeleteBatch(batchId));
+    } catch (err) {
+      setError(err?.message || t.stopError);
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleDeleteCreated = async () => {
+    if (!batchId || actionBusy) return;
+    if (!window.confirm(t.confirmDelete)) return;
+    setActionBusy(true);
+    try {
+      applyBatchStatus(await uploadAPI.deleteBatch(batchId));
+    } catch (err) {
+      setError(err?.message || t.deleteError);
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleStopAdditions = async () => {
+    if (!additionsBatchId || additionsActionBusy) return;
+    setAdditionsActionBusy(true);
+    try {
+      applyAdditionsBatchStatus(await uploadAPI.stopBatch(additionsBatchId));
+    } catch (err) {
+      setAdditionsError(err?.message || t.stopError);
+    } finally {
+      setAdditionsActionBusy(false);
+    }
+  };
+
+  const handleStopAndDeleteAdditions = async () => {
+    if (!additionsBatchId || additionsActionBusy) return;
+    if (!window.confirm(t.confirmStopAndDelete)) return;
+    setAdditionsActionBusy(true);
+    try {
+      applyAdditionsBatchStatus(await uploadAPI.stopAndDeleteBatch(additionsBatchId));
+    } catch (err) {
+      setAdditionsError(err?.message || t.stopError);
+    } finally {
+      setAdditionsActionBusy(false);
+    }
+  };
+
+  const handleDeleteCreatedAdditions = async () => {
+    if (!additionsBatchId || additionsActionBusy) return;
+    if (!window.confirm(t.confirmDelete)) return;
+    setAdditionsActionBusy(true);
+    try {
+      applyAdditionsBatchStatus(await uploadAPI.deleteBatch(additionsBatchId));
+    } catch (err) {
+      setAdditionsError(err?.message || t.deleteError);
+    } finally {
+      setAdditionsActionBusy(false);
+    }
+  };
+
+  const getStatus = ({ isUploading, batchStatus: rawStatus, result, currentError, selectedFile }) => {
     if (isUploading) return { label: t.uploading, className: 'processing' };
+    if (rawStatus === 'stopped') return { label: t.stopped, className: 'error' };
     if (result?.success) return { label: t.completed, className: 'success' };
     if (currentError) return { label: t.failed, className: 'error' };
     if (selectedFile) return { label: t.ready, className: 'ready' };
@@ -291,6 +580,7 @@ function UploadPage({ language = 'he' }) {
 
   const primaryStatus = getStatus({
     isUploading: uploading,
+    batchStatus,
     result: uploadResult,
     currentError: error,
     selectedFile: file,
@@ -298,6 +588,7 @@ function UploadPage({ language = 'he' }) {
 
   const additionsStatus = getStatus({
     isUploading: uploadingAdditions,
+    batchStatus: additionsBatchStatus,
     result: additionsResult,
     currentError: additionsError,
     selectedFile: additionsFile,
@@ -634,7 +925,7 @@ function UploadPage({ language = 'he' }) {
             </button>
           )}
 
-          {(uploading || elapsedSeconds > 0) && (
+          {(uploading || displayElapsed > 0) && (
             <div className={`timer-row ${uploading ? 'active' : ''}`}>
               <Clock3 size={17} />
               <strong dir="ltr">{formattedElapsed}</strong>
@@ -642,6 +933,33 @@ function UploadPage({ language = 'he' }) {
                 <div className="activity-line">
                   <span />
                 </div>
+              )}
+            </div>
+          )}
+
+          {uploading && (
+            <div className="batch-controls">
+              {batchStatus === 'processing' && (
+                <button
+                  type="button"
+                  className="control-button stop-button"
+                  onClick={handleStop}
+                  disabled={actionBusy}
+                >
+                  <StopCircle size={16} />
+                  {t.stopButton}
+                </button>
+              )}
+              {(batchStatus === 'processing' || batchStatus === 'cancellation_requested') && (
+                <button
+                  type="button"
+                  className="control-button stop-delete-button"
+                  onClick={handleStopAndDelete}
+                  disabled={actionBusy}
+                >
+                  <XOctagon size={16} />
+                  {t.stopAndDeleteButton}
+                </button>
               )}
             </div>
           )}
@@ -654,11 +972,11 @@ function UploadPage({ language = 'he' }) {
           )}
 
           {uploadResult?.success && (
-            <div className="result-box success-result">
+            <div className={`result-box success-result ${uploadResult.stopped ? 'stopped-result' : ''}`}>
               <div className="result-title">
-                <Check size={20} />
+                {uploadResult.stopped ? <StopCircle size={20} /> : <Check size={20} />}
                 <div>
-                  <strong>{t.primarySuccess}</strong>
+                  <strong>{uploadResult.stopped ? t.stoppedMessage : t.primarySuccess}</strong>
                   {uploadResult.batch_id && (
                     <span>{t.batchId}: #{uploadResult.batch_id}</span>
                   )}
@@ -675,6 +993,35 @@ function UploadPage({ language = 'he' }) {
                   uploadResult.skipped > 0 ? 'warning' : ''
                 )}
               </div>
+
+              {uploadResult.deletion && (
+                <div className="deletion-outcome">
+                  <h3>{t.deletionOutcome}</h3>
+                  <div className="detail-row">
+                    <span>{t.deletedCount}</span>
+                    <strong>{uploadResult.deletion.deleted_count}</strong>
+                  </div>
+                  {uploadResult.deletion.protected_count > 0 && (
+                    <div className="detail-row">
+                      <span>{t.protectedCount}</span>
+                      <strong>{uploadResult.deletion.protected_count}</strong>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!uploadResult.deletion && (uploadResult.created > 0) && (
+                <button
+                  type="button"
+                  className="control-button delete-created-button"
+                  onClick={handleDeleteCreated}
+                  disabled={actionBusy}
+                >
+                  <Trash2 size={16} />
+                  {t.deleteCreatedButton}
+                </button>
+              )}
+              <p className="delete-note">{t.deleteNote}</p>
 
               {hasPrimaryDetails && (
                 <>
@@ -860,7 +1207,7 @@ function UploadPage({ language = 'he' }) {
             </button>
           )}
 
-          {(uploadingAdditions || additionsElapsedSeconds > 0) && (
+          {(uploadingAdditions || additionsDisplayElapsed > 0) && (
             <div className={`timer-row additions-timer ${uploadingAdditions ? 'active' : ''}`}>
               <Clock3 size={17} />
               <strong dir="ltr">{formattedAdditionsElapsed}</strong>
@@ -868,6 +1215,33 @@ function UploadPage({ language = 'he' }) {
                 <div className="activity-line">
                   <span />
                 </div>
+              )}
+            </div>
+          )}
+
+          {uploadingAdditions && (
+            <div className="batch-controls">
+              {additionsBatchStatus === 'processing' && (
+                <button
+                  type="button"
+                  className="control-button stop-button"
+                  onClick={handleStopAdditions}
+                  disabled={additionsActionBusy}
+                >
+                  <StopCircle size={16} />
+                  {t.stopButton}
+                </button>
+              )}
+              {(additionsBatchStatus === 'processing' || additionsBatchStatus === 'cancellation_requested') && (
+                <button
+                  type="button"
+                  className="control-button stop-delete-button"
+                  onClick={handleStopAndDeleteAdditions}
+                  disabled={additionsActionBusy}
+                >
+                  <XOctagon size={16} />
+                  {t.stopAndDeleteButton}
+                </button>
               )}
             </div>
           )}
@@ -880,11 +1254,11 @@ function UploadPage({ language = 'he' }) {
           )}
 
           {additionsResult?.success && (
-            <div className="result-box success-result">
+            <div className={`result-box success-result ${additionsResult.stopped ? 'stopped-result' : ''}`}>
               <div className="result-title">
-                <Check size={20} />
+                {additionsResult.stopped ? <StopCircle size={20} /> : <Check size={20} />}
                 <div>
-                  <strong>{t.additionsSuccess}</strong>
+                  <strong>{additionsResult.stopped ? t.stoppedMessage : t.additionsSuccess}</strong>
                   {additionsResult.batch_id && (
                     <span>{t.batchId}: #{additionsResult.batch_id}</span>
                   )}
@@ -905,6 +1279,35 @@ function UploadPage({ language = 'he' }) {
                   additionsResult.skipped > 0 ? 'warning' : ''
                 )}
               </div>
+
+              {additionsResult.deletion && (
+                <div className="deletion-outcome">
+                  <h3>{t.deletionOutcome}</h3>
+                  <div className="detail-row">
+                    <span>{t.deletedCount}</span>
+                    <strong>{additionsResult.deletion.deleted_count}</strong>
+                  </div>
+                  {additionsResult.deletion.protected_count > 0 && (
+                    <div className="detail-row">
+                      <span>{t.protectedCount}</span>
+                      <strong>{additionsResult.deletion.protected_count}</strong>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!additionsResult.deletion && (additionsResult.created > 0) && (
+                <button
+                  type="button"
+                  className="control-button delete-created-button"
+                  onClick={handleDeleteCreatedAdditions}
+                  disabled={additionsActionBusy}
+                >
+                  <Trash2 size={16} />
+                  {t.deleteCreatedButton}
+                </button>
+              )}
+              <p className="delete-note">{t.deleteNote}</p>
 
               {additionsResult.existing_category_preserved !== undefined && (
                 <div className="preserved-note">
@@ -1402,10 +1805,95 @@ const styles = `
     background: var(--danger-soft);
   }
 
+  .batch-controls {
+    margin-top: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .control-button {
+    min-height: 38px;
+    padding: 0 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    border: 1px solid transparent;
+    border-radius: 12px;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 850;
+    cursor: pointer;
+    transition: filter 0.18s ease;
+  }
+
+  .control-button:disabled {
+    opacity: 0.65;
+    cursor: wait;
+  }
+
+  .control-button:hover:not(:disabled) {
+    filter: brightness(0.97);
+  }
+
+  .stop-button {
+    color: var(--warning);
+    border-color: #fde68a;
+    background: var(--warning-soft);
+  }
+
+  .stop-delete-button,
+  .delete-created-button {
+    color: var(--danger);
+    border-color: #fecdd3;
+    background: var(--danger-soft);
+  }
+
+  .delete-created-button {
+    width: 100%;
+    justify-content: center;
+    margin-top: 12px;
+  }
+
+  .delete-note {
+    margin: 8px 0 0;
+    color: #64748b;
+    font-size: 10px;
+    line-height: 1.5;
+  }
+
+  .deletion-outcome {
+    margin-top: 12px;
+    padding: 11px;
+    border: 1px solid #fecdd3;
+    border-radius: 12px;
+    background: #fff7f8;
+  }
+
+  .deletion-outcome h3 {
+    margin: 0 0 8px;
+    color: var(--danger);
+    font-size: 11px;
+    font-weight: 900;
+  }
+
   .result-box {
     padding: 14px;
     border: 1px solid #bbf7d0;
     background: var(--success-soft);
+  }
+
+  .result-box.stopped-result {
+    border-color: #fde68a;
+    background: var(--warning-soft);
+  }
+
+  .stopped-result .result-title {
+    color: var(--warning);
+  }
+
+  .stopped-result .result-title strong {
+    color: #92400e;
   }
 
   .result-title {
