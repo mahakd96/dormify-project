@@ -19,6 +19,7 @@ from django.db import transaction, IntegrityError
 from django.http import HttpResponse
 from django.db.models import (
     Q, Count, Sum, Prefetch, OuterRef, Subquery, IntegerField, Case, When, Value, F, BooleanField, Exists,
+    ProtectedError,
 )
 from django.db.models.expressions import RawSQL
 from django.db.models.functions import Coalesce, Greatest
@@ -9823,6 +9824,230 @@ def refresh_db_connection():
     connection.ensure_connection()
 
 
+# ============================================================
+# Import batch lifecycle: init / status / stop / delete
+#
+# Two-step handshake: the frontend calls init_import_batch() first to get a
+# batch_id BEFORE sending the Excel file, since the actual upload endpoints
+# (upload_excel / upload_additions_excel) stay fully synchronous - the
+# batch_id has to exist ahead of time so Stop/Status can target it while
+# that request is still in flight, and so the frontend never has to guess
+# or fall back to "the latest batch."
+# ============================================================
+
+_IMPORT_BATCH_STOP_STATUSES = {
+    ImportBatch.Status.CANCELLATION_REQUESTED,
+    ImportBatch.Status.STOP_AND_DELETE_REQUESTED,
+}
+
+
+def _delete_students_created_by_batch(batch):
+    """
+    Deletes ONLY Student rows this batch created (created_in_batch) - never
+    students it merely updated, never dorm inventory. BedAssignment.student
+    is on_delete=PROTECT, so a created student who has since been allocated
+    a bed raises ProtectedError; caught per-student here so one protected
+    row never blocks the rest and is never silently reported as deleted.
+    """
+    deleted = []
+    protected = []
+
+    for student in Student.objects.filter(created_in_batch=batch):
+        student_pk = student.pk
+        student_label = student.student_id
+        try:
+            student.delete()
+            deleted.append(student_pk)
+        except ProtectedError:
+            protected.append({'id': student_pk, 'student_id': student_label})
+
+    return {
+        'requested': True,
+        'deleted_count': len(deleted),
+        'protected_count': len(protected),
+        'protected_students': protected,
+        'performed_at': timezone.now().isoformat(),
+    }
+
+
+def _get_owned_batch_or_error(request, batch_id, expected_kind=None):
+    """Shared lookup+ownership+kind check for the batch-lifecycle endpoints.
+
+    Returns (batch, None) on success, or (None, Response) on failure - the
+    caller just does `if error: return error`.
+    """
+    if not request.user.is_central_admin:
+        return None, Response({
+            'error': 'רק מנהל מרכזי יכול לבצע פעולה זו',
+            'errorEn': 'Only Central Admin can perform this action',
+        }, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        batch = ImportBatch.objects.get(pk=batch_id)
+    except ImportBatch.DoesNotExist:
+        return None, Response({
+            'error': 'קובץ יבוא לא נמצא',
+            'errorEn': 'Import batch not found',
+        }, status=status.HTTP_404_NOT_FOUND)
+
+    if batch.uploaded_by_id != request.user.id:
+        return None, Response({
+            'error': 'קובץ יבוא זה שייך למשתמש אחר',
+            'errorEn': 'This import batch belongs to a different user',
+        }, status=status.HTTP_403_FORBIDDEN)
+
+    if expected_kind is not None and batch.kind != expected_kind:
+        return None, Response({
+            'error': 'סוג קובץ היבוא אינו תואם',
+            'errorEn': 'Import batch kind mismatch',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    return batch, None
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def init_import_batch(request):
+    """Step 1 of the upload handshake: create a PENDING batch and hand its
+    id to the frontend BEFORE any file is sent, so Stop/Status can target
+    an explicit batch_id from the very start of the upload flow."""
+    if not request.user.is_central_admin:
+        return Response({
+            'error': 'רק מנהל מרכזי יכול להעלות קבצים',
+            'errorEn': 'Only Central Admin can upload files'
+        }, status=status.HTTP_403_FORBIDDEN)
+
+    kind = request.data.get('kind') or ImportBatch.Kind.MAIN
+    if kind not in ImportBatch.Kind.values:
+        return Response({
+            'error': 'סוג קובץ לא תקין',
+            'errorEn': 'Invalid upload kind',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    batch = ImportBatch.objects.create(
+        uploaded_by=request.user,
+        kind=kind,
+        status=ImportBatch.Status.PENDING,
+    )
+
+    return Response({
+        'batch_id': batch.id,
+        'status': batch.status,
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_import_batch_status(request, batch_id):
+    batch, error = _get_owned_batch_or_error(request, batch_id)
+    if error:
+        return error
+
+    return Response(ImportBatchSerializer(batch).data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def stop_import_batch(request, batch_id):
+    with transaction.atomic():
+        batch, error = _get_owned_batch_or_error(request, batch_id)
+        if error:
+            return error
+
+        batch = ImportBatch.objects.select_for_update().get(pk=batch.id)
+
+        if batch.status != ImportBatch.Status.PROCESSING:
+            return Response({
+                'error': 'ניתן לעצור רק קובץ שנמצא כרגע בעיבוד',
+                'errorEn': 'Only a batch currently processing can be stopped',
+                'status': batch.status,
+            }, status=status.HTTP_409_CONFLICT)
+
+        batch.status = ImportBatch.Status.CANCELLATION_REQUESTED
+        batch.save(update_fields=['status'])
+
+    return Response(ImportBatchSerializer(batch).data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def stop_and_delete_import_batch(request, batch_id):
+    with transaction.atomic():
+        batch, error = _get_owned_batch_or_error(request, batch_id)
+        if error:
+            return error
+
+        batch = ImportBatch.objects.select_for_update().get(pk=batch.id)
+
+        if batch.status == ImportBatch.Status.PENDING:
+            # Nothing was ever created for this batch - resolve immediately,
+            # no running loop will ever notice a requested-state flag here.
+            batch.status = ImportBatch.Status.STOPPED
+            batch.finished_at = timezone.now()
+            batch.result = {
+                'success': True,
+                'stopped': True,
+                'deletion': {
+                    'requested': True,
+                    'deleted_count': 0,
+                    'protected_count': 0,
+                    'protected_students': [],
+                    'performed_at': timezone.now().isoformat(),
+                },
+            }
+            batch.save(update_fields=['status', 'finished_at', 'result'])
+            return Response(ImportBatchSerializer(batch).data, status=status.HTTP_200_OK)
+
+        if batch.status not in (
+            ImportBatch.Status.PROCESSING,
+            ImportBatch.Status.CANCELLATION_REQUESTED,
+        ):
+            return Response({
+                'error': 'לא ניתן לעצור ולמחוק קובץ שכבר הסתיים. השתמשו בפעולת המחיקה הרגילה.',
+                'errorEn': 'Cannot stop-and-delete a batch that already finished. Use the plain delete action.',
+                'status': batch.status,
+            }, status=status.HTTP_409_CONFLICT)
+
+        # PROCESSING or CANCELLATION_REQUESTED: the still-running upload
+        # request will notice this on its next per-row check and perform
+        # the deletion itself, inline, before it returns - see the
+        # `finally:` block in upload_excel/upload_additions_excel.
+        batch.status = ImportBatch.Status.STOP_AND_DELETE_REQUESTED
+        batch.save(update_fields=['status'])
+
+    return Response(ImportBatchSerializer(batch).data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def delete_import_batch(request, batch_id):
+    with transaction.atomic():
+        batch, error = _get_owned_batch_or_error(request, batch_id)
+        if error:
+            return error
+
+        batch = ImportBatch.objects.select_for_update().get(pk=batch.id)
+
+        if batch.status not in (
+            ImportBatch.Status.COMPLETED,
+            ImportBatch.Status.STOPPED,
+            ImportBatch.Status.FAILED,
+        ):
+            return Response({
+                'error': 'ניתן למחוק סטודנטים רק לאחר שההעלאה הסתיימה או נעצרה',
+                'errorEn': 'Students can only be deleted once the upload has finished or stopped',
+                'status': batch.status,
+            }, status=status.HTTP_409_CONFLICT)
+
+        deletion = _delete_students_created_by_batch(batch)
+        result = dict(batch.result or {})
+        result['deletion'] = deletion
+        batch.result = result
+        batch.save(update_fields=['result'])
+
+    return Response(ImportBatchSerializer(batch).data, status=status.HTTP_200_OK)
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def upload_excel(request):
@@ -9866,11 +10091,36 @@ def upload_excel(request):
 
     validate_gender_model_for_housing_import()
 
-    batch = ImportBatch.objects.create(
-        uploaded_by=request.user,
-        filename=uploaded_file.name,
-        status=ImportBatch.Status.PROCESSING
-    )
+    batch_id = request.data.get('batch_id')
+    if not batch_id:
+        return Response({
+            'error': 'נדרש batch_id. יש לאתחל את ההעלאה תחילה.',
+            'errorEn': 'batch_id is required. Initialize the upload first.',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    with transaction.atomic():
+        batch, error = _get_owned_batch_or_error(request, batch_id, expected_kind=ImportBatch.Kind.MAIN)
+        if error:
+            return error
+
+        batch = ImportBatch.objects.select_for_update().get(pk=batch.id)
+
+        if batch.status != ImportBatch.Status.PENDING:
+            return Response({
+                'error': 'קובץ יבוא זה כבר עובד או הסתיים',
+                'errorEn': 'This import batch has already been processed',
+                'status': batch.status,
+            }, status=status.HTTP_409_CONFLICT)
+
+        batch.filename = uploaded_file.name
+        batch.status = ImportBatch.Status.PROCESSING
+        batch.started_at = timezone.now()
+        batch.save(update_fields=['filename', 'status', 'started_at'])
+
+    stop_requested = False
+    requested_stop_status = None
+    processed_rows = 0
+    total_rows = 0
 
     try:
         excel_file = pd.ExcelFile(uploaded_file)
@@ -9978,6 +10228,9 @@ def upload_excel(request):
         for sheet_name in excel_file.sheet_names:
             df = pd.read_excel(excel_file, sheet_name=sheet_name)
             df.columns = [safe_str(col) for col in df.columns]
+
+            total_rows += len(df)
+            ImportBatch.objects.filter(pk=batch.id).update(total_rows=total_rows)
 
             sheet_counts[sheet_name] = {
                 'rows': len(df),
@@ -10104,6 +10357,7 @@ def upload_excel(request):
                     else:
                         Student.objects.create(
                             batch=batch,
+                            created_in_batch=batch,
                             **student_payload
                         )
 
@@ -10134,6 +10388,27 @@ def upload_excel(request):
                         f"{e.__class__.__name__}: {str(e)}"
                     )
                     continue
+                finally:
+                    # Always runs - through the early `continue`s above, the
+                    # except branch's `continue`, and normal completion -
+                    # so this is the single choke point where a row's
+                    # outcome is guaranteed decided. A `break` placed here
+                    # overrides any pending `continue` from the try/except
+                    # above (standard Python finally semantics) and exits
+                    # the row loop cleanly.
+                    processed_rows += 1
+                    ImportBatch.objects.filter(pk=batch.id).update(processed_rows=processed_rows)
+
+                    live_status = ImportBatch.objects.filter(pk=batch.id).values_list(
+                        'status', flat=True
+                    ).first()
+                    if live_status in _IMPORT_BATCH_STOP_STATUSES:
+                        stop_requested = True
+                        requested_stop_status = live_status
+                        break
+
+            if stop_requested:
+                break
 
         refresh_db_connection()
 
@@ -10191,17 +10466,17 @@ def upload_excel(request):
             flush=True,
         )
 
-        refresh_db_connection()
-        ImportBatch.objects.filter(pk=batch.id).update(
-            total_students=total_imported,
-            status=ImportBatch.Status.COMPLETED,
-            error_message=''
-        )
-
-        return Response({
+        result_payload = {
             'success': True,
-            'message': 'דוח השיבוץ הועלה ועובד בהצלחה',
-            'messageEn': 'Status report uploaded and processed successfully',
+            'stopped': stop_requested,
+            'message': (
+                'עיבוד הקובץ נעצר לבקשת המשתמש' if stop_requested
+                else 'דוח השיבוץ הועלה ועובד בהצלחה'
+            ),
+            'messageEn': (
+                'File processing was stopped by request' if stop_requested
+                else 'Status report uploaded and processed successfully'
+            ),
             'batch_id': batch.id,
             'total_students': total_imported,
             'created': created_count,
@@ -10213,7 +10488,31 @@ def upload_excel(request):
             'skipped_by_reason': skipped_by_reason,
             'warnings': warnings[:100],
             'errors': errors[:100],
-        }, status=status.HTTP_200_OK)
+        }
+
+        refresh_db_connection()
+
+        if stop_requested:
+            if requested_stop_status == ImportBatch.Status.STOP_AND_DELETE_REQUESTED:
+                result_payload['deletion'] = _delete_students_created_by_batch(batch)
+
+            ImportBatch.objects.filter(pk=batch.id).update(
+                total_students=total_imported,
+                status=ImportBatch.Status.STOPPED,
+                finished_at=timezone.now(),
+                error_message='',
+                result=result_payload,
+            )
+        else:
+            ImportBatch.objects.filter(pk=batch.id).update(
+                total_students=total_imported,
+                status=ImportBatch.Status.COMPLETED,
+                finished_at=timezone.now(),
+                error_message='',
+                result=result_payload,
+            )
+
+        return Response(result_payload, status=status.HTTP_200_OK)
 
     except Exception as e:
         traceback.print_exc()
@@ -10222,7 +10521,8 @@ def upload_excel(request):
             refresh_db_connection()
             ImportBatch.objects.filter(pk=batch.id).update(
                 status=ImportBatch.Status.FAILED,
-                error_message=str(e)[:2000]
+                error_message=str(e)[:2000],
+                finished_at=timezone.now(),
             )
         except Exception:
             traceback.print_exc()
@@ -10312,11 +10612,36 @@ def upload_additions_excel(request):
 
     validate_gender_model_for_housing_import()
 
-    batch = ImportBatch.objects.create(
-        uploaded_by=request.user,
-        filename=uploaded_file.name,
-        status=ImportBatch.Status.PROCESSING
-    )
+    batch_id = request.data.get('batch_id')
+    if not batch_id:
+        return Response({
+            'error': 'נדרש batch_id. יש לאתחל את ההעלאה תחילה.',
+            'errorEn': 'batch_id is required. Initialize the upload first.',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    with transaction.atomic():
+        batch, error = _get_owned_batch_or_error(request, batch_id, expected_kind=ImportBatch.Kind.ADDITIONS)
+        if error:
+            return error
+
+        batch = ImportBatch.objects.select_for_update().get(pk=batch.id)
+
+        if batch.status != ImportBatch.Status.PENDING:
+            return Response({
+                'error': 'קובץ יבוא זה כבר עובד או הסתיים',
+                'errorEn': 'This import batch has already been processed',
+                'status': batch.status,
+            }, status=status.HTTP_409_CONFLICT)
+
+        batch.filename = uploaded_file.name
+        batch.status = ImportBatch.Status.PROCESSING
+        batch.started_at = timezone.now()
+        batch.save(update_fields=['filename', 'status', 'started_at'])
+
+    stop_requested = False
+    requested_stop_status = None
+    processed_rows = 0
+    total_rows = 0
 
     try:
         excel_file = pd.ExcelFile(uploaded_file)
@@ -10415,6 +10740,9 @@ def upload_additions_excel(request):
         for sheet_name in excel_file.sheet_names:
             df = pd.read_excel(excel_file, sheet_name=sheet_name)
             df.columns = [safe_str(col) for col in df.columns]
+
+            total_rows += len(df)
+            ImportBatch.objects.filter(pk=batch.id).update(total_rows=total_rows)
 
             sheet_counts[sheet_name] = {
                 'rows': len(df),
@@ -10608,6 +10936,7 @@ def upload_additions_excel(request):
                     else:
                         Student.objects.create(
                             batch=batch,
+                            created_in_batch=batch,
                             **student_payload
                         )
 
@@ -10630,6 +10959,22 @@ def upload_additions_excel(request):
                         f"{e.__class__.__name__}: {str(e)}"
                     )
                     continue
+                finally:
+                    # See upload_excel's identical block for why `finally`
+                    # is the single correct choke point here.
+                    processed_rows += 1
+                    ImportBatch.objects.filter(pk=batch.id).update(processed_rows=processed_rows)
+
+                    live_status = ImportBatch.objects.filter(pk=batch.id).values_list(
+                        'status', flat=True
+                    ).first()
+                    if live_status in _IMPORT_BATCH_STOP_STATUSES:
+                        stop_requested = True
+                        requested_stop_status = live_status
+                        break
+
+            if stop_requested:
+                break
 
         refresh_db_connection()
 
@@ -10668,17 +11013,17 @@ def upload_additions_excel(request):
 
         total_imported = created_count + updated_count
 
-        refresh_db_connection()
-        ImportBatch.objects.filter(pk=batch.id).update(
-            total_students=total_imported,
-            status=ImportBatch.Status.COMPLETED,
-            error_message=''
-        )
-
-        return Response({
+        result_payload = {
             'success': True,
-            'message': 'קובץ המתווספים הועלה ועובד בהצלחה',
-            'messageEn': 'Additions file uploaded and processed successfully',
+            'stopped': stop_requested,
+            'message': (
+                'עיבוד הקובץ נעצר לבקשת המשתמש' if stop_requested
+                else 'קובץ המתווספים הועלה ועובד בהצלחה'
+            ),
+            'messageEn': (
+                'File processing was stopped by request' if stop_requested
+                else 'Additions file uploaded and processed successfully'
+            ),
             'batch_id': batch.id,
             'total_students': total_imported,
             'created': created_count,
@@ -10691,7 +11036,31 @@ def upload_additions_excel(request):
             'skipped_by_reason': skipped_by_reason,
             'warnings': warnings[:100],
             'errors': errors[:100],
-        }, status=status.HTTP_200_OK)
+        }
+
+        refresh_db_connection()
+
+        if stop_requested:
+            if requested_stop_status == ImportBatch.Status.STOP_AND_DELETE_REQUESTED:
+                result_payload['deletion'] = _delete_students_created_by_batch(batch)
+
+            ImportBatch.objects.filter(pk=batch.id).update(
+                total_students=total_imported,
+                status=ImportBatch.Status.STOPPED,
+                finished_at=timezone.now(),
+                error_message='',
+                result=result_payload,
+            )
+        else:
+            ImportBatch.objects.filter(pk=batch.id).update(
+                total_students=total_imported,
+                status=ImportBatch.Status.COMPLETED,
+                finished_at=timezone.now(),
+                error_message='',
+                result=result_payload,
+            )
+
+        return Response(result_payload, status=status.HTTP_200_OK)
 
     except Exception as e:
         traceback.print_exc()
@@ -10700,7 +11069,8 @@ def upload_additions_excel(request):
             refresh_db_connection()
             ImportBatch.objects.filter(pk=batch.id).update(
                 status=ImportBatch.Status.FAILED,
-                error_message=str(e)[:2000]
+                error_message=str(e)[:2000],
+                finished_at=timezone.now(),
             )
         except Exception:
             traceback.print_exc()
