@@ -35,6 +35,17 @@ urlpatterns = [
     path('upload/additions-excel/', views.upload_additions_excel, name='upload-additions-excel'),
     path('batches/', views.list_batches, name='list-batches'),
 
+    # Upload batch lifecycle (init handshake + status/stop/delete controls)
+    path('upload/batches/init/', views.init_import_batch, name='init-import-batch'),
+    path('upload/batches/<int:batch_id>/status/', views.get_import_batch_status, name='import-batch-status'),
+    path('upload/batches/<int:batch_id>/stop/', views.stop_import_batch, name='import-batch-stop'),
+    path(
+        'upload/batches/<int:batch_id>/stop-and-delete/',
+        views.stop_and_delete_import_batch,
+        name='import-batch-stop-and-delete',
+    ),
+    path('upload/batches/<int:batch_id>/delete/', views.delete_import_batch, name='import-batch-delete'),
+
     # Region Inbox
     path('inbox/', views.region_inbox, name='region-inbox'),
     path('inbox/latest/', views.region_inbox_latest, name='region-inbox-latest'),

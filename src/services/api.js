@@ -477,10 +477,60 @@ export const inboxAPI = {
 };
 
 export const uploadAPI = {
-  uploadExcel: async (file) => {
+  // Step 1 of the two-step handshake: create the ImportBatch (kind: 'main'
+  // or 'additions') and get its id BEFORE any file is sent, so Stop/Status
+  // can target an explicit batch_id from the very start of the upload.
+  initBatch: async (kind) => {
+    try {
+      const { data } = await api.post("/api/upload/batches/init/", { kind });
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to initialize upload"));
+    }
+  },
+
+  getBatchStatus: async (batchId) => {
+    try {
+      const { data } = await api.get(`/api/upload/batches/${batchId}/status/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to fetch upload status"));
+    }
+  },
+
+  stopBatch: async (batchId) => {
+    try {
+      const { data } = await api.post(`/api/upload/batches/${batchId}/stop/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to stop upload"));
+    }
+  },
+
+  stopAndDeleteBatch: async (batchId) => {
+    try {
+      const { data } = await api.post(`/api/upload/batches/${batchId}/stop-and-delete/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to stop and delete upload"));
+    }
+  },
+
+  deleteBatch: async (batchId) => {
+    try {
+      const { data } = await api.post(`/api/upload/batches/${batchId}/delete/`);
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to delete uploaded students"));
+    }
+  },
+
+  // Step 2 of the handshake: batchId must come from initBatch() above.
+  uploadExcel: async (file, batchId) => {
     try {
       const form = new FormData();
       form.append("file", file);
+      form.append("batch_id", batchId);
 
       const { data } = await api.post("/api/upload/excel/", form, {
         headers: {
@@ -494,10 +544,11 @@ export const uploadAPI = {
     }
   },
 
-  uploadAdditionsExcel: async (file) => {
+  uploadAdditionsExcel: async (file, batchId) => {
     try {
       const form = new FormData();
       form.append("file", file);
+      form.append("batch_id", batchId);
 
       const { data } = await api.post("/api/upload/additions-excel/", form, {
         headers: {
