@@ -561,10 +561,10 @@ function AllocationPage({ language = 'he' }) {
         stopAndSave: 'עצור ושמור תוצאה',
         stoppingSave: 'עוצר ושומר...',
         stopAndSaveConfirmTitle: 'עצירה ושמירת תוצאה',
-        stopAndSaveConfirmMsg: 'האם לעצור את חיפוש הפתרון ולשמור את הפתרון הטוב ביותר שנמצא עד כה? ייתכן שהפתרון לא יהיה האופטימלי ביותר האפשרי.',
+        stopAndSaveConfirmMsg: 'האם לעצור את חיפוש הפתרון ולשמור את הפתרון הטוב ביותר שנמצא עד כה? ייתכן שהפתרון עדיין לא אופטימלי.',
         stopAndSaveSuccess: 'בקשת עצירה עם שמירה נשלחה. הפתרון הטוב ביותר שנמצא יישמר.',
         stopAndSaveError: 'שגיאה בעצירה ושמירת התוצאה',
-        stoppedEarlyBadge: 'נעצר ידנית — לא הוכח כאופטימלי',
+        stoppedEarlyBadge: 'נעצר ידנית - לא הוכח כאופטימלי',
         statusStopSaveRequested: 'עוצר ושומר',
         // Results
         resultsTitle:      'תוצאות השיבוץ',
@@ -941,13 +941,7 @@ function AllocationPage({ language = 'he' }) {
     stopPreviewPolling();
   }, [stopPreviewPolling]);
 
-  // Fetches the current-best-solution snapshot without ever stopping the
-  // solver or touching BedAssignment/Student - a pure read (see backend
-  // get_allocation_run_preview). `force` accepts whatever the server has
-  // right now even if it's newer than what's displayed (used by the
-  // "רענן תוצאה" button); otherwise a newer snapshot than what's already
-  // shown just flips previewHasNewer instead of silently swapping the
-  // table out from under the user.
+
   const fetchPreview = useCallback(async ({ silent = false, force = false } = {}) => {
     if (!runId) return;
     if (!silent) setPreviewLoading(true);
@@ -1055,18 +1049,9 @@ function AllocationPage({ language = 'he' }) {
     [constraints]
   );
 
-  // Building 179 / ANIR preferential placement only applies within the
-  // Upper dorm region (גוש עליון, region id "gush-elyon" — the region that
-  // owns DormType code=15 / כפר הסמכה, see allocation.solver
-  // _may_use_building_179_automatically). Every other region shows the
-  // generic priority-placement message instead.
+
   const isUpperDorm = summary?.region?.id === 'gush-elyon';
 
-  // The progress bar represents ONLY elapsed-vs-configured-max search
-  // time — never algorithm/optimality completion. CP-SAT gives no live
-  // signal for "how close to done" beyond elapsed time itself (see the
-  // optimality-proof investigation), so this bar must not be read as
-  // "X% solved."
   const progressPct = searchTiming?.maxSearchSeconds
     ? Math.min(100, Math.round((displayElapsed / searchTiming.maxSearchSeconds) * 100))
     : 0;
@@ -1149,8 +1134,7 @@ function AllocationPage({ language = 'he' }) {
     Boolean(runId) &&
     canRun;
 
-  // Viewing the current result stays available even while a stop is in
-  // flight (it's a harmless read of the last known snapshot).
+
   const showPreviewBtn =
     isRunning &&
     Boolean(runId);
@@ -1163,13 +1147,7 @@ function AllocationPage({ language = 'he' }) {
     Boolean(runId) &&
     canRun;
 
-  // ── Search Timing Display (ticks locally, anchored to the backend) ──
-  // Extrapolates from `searchTiming` (last server-confirmed snapshot) using
-  // the client clock only for smooth per-second display between the 3s
-  // polling ticks — never as the source of truth. Every poll response
-  // re-anchors `searchTiming` (see applySearchTiming), so this self-heals
-  // after navigating away/back, a refresh, tab throttling, etc. instead of
-  // drifting or restarting from zero.
+
   useEffect(() => {
     if (!searchTiming) {
       setDisplayElapsed(0);
@@ -1182,7 +1160,6 @@ function AllocationPage({ language = 'he' }) {
         const nextElapsed = searchTiming.elapsedAtSync + (Date.now() - searchTiming.syncedAtClientMs) / 1000;
         setDisplayElapsed(nextElapsed);
       } else {
-        // Terminal / not-yet-searching snapshot: frozen, no ticking.
         setDisplayElapsed(searchTiming.elapsedAtSync);
       }
     };
@@ -1232,11 +1209,7 @@ function AllocationPage({ language = 'he' }) {
     return normalizedSummary;
   }, [central, getErrorMessage, safeInbox, safeSummary]);
 
-  // Seeds/refreshes the backend-anchored search-timing snapshot from a
-  // serialized AllocationRun (see AllocationRunSerializer.elapsed_search_seconds
-  // / remaining_search_seconds). Called on every poll tick and whenever a
-  // run is (re)discovered, so the anchor self-corrects continuously
-  // instead of ever depending on when this component happened to mount.
+
   const applySearchTiming = useCallback((runData) => {
     if (!runData) {
       setSearchTiming(null);
@@ -1283,10 +1256,6 @@ function AllocationPage({ language = 'he' }) {
             solver_status:          data.solver_status ?? null,
             optimality_proven:      Boolean(data.optimality_proven),
             stopped_early_by_user:  Boolean(data.stopped_early_by_user),
-            // Frozen final search duration (backend-computed, see
-            // AllocationRunSerializer.elapsed_search_seconds) — shown as
-            // "זמן ריצה" after completion, distinct from the live-preview's
-            // own wall_time (PreviewPanel keeps its own separate label).
             final_search_seconds:   runData?.elapsed_search_seconds ?? null,
             run:                    runData,
           });

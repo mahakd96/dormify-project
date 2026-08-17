@@ -1111,9 +1111,15 @@ class StudentRequest(models.Model):
         OTHER          = 'other',          _('בקשה אחרת')
 
     class Status(models.TextChoices):
-        PENDING  = 'pending',  _('ממתין')
-        APPROVED = 'approved', _('אושר')
-        REJECTED = 'rejected', _('נדחה')
+        PENDING   = 'pending',   _('ממתין')
+        APPROVED  = 'approved',  _('אושר')
+        REJECTED  = 'rejected',  _('נדחה')
+        # Distinct from REJECTED: the requesting side withdrew its own
+        # pending request (e.g. the source region's "ביטול בקשת העברה"
+        # action), never a reviewer's decision. Keeping these separate
+        # preserves the audit meaning of REJECTED - "a reviewer considered
+        # and declined this" - which CANCELLED must not silently overload.
+        CANCELLED = 'cancelled', _('בוטל')
 
     class Priority(models.TextChoices):
         LOW    = 'low',    _('Low')
