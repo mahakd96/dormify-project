@@ -3095,6 +3095,18 @@ def _user_can_review_request(user, req):
     if not user.is_boss or not user.region_id:
         return False
 
+    # region_transfer is reviewed/approved by the DESTINATION region, not
+    # wherever the student currently lives: the destination region owns the
+    # incoming-placement decision (it has the inventory, checks
+    # availability, and either accepts or declines the student). This is
+    # the opposite of every other request type below, where "the region"
+    # is the student's own/target room's region - deliberately checked
+    # FIRST and separately so a region_transfer never falls through to the
+    # generic accepted_dorm_type branch (which would incorrectly grant the
+    # SOURCE region review authority over its own outgoing request).
+    if req.request_type == StudentRequest.RequestType.REGION_TRANSFER:
+        return bool(req.target_region_id) and req.target_region_id == user.region_id
+
     if req.student_id and req.student.accepted_dorm_type_id:
         return req.student.accepted_dorm_type.region_id == user.region_id
 
@@ -3105,6 +3117,29 @@ def _user_can_review_request(user, req):
     # New add_student requests with no student/target room assigned yet:
     # any boss may review, region is enforced once a target room is chosen.
     return True
+
+
+def _user_can_cancel_request(user, req):
+    """
+    Non-requester fallback authority for StudentRequestViewSet.cancel().
+
+    Withdrawal is a SOURCE-side decision (the requesting side changing its
+    mind before anyone reviews it) - deliberately NOT the same population
+    as _user_can_review_request(), which for region_transfer now means the
+    DESTINATION region (they own approve/reject, see above). A source-
+    region boss must still be able to withdraw a transfer their own region
+    asked for, even though they can no longer approve/reject it themselves.
+    For every other request type this is identical to review authority -
+    there is no separate source/destination split to preserve.
+    """
+    if user.is_central_admin:
+        return True
+    if not user.is_boss or not user.region_id:
+        return False
+    if req.request_type == StudentRequest.RequestType.REGION_TRANSFER:
+        source_id = req.source_region_id or _student_current_region_id(req.student)
+        return bool(source_id) and source_id == user.region_id
+    return _user_can_review_request(user, req)
 
 
 def _student_current_region_id(student):
@@ -3249,7 +3284,15 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
                 queryset = queryset.filter(
                     Q(requested_by__region_id=user.region_id) |
                     Q(student__accepted_dorm_type__region_id=user.region_id) |
-                    Q(target_room__apartment__building__dorm_type__region_id=user.region_id)
+                    Q(target_room__apartment__building__dorm_type__region_id=user.region_id) |
+                    # A region_transfer's DESTINATION region must be able to
+                    # see (list/retrieve) the incoming request - it owns
+                    # approve/reject (see _user_can_review_request()). The
+                    # source-side Q()s above already keep it visible to the
+                    # requester's/student's own region too - both sides see
+                    # it, only the destination side (or central admin) can
+                    # act on it.
+                    Q(target_region_id=user.region_id)
                 )
         else:
             # Central admins may explicitly narrow to one region (Requests
@@ -3321,6 +3364,26 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
             if changed:
                 instance.save(update_fields=changed)
 
+        # region_transfer requests get the same source_region/
+        # current_assignment_snapshot persistence as ROOM/APARTMENT above -
+        # a permanent audit record of where the request started, even after
+        # the student is later moved or the request is long resolved - but
+        # deliberately NOT transfer_scope, which belongs only to the ROOM/
+        # APARTMENT same-region/cross-region system and has no meaning for
+        # region_transfer (see StudentRequest.transfer_scope help_text).
+        if instance.request_type == StudentRequest.RequestType.REGION_TRANSFER and instance.student_id:
+            changed = []
+            if not instance.source_region_id:
+                source = _student_current_region_id(instance.student)
+                if source:
+                    instance.source_region_id = source
+                    changed.append('source_region')
+            if instance.current_assignment_snapshot is None:
+                instance.current_assignment_snapshot = _assignment_snapshot(instance.student)
+                changed.append('current_assignment_snapshot')
+            if changed:
+                instance.save(update_fields=changed)
+
     @staticmethod
     def _pagination_params(source):
         # limit/offset count BUILDINGS (the pagination unit of
@@ -3363,6 +3426,33 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
                 '(בעיית נתונים) - נדרשת פעולת אתחול מיטות ייעודית (manage.py materialize_beds).'
             )
         return fallback
+
+    @action(detail=False, methods=['get'], url_path='transfer-target-regions')
+    def transfer_target_regions(self, request):
+        """
+        Regions a region_transfer request may legally name as target_region.
+
+        Deliberately NOT RegionViewSet: that endpoint scopes a non-central
+        user to only their own region (RegionViewSet.get_queryset()), which
+        is correct for general operational access but wrong here -
+        StudentRequestSerializer.validate() places no role/region
+        restriction on who may create a region_transfer request or which
+        region they may name (only StudentRequestViewSet.approve() is
+        central-admin-gated for it). A regional employee legitimately
+        needs to see every OTHER region's name/id to request a transfer
+        there, without that grant giving them any access to that region's
+        buildings/rooms/students - this action returns only id+name (via
+        the same minimal RegionSerializer RegionViewSet already uses), the
+        same shape the frontend's normal regions list has always used.
+
+        Excluding the student's own current region is left to the caller
+        (the Assisted Allocation transfer dialog already does this using
+        the student's own region_id from the student-detail endpoint) -
+        this action has no student in scope to exclude one correctly, and
+        returning the full list keeps this endpoint reusable by any future
+        target_region UI without baking in one caller's exclusion rule.
+        """
+        return Response(RegionSerializer(Region.objects.all().order_by('name'), many=True).data)
 
     @action(detail=False, methods=['post'], url_path='match-options')
     def match_options(self, request):
@@ -3631,8 +3721,15 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
                     _execute_swap(req.student, req.swap_with_student, request.user)
 
                 elif req.request_type == StudentRequest.RequestType.REGION_TRANSFER:
-                    if not request.user.is_central_admin:
-                        raise PermissionError('רק מנהל מרכזי יכול לאשר העברה בין אזורים')
+                    # Approval authority for region_transfer is the
+                    # DESTINATION region (or central admin) - already
+                    # enforced by _user_can_review_request() above, plus
+                    # _user_can_edit_room() below on whatever target_room
+                    # the approver picks. No extra central-admin-only gate
+                    # here: that used to be the ONLY way in (destination-
+                    # region approval didn't exist yet); now it would just
+                    # incorrectly re-block the destination region's own
+                    # boss from approving their own incoming transfer.
                     if not req.student:
                         raise ValueError('לא נבחר סטודנט עבור בקשה זו')
                     room = target_room or req.target_room
@@ -3720,6 +3817,43 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
 
         return Response({
             'message': 'הבקשה נדחתה',
+            'request': StudentRequestSerializer(req).data,
+        })
+
+    @action(detail=True, methods=['put'])
+    def cancel(self, request, pk=None):
+        """
+        Withdraw the caller's own still-pending request - distinct from
+        reject(): REJECTED means a reviewer considered and declined the
+        request; CANCELLED means the requesting side changed its mind
+        before any reviewer acted. Used today by the Assisted Allocation
+        "בהעברה" panel's "ביטול בקשת העברה" action on a pending
+        region_transfer request, but left generic (any pending
+        StudentRequest) rather than request_type-gated, matching how
+        approve()/reject() are already generic actions on this viewset.
+        """
+        req = self.get_object()
+        if req.status != StudentRequest.Status.PENDING:
+            return Response({'error': 'ניתן לבטל רק בקשה הממתינה לאישור'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+        is_requester = req.requested_by_id == user.id
+        if not is_requester and not _user_can_cancel_request(user, req):
+            return Response({'error': 'אין הרשאה לבטל בקשה זו'}, status=status.HTTP_403_FORBIDDEN)
+
+        with transaction.atomic():
+            # Same lock-and-recheck pattern as approve()/reject() above.
+            locked_req = StudentRequest.objects.select_for_update().get(pk=req.pk)
+            if locked_req.status != StudentRequest.Status.PENDING:
+                return Response({'error': 'ניתן לבטל רק בקשה הממתינה לאישור'}, status=status.HTTP_400_BAD_REQUEST)
+
+            req.status = StudentRequest.Status.CANCELLED
+            req.reviewed_by = user
+            req.reviewed_at = timezone.now()
+            req.save()
+
+        return Response({
+            'message': 'בקשת ההעברה בוטלה',
             'request': StudentRequestSerializer(req).data,
         })
 
@@ -5943,6 +6077,25 @@ def _user_can_access_student_region(user, student):
     return dorm_type.region_id == user.region_id
 
 
+def _pending_region_transfer(student):
+    """
+    The student's pending region_transfer StudentRequest, if any, or None.
+
+    Single source of truth reused by the queue, the student-detail panel,
+    the recommendations endpoint, and the assign/override write endpoints -
+    a student with a pending region-transfer request must read as
+    consistently "not locally actionable" everywhere, never computed
+    independently in more than one place.
+    """
+    return StudentRequest.objects.filter(
+        student=student,
+        request_type=StudentRequest.RequestType.REGION_TRANSFER,
+        status=StudentRequest.Status.PENDING,
+    ).select_related(
+        'target_region', 'source_region', 'requested_by', 'reviewed_by',
+    ).order_by('-created_at').first()
+
+
 def _assisted_allocation_student_row(student, group='', is_transfer_requested=False):
     dorm_type = student.accepted_dorm_type
     region = dorm_type.region if dorm_type else None
@@ -6016,8 +6169,30 @@ def assisted_allocation_queue(request):
             return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
         region = user.region
 
-    accessibility_students = list(_accessibility_pending_queryset(region))
-    unassigned_students = list(_unassigned_students_queryset(region))
+    # Computed first (not after, as before) so it can be used to keep a
+    # pending-transfer student OUT of accessibility_students/
+    # unassigned_students below - a student must never simultaneously read
+    # as "locally actionable" and "pending transfer to another region".
+    transfer_requested_ids = set(
+        StudentRequest.objects.filter(
+            request_type=StudentRequest.RequestType.REGION_TRANSFER,
+            status=StudentRequest.Status.PENDING,
+        ).values_list('student_id', flat=True)
+    )
+
+    accessibility_students = [
+        s for s in _accessibility_pending_queryset(region) if s.id not in transfer_requested_ids
+    ]
+    unassigned_students = [
+        s for s in _unassigned_students_queryset(region) if s.id not in transfer_requested_ids
+    ]
+
+    transfer_pending_qs = Student.objects.filter(id__in=transfer_requested_ids).select_related(
+        'accepted_dorm_type', 'accepted_dorm_type__region',
+    )
+    if region:
+        transfer_pending_qs = transfer_pending_qs.filter(accepted_dorm_type__region=region)
+    transfer_pending_students = list(transfer_pending_qs.order_by('last_name', 'first_name', 'student_id'))
 
     resolved_audit_qs = AssistedAllocationAudit.objects.filter(
         action_type__in=[
@@ -6040,18 +6215,11 @@ def assisted_allocation_queue(request):
         seen_ids.add(audit.student_id)
         resolved_students.append(audit.student)
 
-    transfer_requested_ids = set(
-        StudentRequest.objects.filter(
-            request_type=StudentRequest.RequestType.REGION_TRANSFER,
-            status=StudentRequest.Status.PENDING,
-        ).values_list('student_id', flat=True)
-    )
-
     counts = {
         'accessibility_pending': len(accessibility_students),
         'unassigned': len(unassigned_students),
         'resolved': len(resolved_students),
-        'transfer_requested': len(transfer_requested_ids),
+        'transfer_requested': len(transfer_pending_students),
     }
     counts['needs_placement'] = counts['accessibility_pending'] + counts['unassigned']
 
@@ -6066,6 +6234,9 @@ def assisted_allocation_queue(request):
     elif tab == 'resolved':
         students = resolved_students
         group_of = {s.id: 'resolved' for s in students}
+    elif tab == 'transfer_pending':
+        students = transfer_pending_students
+        group_of = {s.id: 'transfer_pending' for s in students}
     else:
         students = accessibility_students + unassigned_students
         group_of = {s.id: 'accessibility' for s in accessibility_students}
@@ -6117,8 +6288,30 @@ def assisted_allocation_student_detail(request, pk):
     if not _user_can_access_student_region(request.user, student):
         return Response({'error': 'אין הרשאה לאזור זה'}, status=status.HTTP_403_FORBIDDEN)
 
-    group = 'accessibility' if student.accessibility_flag else 'unassigned'
-    row = _assisted_allocation_student_row(student, group=group)
+    pending_transfer = _pending_region_transfer(student)
+
+    # Priority: is_assigned wins over everything (a real placement is the
+    # most authoritative state) - a manually-resolved accessibility student
+    # must read as 'resolved' here (matching the queue's own "resolved"
+    # tab, which is audit-based and not gated on accessibility_flag - see
+    # resolved_audit_qs in assisted_allocation_queue), never fall back to
+    # showing them as still-pending just because the flag is set. Next, a
+    # pending region_transfer request takes the student out of the locally-
+    # actionable population entirely (see _pending_region_transfer) -
+    # otherwise they read as accessibility/unassigned as before. Previously
+    # this only ever checked accessibility_flag, so an already-assigned (or
+    # transfer-pending) student was mislabeled 'unassigned' here even
+    # though the real state was known - the detail panel (and the
+    # GroupBadge it feeds) never reflected it.
+    if student.is_assigned:
+        group = 'resolved'
+    elif pending_transfer is not None:
+        group = 'transfer_pending'
+    elif student.accessibility_flag:
+        group = 'accessibility'
+    else:
+        group = 'unassigned'
+    row = _assisted_allocation_student_row(student, group=group, is_transfer_requested=pending_transfer is not None)
 
     roommate_requests = []
     for i in range(1, 6):
@@ -6132,7 +6325,7 @@ def assisted_allocation_student_detail(request, pk):
         })
 
     reason = None
-    if not student.accessibility_flag and not student.is_assigned:
+    if not student.accessibility_flag and not student.is_assigned and pending_transfer is None:
         dorm_type = student.accepted_dorm_type
         if dorm_type is None:
             reason = {'reason_code': 'NO_ACCEPTED_DORM_TYPE', 'inventory_breakdown': []}
@@ -6188,6 +6381,19 @@ def assisted_allocation_student_detail(request, pk):
         'roommate_requests': roommate_requests,
         'reason': reason,
         'history': history,
+        # Lets the frontend show WHERE an already-resolved student now lives
+        # (building/apartment/room/bed) instead of just a generic "resolved"
+        # badge - reuses the same snapshot helper already used to record
+        # before/after state on StudentRequest and AssistedAllocationAudit,
+        # so this can never disagree with what those already persist.
+        'current_placement': _assignment_snapshot(student),
+        # The SAME StudentRequest row TransfersPage shows/approves/rejects -
+        # serialized with the normal StudentRequestSerializer (not a
+        # hand-rolled shape) so this can never drift from what that page
+        # displays. None when there is no pending region_transfer.
+        'pending_transfer_request': (
+            StudentRequestSerializer(pending_transfer).data if pending_transfer else None
+        ),
     })
 
 
@@ -6206,6 +6412,33 @@ def assisted_allocation_recommendations(request, pk):
 
     dorm_type = student.accepted_dorm_type
     region = dorm_type.region if dorm_type else None
+
+    # An already-assigned student has left this workbench's population -
+    # candidates must never be (re)computed for them here. Without this,
+    # re-selecting a just-assigned student (e.g. via the post-assign
+    # refresh) kept returning a full, freely-selectable candidate list as
+    # if the student were still unplaced, letting staff silently re-run
+    # manual placement and move them to a different bed with no warning
+    # that anything was already saved. assisted_allocation_assign()/
+    # _override() reject this case server-side too (defense in depth) -
+    # this is what stops the frontend from ever showing the option.
+    # Same principle extended to a pending region_transfer request: the
+    # student has left this workbench's LOCAL placement population (they
+    # are mid-transfer to another region) - local candidates must not be
+    # presented, and assisted_allocation_assign()/_override() reject a
+    # local placement attempt for them too (see _pending_region_transfer).
+    if student.is_assigned or _pending_region_transfer(student) is not None:
+        return Response({
+            'candidates': {
+                'buildings': [], 'total_valid_beds': 0, 'has_more': False,
+                'next_offset': None, 'feasible': False,
+            },
+            'config_opportunities': [],
+            'has_unsafe_config_candidates': False,
+            'accepted_dorm_type': {'id': dorm_type.id, 'name': dorm_type.name} if dorm_type else None,
+            'already_assigned': student.is_assigned,
+            'transfer_pending': not student.is_assigned,
+        })
 
     if dorm_type is None:
         return Response({
@@ -6308,6 +6541,35 @@ def assisted_allocation_assign(request, pk):
     if not _user_can_access_student_region(request.user, student):
         return Response({'error': 'אין הרשאה לאזור זה'}, status=status.HTTP_403_FORBIDDEN)
 
+    # Fast, unlocked pre-check for the common (non-racing) case - same
+    # convention as StudentRequestViewSet.approve()'s PENDING re-check: this
+    # rejects a second manual-placement call for a student the Assisted
+    # Allocation workbench has already placed (e.g. a stale screen, a
+    # double-click, or the post-assign refresh re-showing the same student)
+    # instead of silently ending their current assignment and moving them
+    # to a different bed with no warning. A genuine correction to an
+    # existing placement belongs to the transfer workflow, not this
+    # unassigned-student action. The unique_active_assignment_per_student DB
+    # constraint (see BedAssignment.Meta) remains the authoritative backstop
+    # against any true concurrent-request race.
+    if student.is_assigned:
+        return Response(
+            {'error': 'הסטודנט/ית כבר משובץ/ת — לא ניתן לבצע שיבוץ ידני נוסף. לשינוי שיבוץ קיים יש להשתמש בבקשת העברה.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Same principle, for a pending region_transfer: local manual placement
+    # must not proceed while the student is mid-transfer to another region
+    # (Tab A requests a transfer, Tab B manually assigns them locally, is
+    # exactly the conflicting-workflow case this blocks) - not just a UI
+    # affordance, since a stale tab or a direct API call must be rejected
+    # here too.
+    if _pending_region_transfer(student) is not None:
+        return Response(
+            {'error': 'לסטודנט/ית יש בקשת העברה לאזור אחר הממתינה לאישור — לא ניתן לבצע שיבוץ ידני מקומי. יש לבטל את בקשת ההעברה תחילה אם השיבוץ המקומי נדרש.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     bed_id = request.data.get('bed_id')
     if not bed_id:
         return Response({'error': 'יש לבחור מיטה'}, status=status.HTTP_400_BAD_REQUEST)
@@ -6359,6 +6621,18 @@ def assisted_allocation_override(request, pk):
 
     if not _user_can_access_student_region(request.user, student):
         return Response({'error': 'אין הרשאה לאזור זה'}, status=status.HTTP_403_FORBIDDEN)
+
+    # Same pre-checks as assisted_allocation_assign() above - see its comments.
+    if student.is_assigned:
+        return Response(
+            {'error': 'הסטודנט/ית כבר משובץ/ת — לא ניתן לבצע שיבוץ ידני נוסף. לשינוי שיבוץ קיים יש להשתמש בבקשת העברה.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if _pending_region_transfer(student) is not None:
+        return Response(
+            {'error': 'לסטודנט/ית יש בקשת העברה לאזור אחר הממתינה לאישור — לא ניתן לבצע שיבוץ ידני מקומי. יש לבטל את בקשת ההעברה תחילה אם השיבוץ המקומי נדרש.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     bed_id = request.data.get('bed_id')
     note = (request.data.get('note') or '').strip()
