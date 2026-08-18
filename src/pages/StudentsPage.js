@@ -11,6 +11,7 @@ import {
   DoorOpen, Tag, FileText, Calendar, LogIn, LogOut, RefreshCw,
   UserPlus, FileSearch, Filter, UserCheck, UserMinus, AlertTriangle,
 } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 
 // ============================================================
 // Helpers
@@ -52,8 +53,10 @@ const CATEGORY_META = {
 function StudentsPage({ language }) {
   const { user, isCentralAdmin } = useAuth();
   // ---------- STATE ----------
-  const [activeTab, setActiveTab] = useState('all');
-  const [searchQuery, setSearchQuery] = useState('');
+const [searchParams] = useSearchParams();
+const [activeTab, setActiveTab] = useState(
+  searchParams.get('tab') || 'all'
+);  const [searchQuery, setSearchQuery] = useState('');
   const [list, setList] = useState([]);
   // Backend now paginates (StandardResultsPagination, 25/page) - listTotal
   // is the real server-side count (for the header/results text), separate
@@ -61,8 +64,14 @@ function StudentsPage({ language }) {
   const [listTotal, setListTotal] = useState(0);
   const [listNextUrl, setListNextUrl] = useState(null);
   const [loadingMoreStudents, setLoadingMoreStudents] = useState(false);
-  const [counts, setCounts] = useState({ all: 0, new: 0, continuing: 0, transfer: 0, leaving: 0 });
-  const [loading, setLoading] = useState(false);
+const [counts, setCounts] = useState({
+  all: 0,
+  new: 0,
+  continuing: 0,
+  transfer: 0,
+  leaving: 0,
+  unassigned: 0,
+});  const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
@@ -183,6 +192,8 @@ function StudentsPage({ language }) {
       tabNewPrimary: 'New', tabNewSecondary: 'נכנסים חדשים',
       tabTransferringPrimary: 'Transferring', tabTransferringSecondary: 'מעברים',
       tabLeavingPrimary: 'Leaving', tabLeavingSecondary: 'עוזבים',
+      tabUnassignedPrimary: 'Unassigned',
+tabUnassignedSecondary: 'לא שובצו',
       catContinuing: 'ממשיך', catNew: 'חדש', catTransfer: 'מעבר', catLeaving: 'עוזב',
       movedInOn: 'נכנס בתאריך', movingInOn: 'יכנס בתאריך', leavingOn: 'יוצא בתאריך',
       housing: 'פרטי מגורים',
@@ -300,6 +311,8 @@ function StudentsPage({ language }) {
       tabNewPrimary: 'New', tabNewSecondary: '',
       tabTransferringPrimary: 'Transferring', tabTransferringSecondary: '',
       tabLeavingPrimary: 'Leaving', tabLeavingSecondary: '',
+      tabUnassignedPrimary: 'Unassigned',
+tabUnassignedSecondary: '',
       catContinuing: 'Staying', catNew: 'New', catTransfer: 'Transfer', catLeaving: 'Leaving',
       movedInOn: 'Moved in on', movingInOn: 'Moving in on', leavingOn: 'Leaving on',
       contact: 'Contact', housing: 'Housing',
@@ -407,12 +420,55 @@ function StudentsPage({ language }) {
   })[language] || {};
 
   const TAB_DEFS = [
-    { v: 'all',       color: 'gray',   primary: t.tabAllPrimary,           secondary: t.tabAllSecondary,           icon: Users,      countKey: 'all' },
-    { v: 'continuing',color: 'green',  primary: t.tabStayingPrimary,       secondary: t.tabStayingSecondary,       icon: UserCheck,  countKey: 'continuing' },
-    { v: 'new',       color: 'blue',   primary: t.tabNewPrimary,           secondary: t.tabNewSecondary,           icon: UserPlus,   countKey: 'new' },
-    { v: 'transfer',  color: 'purple', primary: t.tabTransferringPrimary,  secondary: t.tabTransferringSecondary,  icon: RefreshCw,  countKey: 'transfer' },
-    { v: 'leaving',   color: 'red',    primary: t.tabLeavingPrimary,       secondary: t.tabLeavingSecondary,       icon: LogOut,     countKey: 'leaving' },
-  ];
+  {
+    v: 'all',
+    color: 'gray',
+    primary: t.tabAllPrimary,
+    secondary: t.tabAllSecondary,
+    icon: Users,
+    countKey: 'all',
+  },
+  {
+    v: 'continuing',
+    color: 'green',
+    primary: t.tabStayingPrimary,
+    secondary: t.tabStayingSecondary,
+    icon: UserCheck,
+    countKey: 'continuing',
+  },
+  {
+    v: 'new',
+    color: 'blue',
+    primary: t.tabNewPrimary,
+    secondary: t.tabNewSecondary,
+    icon: UserPlus,
+    countKey: 'new',
+  },
+  {
+    v: 'transfer',
+    color: 'purple',
+    primary: t.tabTransferringPrimary,
+    secondary: t.tabTransferringSecondary,
+    icon: RefreshCw,
+    countKey: 'transfer',
+  },
+  {
+    v: 'leaving',
+    color: 'red',
+    primary: t.tabLeavingPrimary,
+    secondary: t.tabLeavingSecondary,
+    icon: LogOut,
+    countKey: 'leaving',
+  },
+  {
+    v: 'unassigned',
+    color: 'orange',
+    primary: t.tabUnassignedPrimary,
+    secondary: t.tabUnassignedSecondary,
+    icon: BedDouble,
+    countKey: 'unassigned',
+  },
+];
 
   // ---------- DERIVED ----------
   const activeFilterCount =
@@ -477,7 +533,12 @@ function StudentsPage({ language }) {
     try {
       setLoading(true); setError('');
       const params = {};
-      if (activeTab !== 'all') params.category = activeTab;
+
+if (activeTab === 'unassigned') {
+  params.status = 'unassigned';
+} else if (activeTab !== 'all') {
+  params.category = activeTab;
+}
       const q = searchQuery.trim();
       if (q.length >= 2) params.search = q;
       // Map drawer state -> the exact backend query params. The backend
@@ -492,8 +553,9 @@ function StudentsPage({ language }) {
       if (f.buildings?.length) params.building = f.buildings.join(',');
       if (f.apartments?.length) params.apartment = f.apartments.join(',');
       if (f.rooms?.length) params.room = f.rooms.join(',');
-      if (f.assignmentStatuses?.length) params.status = f.assignmentStatuses[0];
-      if (f.hasRoommateRequest?.length) params.has_roommate_request = f.hasRoommateRequest[0];
+if (activeTab !== 'unassigned' && f.assignmentStatuses?.length) {
+  params.status = f.assignmentStatuses[0];
+}      if (f.hasRoommateRequest?.length) params.has_roommate_request = f.hasRoommateRequest[0];
       const data = await studentsAPI.getStudents(params, { signal: controller.signal });
       const items = Array.isArray(data) ? data : (data.results || []);
       setList(items);
@@ -2177,25 +2239,74 @@ const submitEditStudent = async () => {
         .page-top h1 { font-size: 28px; font-weight: 800; margin-bottom: 4px; color: #0f172a; letter-spacing: -0.4px; }
         .page-top p { color: #64748b; font-size: 15px; }
         .results-count { background: #eff6ff; color: #1d4ed8; padding: 10px 20px; border-radius: 999px; font-size: 14px; font-weight: 600; }
-        .stat-tabs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 22px; }
-        .stat-tab { position: relative; background: white; border-radius: 16px; padding: 18px 18px 22px; display: flex; align-items: center; gap: 14px; border: 2px solid transparent; font-family: inherit; cursor: pointer; transition: all 0.18s; text-align: start; box-shadow: 0 2px 8px rgba(15,23,42,0.04); }
-        .stat-tab:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(15,23,42,0.08); }
-        .stat-icon-wrap { width: 48px; height: 48px; border-radius: 14px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-        .stat-text { flex: 1; min-width: 0; }
-        .stat-primary { font-weight: 800; color: #0f172a; font-size: 15px; line-height: 1.2; }
-        .stat-secondary { font-size: 12px; color: #64748b; font-weight: 600; margin-top: 3px; }
-        .stat-count { font-size: 28px; font-weight: 800; color: #0f172a; letter-spacing: -0.5px; }
-        .stat-tab.gray   .stat-icon-wrap { background: #f1f5f9; color: #475569; }
+.stat-tabs {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 22px;
+}      
+.stat-tab {
+  position: relative;
+  background: white;
+  border-radius: 14px;
+  padding: 14px 12px 18px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 2px solid transparent;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.18s;
+  text-align: start;
+  box-shadow: 0 2px 8px rgba(15,23,42,0.04);
+  min-width: 0;
+}        .stat-tab:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(15,23,42,0.08); }
+.stat-icon-wrap {
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}        .stat-text { flex: 1; min-width: 0; }
+.stat-primary {
+  font-weight: 800;
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.2;
+}        
+.stat-secondary {
+  font-size: 10px;
+  color: #64748b;
+  font-weight: 600;
+  margin-top: 3px;
+}       
+.stat-count {
+  font-size: 23px;
+  font-weight: 800;
+  color: #0f172a;
+  letter-spacing: -0.5px;
+}        .stat-tab.gray   .stat-icon-wrap { background: #f1f5f9; color: #475569; }
         .stat-tab.green  .stat-icon-wrap { background: #d1fae5; color: #059669; }
         .stat-tab.blue   .stat-icon-wrap { background: #dbeafe; color: #2563eb; }
         .stat-tab.purple .stat-icon-wrap { background: #ede9fe; color: #7c3aed; }
         .stat-tab.red    .stat-icon-wrap { background: #fee2e2; color: #dc2626; }
+        .stat-tab.orange .stat-icon-wrap { background: #ffedd5; color: #ea580c; }
         .stat-tab.active::after { content: ''; position: absolute; left: 22px; right: 22px; bottom: 8px; height: 3px; border-radius: 999px; }
         .stat-tab.gray.active   { border-color: #cbd5e1; } .stat-tab.gray.active::after   { background: #475569; }
         .stat-tab.green.active  { border-color: #6ee7b7; background: #ecfdf5; } .stat-tab.green.active::after  { background: #059669; }
         .stat-tab.blue.active   { border-color: #93c5fd; background: #eff6ff; } .stat-tab.blue.active::after   { background: #2563eb; }
         .stat-tab.purple.active { border-color: #c4b5fd; background: #faf5ff; } .stat-tab.purple.active::after { background: #7c3aed; }
         .stat-tab.red.active    { border-color: #fca5a5; background: #fef2f2; } .stat-tab.red.active::after    { background: #dc2626; }
+        .stat-tab.orange.active {
+  border-color: #fdba74;
+  background: #fff7ed;
+}
+
+.stat-tab.orange.active::after {
+  background: #ea580c;
+}
         .search-row { display: flex; gap: 10px; align-items: stretch; margin-bottom: 12px; }
         .search-box { flex: 1; display: flex; align-items: center; gap: 12px; background: white; padding: 14px 22px; border-radius: 14px; border: 1px solid #e5e7eb; box-shadow: 0 2px 6px rgba(15,23,42,0.04); transition: all 0.2s; }
         .search-box:focus-within { border-color: #3d9fe0; box-shadow: 0 4px 18px rgba(61,159,224,0.15); }

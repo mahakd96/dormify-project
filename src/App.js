@@ -71,17 +71,20 @@ function AppContent() {
     <Routes>
       {/* Login */}
       <Route
-        path="/login"
-        element={
-          loading ? (
-            <div className="loading">Loading...</div>
-          ) : user ? (
-            <Navigate to="/dashboard" replace />
-          ) : (
-            <LoginPage />
-          )
-        }
+  path="/login"
+  element={
+    loading ? (
+      <div className="loading">Loading...</div>
+    ) : user ? (
+      <Navigate to="/dashboard" replace />
+    ) : (
+      <LoginPage
+        language={language}
+        onLanguageToggle={toggleLanguage}
       />
+    )
+  }
+/>
 
       {/* Protected app shell */}
       <Route

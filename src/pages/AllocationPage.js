@@ -368,6 +368,20 @@ function FlexibleConditionCard({ condKey, value, t, onToggle, onWeightChange }) 
 // ─────────────────────────────────────────────
 // Main Component
 // ─────────────────────────────────────────────
+const DEFAULT_CONSTRAINTS = {
+  sameGender:             { enabled: true, strict: true,  critical: true,  weight: 0 },
+  priorityFirst:          { enabled: true, strict: true,  critical: true,  weight: 0 },
+  roommatePositiveOnly:   { enabled: true, strict: true,  critical: true,  weight: 0 },
+  ReligiousTogether:      { enabled: true, strict: true,  critical: true,  weight: 0 },
+
+  sameReligion:           { enabled: true, strict: false, critical: false, weight: 6 },
+  roommateMatch:          { enabled: true, strict: false, critical: false, weight: 8 },
+  sectorMatching:         { enabled: true, strict: false, critical: false, weight: 7 },
+  avoidYearMix_1_with_3_4:{ enabled: true, strict: false, critical: false, weight: 4 },
+  avoidAtudaimWithHasmaha:{ enabled: true, strict: false, critical: false, weight: 4 },
+};
+
+const ALLOCATION_CONSTRAINTS_STORAGE_KEY = 'dormify_allocation_constraints';
 
 function AllocationPage({ language = 'he' }) {
   const navigate = useNavigate();
@@ -421,20 +435,50 @@ function AllocationPage({ language = 'he' }) {
   const [searchTiming, setSearchTiming] = useState(null);
   const [displayElapsed, setDisplayElapsed] = useState(0);
 
-  // ── Constraints State ────────────────────────
-  const [constraints, setConstraints] = useState({
-    sameGender:             { enabled: true, strict: true,  critical: true,  weight: 0 },
-    priorityFirst:          { enabled: true, strict: true,  critical: true,  weight: 0 },
-    roommatePositiveOnly:   { enabled: true, strict: true,  critical: true,  weight: 0 },
-    ReligiousTogether:      { enabled: true, strict: true,  critical: true,  weight: 0 },
-    sameReligion:           { enabled: true, strict: false, critical: false, weight: 6 },
-    roommateMatch:          { enabled: true, strict: false, critical: false, weight: 8 },
-    sectorMatching:         { enabled: true, strict: false, critical: false, weight: 7 },
-    avoidYearMix_1_with_3_4:{ enabled: true, strict: false, critical: false, weight: 4 },
-    avoidAtudaimWithHasmaha:{ enabled: true, strict: false, critical: false, weight: 4 },
-  }
+  const [constraints, setConstraints] = useState(() => {
+  try {
+    const savedConstraints = localStorage.getItem(
+      ALLOCATION_CONSTRAINTS_STORAGE_KEY
+    );
 
-  );
+    if (!savedConstraints) {
+      return DEFAULT_CONSTRAINTS;
+    }
+
+    const parsedConstraints = JSON.parse(savedConstraints);
+
+    return Object.fromEntries(
+      Object.entries(DEFAULT_CONSTRAINTS).map(([key, defaultValue]) => [
+        key,
+        {
+          ...defaultValue,
+          ...(parsedConstraints[key] || {}),
+        },
+      ])
+    );
+  } catch (error) {
+    console.warn(
+      'Failed to load saved allocation constraints:',
+      error
+    );
+
+    return DEFAULT_CONSTRAINTS;
+  }
+});
+
+useEffect(() => {
+  try {
+    localStorage.setItem(
+      ALLOCATION_CONSTRAINTS_STORAGE_KEY,
+      JSON.stringify(constraints)
+    );
+  } catch (error) {
+    console.warn(
+      'Failed to save allocation constraints:',
+      error
+    );
+  }
+}, [constraints]);
 
   // ── Refs ────────────────────────────────────
   const pollRef = useRef(null);
