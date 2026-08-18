@@ -871,6 +871,18 @@ export const requestsAPI = {
     }
   },
 
+  // Withdraw the caller's own still-pending request (distinct from reject:
+  // that's a reviewer's decision, this is the requesting side changing its
+  // mind before any reviewer acted).
+  cancel: async (id) => {
+    try {
+      const { data } = await api.put(`/api/requests/${id}/cancel/`, {});
+      return data;
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to cancel request"));
+    }
+  },
+
   // Feasibility for an already-created (pending) request - used both for
   // room/apartment transfer requests and for add_student requests (the
   // backend computes matches from the request's stored student/student_data).
@@ -929,6 +941,19 @@ export const requestsAPI = {
     } catch (err) {
       if (err.code === "ERR_CANCELED" || err.name === "CanceledError") throw err;
       throw new Error(getErrorMessage(err, "Failed to load available beds"));
+    }
+  },
+
+  // Regions a region_transfer request may name as target_region. Not
+  // regionsAPI.getAll() - that endpoint scopes a non-central user to only
+  // their own region, which would leave a regional employee unable to see
+  // any other region to request a transfer to.
+  getTransferTargetRegions: async () => {
+    try {
+      const { data } = await api.get("/api/requests/transfer-target-regions/");
+      return Array.isArray(data) ? data : (data.results || []);
+    } catch (err) {
+      throw new Error(getErrorMessage(err, "Failed to load transfer destination regions"));
     }
   },
 };
