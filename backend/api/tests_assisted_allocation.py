@@ -111,8 +111,24 @@ class RegionalIsolationTests(TestCase):
         self.client = APIClient()
         self.client.force_authenticate(user=self.employee_a)
 
-    def test_queue_ignores_foreign_region_param_for_regional_user(self):
+    def test_queue_rejects_foreign_region_param_for_regional_user(self):
+        # Group 3 security hardening (G3-03): previously a mismatched
+        # ?region= was silently ignored, falling back to the caller's own
+        # region with a 200 - never a data leak, but also never told the
+        # caller their request wasn't honored. resolve_scoped_region()
+        # (api/views.py) now applies one consistent rule across every
+        # region-scoped read endpoint (statistics, allocation_summary,
+        # allocation_results, this queue, get_active_allocation_run):
+        # region_boss/employee get a clean 403 on a mismatched region
+        # instead, same as this endpoint already did for a directly
+        # cross-region student (see test_student_detail_cross_region_403
+        # below). See
+        # project-quality/security/GROUP3_SECURITY_IMPLEMENTATION_REPORT.md.
         resp = self.client.get('/api/assisted-allocation/queue/', {'region': self.region_b.id})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_queue_still_works_for_own_region(self):
+        resp = self.client.get('/api/assisted-allocation/queue/', {'region': self.region_a.id})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data['region_id'], self.region_a.id)
         ids = {s['student_id'] for s in resp.data['students']}

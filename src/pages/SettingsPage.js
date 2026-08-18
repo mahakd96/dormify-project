@@ -10,9 +10,11 @@ import {
   Loader2,
 } from 'lucide-react';
 import { settingsAPI } from '../services/api';
+import { useAuth } from '../context/AuthContext';
 
 function SettingsPage({ language = 'he', onLanguageToggle }) {
   const isHebrew = language === 'he';
+  const { refreshUser } = useAuth();
 
   const [activeModal, setActiveModal] = useState(null);
   const [formMessage, setFormMessage] = useState('');
@@ -29,6 +31,9 @@ function SettingsPage({ language = 'he', onLanguageToggle }) {
     currentEmail: '',
     newEmail: '',
     confirmEmail: '',
+    // G3-18: email change now requires current-password re-authentication,
+    // same as the password-change form above.
+    password: '',
   });
 
   const translations = {
@@ -142,6 +147,7 @@ function SettingsPage({ language = 'he', onLanguageToggle }) {
       currentEmail: '',
       newEmail: '',
       confirmEmail: '',
+      password: '',
     });
   };
 
@@ -204,7 +210,12 @@ function SettingsPage({ language = 'he', onLanguageToggle }) {
     e.preventDefault();
     resetMessages();
 
-    if (!emailForm.currentEmail || !emailForm.newEmail || !emailForm.confirmEmail) {
+    if (
+      !emailForm.currentEmail ||
+      !emailForm.newEmail ||
+      !emailForm.confirmEmail ||
+      !emailForm.password
+    ) {
       showError(t.requiredFields);
       return;
     }
@@ -223,15 +234,18 @@ function SettingsPage({ language = 'he', onLanguageToggle }) {
     try {
       setIsSubmitting(true);
 
+      // G3-18: password is required server-side too - a wrong password
+      // returns a clean 400, surfaced below via the existing catch.
       const response = await settingsAPI.changeEmail({
         current_email: emailForm.currentEmail,
         new_email: emailForm.newEmail,
         confirm_email: emailForm.confirmEmail,
+        password: emailForm.password,
       });
 
-      if (response?.user) {
-        localStorage.setItem('dormify_user', JSON.stringify(response.user));
-      }
+      // Reflect the new email in the header/session immediately rather
+      // than requiring a reload - see AuthContext.refreshUser.
+      await refreshUser();
 
       showSuccess(response?.message || t.emailUpdated);
 
@@ -485,6 +499,23 @@ function SettingsPage({ language = 'he', onLanguageToggle }) {
                       setEmailForm({
                         ...emailForm,
                         confirmEmail: e.target.value,
+                      })
+                    }
+                  />
+                </label>
+
+                {/* G3-18: current password required to change email,
+                    same as the change-password form above. */}
+                <label>
+                  <span>{t.currentPassword}</span>
+                  <input
+                    type="password"
+                    value={emailForm.password}
+                    disabled={isSubmitting}
+                    onChange={(e) =>
+                      setEmailForm({
+                        ...emailForm,
+                        password: e.target.value,
                       })
                     }
                   />

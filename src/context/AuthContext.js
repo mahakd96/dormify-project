@@ -68,14 +68,6 @@ const ROLE_PERMISSIONS = Object.freeze({
   ],
 });
 
-const safeJsonParse = (s) => {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return null;
-  }
-};
-
 const normalizeLanguage = (value) => {
   return value === "en" ? "en" : "he";
 };
@@ -156,35 +148,20 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     let alive = true;
 
+    // G3-14/G3-16/G3-17: session restoration on app load no longer reads
+    // any token from localStorage (none is stored there any more) - it
+    // asks the backend to mint a fresh access token from the HttpOnly
+    // refresh cookie instead. No valid cookie -> no session, exactly like
+    // a first visit or an explicit logout.
     const init = async () => {
       setLoading(true);
       setError(null);
 
-      const savedUserRaw = localStorage.getItem("dormify_user");
-      const token = localStorage.getItem("dormify_access_token");
-      const savedUser = savedUserRaw ? safeJsonParse(savedUserRaw) : null;
-
-      if (token) {
-        try {
-          const me = await authAPI.getMe();
-          const freshUser = normalizeUser(me?.user || me || null);
-
-          if (!alive) return;
-
-          setUser(freshUser);
-          if (freshUser) {
-            localStorage.setItem("dormify_user", JSON.stringify(freshUser));
-          }
-        } catch (e) {
-          localStorage.removeItem("dormify_access_token");
-          localStorage.removeItem("dormify_refresh_token");
-          localStorage.removeItem("dormify_user");
-
-          if (!alive) return;
-          setUser(null);
-        }
-      } else {
-        if (savedUser) localStorage.removeItem("dormify_user");
+      try {
+        const restored = await authAPI.restoreSession();
+        if (!alive) return;
+        setUser(restored ? normalizeUser(restored.user) : null);
+      } catch {
         if (!alive) return;
         setUser(null);
       }
@@ -218,8 +195,11 @@ export const AuthProvider = ({ children }) => {
         throw new Error("Login succeeded but user payload is missing");
       }
 
+      // G3-17: user profile is kept in React state only - login() already
+      // stored the access token in memory (services/api.js), and the
+      // refresh token was set as an HttpOnly cookie by the backend. Never
+      // written to localStorage.
       setUser(nextUser);
-      localStorage.setItem("dormify_user", JSON.stringify(nextUser));
 
       return { success: true, user: nextUser };
     } catch (err) {
@@ -241,13 +221,29 @@ export const AuthProvider = ({ children }) => {
     }
   }, []);
 
-  const logout = useCallback(() => {
-    authAPI.logout();
-    localStorage.removeItem("dormify_user");
-    localStorage.removeItem("dormify_access_token");
-    localStorage.removeItem("dormify_refresh_token");
+  const logout = useCallback(async () => {
+    // G3-14: awaited so the server-side blacklist call actually fires
+    // before/alongside clearing local state - authAPI.logout() clears the
+    // in-memory access token and the refresh cookie regardless of whether
+    // the network call itself succeeds, so this can never leave the user
+    // stuck "logged in" client-side.
+    await authAPI.logout();
     setUser(null);
     setError(null);
+  }, []);
+
+  // Re-fetches the caller's own profile and updates context state - used
+  // after an in-place account change (e.g. SettingsPage's change-email,
+  // G3-18) so the UI reflects it immediately without a full reload.
+  const refreshUser = useCallback(async () => {
+    try {
+      const me = await authAPI.getMe();
+      const freshUser = normalizeUser(me?.user || me || null);
+      setUser(freshUser);
+      return freshUser;
+    } catch {
+      return null;
+    }
   }, []);
 
   const role = user?.role || null;
@@ -429,12 +425,23 @@ export const AuthProvider = ({ children }) => {
     return false;
   }, [user, hasPermission]);
 
+  // G3-11: overriding a placement rule is an elevated action (backend:
+  // assisted_allocation_override requires is_boss) - normal in-region
+  // ASSIGN stays available to any user canAssistAllocation() allows above,
+  // but the override path additionally requires region_boss/central_admin.
+  // This is UI convenience only; the backend check is authoritative.
+  const canOverrideAllocation = useCallback(
+    () => isCentralAdmin() || isRegionBoss(),
+    [isCentralAdmin, isRegionBoss]
+  );
+
   const value = {
     user,
     loading,
     error,
     login,
     logout,
+    refreshUser,
 
     language,
     setLanguage,
@@ -469,6 +476,7 @@ export const AuthProvider = ({ children }) => {
     canUploadExcel,
     canAssignPriority,
     canAssistAllocation,
+    canOverrideAllocation,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
