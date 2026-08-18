@@ -722,6 +722,10 @@ export const studentsAPI = {
           isStatus(s, ["leaving", "leave", "׳¢׳–׳™׳‘׳”", "׳¢׳•׳–׳‘"])
         ).length;
 
+        const unassigned = list.filter(
+  (s) => !s.is_assigned && s.category !== 'leaving'
+).length;
+
         return {
           total,
           all: total,
@@ -740,6 +744,9 @@ export const studentsAPI = {
 
           leaving,
           leaving_students: leaving,
+
+          unassigned,
+
         };
       } catch (fallbackErr) {
         console.warn(
@@ -757,6 +764,8 @@ export const studentsAPI = {
           new_students: 0,
           transferring: 0,
           leaving: 0,
+          unassigned: 0,
+
         };
       }
     }
@@ -951,6 +960,15 @@ export const requestsAPI = {
       throw new Error(getErrorMessage(err, "Failed to reject request"));
     }
   },
+
+  delete: async (id) => {
+  try {
+    const { data } = await api.delete(`/api/requests/${id}/`);
+    return data;
+  } catch (err) {
+    throw new Error(getErrorMessage(err, "Failed to delete request"));
+  }
+},
 
   // Withdraw the caller's own still-pending request (distinct from reject:
   // that's a reviewer's decision, this is the requesting side changing its

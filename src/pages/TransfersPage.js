@@ -10,7 +10,7 @@ import {
   Clock, CheckCircle, XCircle, ChevronDown, ChevronUp,
   User, Calendar, Activity, UserPlus, UserMinus,
   Hash, Star, RefreshCw, ArrowRight, ArrowLeft, ArrowRightLeft,
-  Eye, Inbox, Circle,
+  Eye, Inbox, Circle, Trash2,
 } from 'lucide-react';
 
 // ── Utilities ────────────────────────────────────────────────
@@ -51,6 +51,7 @@ const STATUS_CFG = {
   pending:  { color:'amber', labelHe:'ממתינה', labelEn:'Pending',  Icon: Clock       },
   approved: { color:'green', labelHe:'אושרה',  labelEn:'Approved', Icon: CheckCircle },
   rejected: { color:'rose',  labelHe:'נדחתה',  labelEn:'Rejected', Icon: XCircle     },
+  cancelled: { color:'slate', labelHe:'בוטלה',  labelEn:'Cancelled', Icon: XCircle     },
 };
 
 // ── Localization ─────────────────────────────────────────────
@@ -245,24 +246,32 @@ function buildT(isHe) {
     loc3WithRegion,
 
     // ── ActionPanel ──
-    actionsLabel: p('פעולות', 'Actions'),
-    pendingDestinationReviewNote: p(
-      'בקשת ההעברה ממתינה לבדיקה ואישור על ידי אזור היעד',
-      "The transfer request is awaiting review and approval by the destination region"
-    ),
-    rejectPlaceholder: p('סיבת הדחייה (אופציונלי)...', 'Rejection reason (optional)...'),
-    rejectBtn: p('דחה', 'Reject'),
-    approveRemoveBtn: p('אשר הסרה', 'Confirm Removal'),
-    approveSwapBtn: p('אשר חילוף', 'Confirm Swap'),
-    selectBedToApprove: p('בחר מיטה כדי לאשר', 'Select a bed to approve'),
-    checkingEllipsis: p('בודק...', 'Checking...'),
-    checkAvailabilityBtn: p('בדוק אפשרויות', 'Check options'),
-    recheckBtn: p('שוב', 'Recheck'),
-    assignNotePrefix: p('הסטודנט/ית ישובץ/תשובץ ל:', 'The student will be assigned to:'),
-    crossRegionFromPrefix: p('מ-', 'From '),
-    crossRegionFromSuffix: p(' אל ', ' to '),
-    targetRegionColon: p('אזור יעד: ', 'Target region: '),
-    crossRegionHint: p('מוצגות מיטות פנויות באזור היעד בלבד', 'Only free beds in the target region are shown'),
+actionsLabel: p('פעולות', 'Actions'),
+
+deleteRequestBtn: p('מחק בקשה', 'Delete Request'),
+
+deleteRequestConfirmText: (name) => p(
+  `האם למחוק את הבקשה של ${name}? פעולה זו תמחק את הבקשה בלבד ולא את הסטודנט מהמערכת.`,
+  `Delete the request for ${name}? This will delete only the request and not the student from the system.`
+),
+
+deleteRequestError: p(
+  'שגיאה במחיקת הבקשה',
+  'Failed to delete request'
+),
+
+pendingDestinationReviewNote: p(
+  'בקשת ההעברה ממתינה לבדיקה ואישור על ידי אזור היעד',
+  "The transfer request is awaiting review and approval by the destination region"
+),
+
+rejectPlaceholder: p(
+  'סיבת הדחייה (אופציונלי)...',
+  'Rejection reason (optional)...'
+),
+
+rejectBtn: p('דחה', 'Reject'),
+approveRemoveBtn: p('אשר הסרה', 'Confirm Removal'),
 
     // ── DetailPane ──
     tlCreated: p('נוצרה', 'Created'),
@@ -1132,8 +1141,16 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
 };
 
 // ── Detail Pane ───────────────────────────────────────────────
-const DetailPane = ({ request, onApprove, onReject, acting, language, T,
-  feasData, checkingFeas, onCheckFeas, onLoadMoreFeas, loadingMoreFeas, loadMoreFeasError,
+const DetailPane = ({
+  request,
+  onApprove,
+  onReject,
+  onDelete,
+  acting,
+  deleting,
+  language,
+  T,
+                      feasData, checkingFeas, onCheckFeas, onLoadMoreFeas, loadingMoreFeas, loadMoreFeasError,
   rawBedOptions, loadingBeds, bedsError, onLoadMoreBedOptions, loadingMoreBeds, loadMoreBedsError,
   roomId, onSetRoom,
   selFeasOpt, onSelFeasOpt }) => {
@@ -1272,6 +1289,25 @@ const DetailPane = ({ request, onApprove, onReject, acting, language, T,
           selFeasOpt={selFeasOpt} onSelFeasOpt={onSelFeasOpt}
           T={T} language={language}
         />
+
+
+        {['pending', 'rejected', 'cancelled'].includes(request.status) && (
+  <div className="delete-request-section">
+    <button
+      type="button"
+      className="btn-delete-request"
+      onClick={() => onDelete(request)}
+      disabled={deleting}
+    >
+      {deleting
+        ? <Spinner size={12}/>
+        : <Trash2 size={13}/>
+      }
+
+      {T.deleteRequestBtn}
+    </button>
+  </div>
+)}
       </div>
     </div>
   );
@@ -1337,6 +1373,7 @@ export default function TransfersPage({ language = 'he' }) {
   const [checkingFeas, setCheckingFeas] = useState(null);
   const [loadingMoreFeasId, setLoadingMoreFeasId] = useState(null);
   const [actionId, setActionId]   = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
   const [bedOptions, setBedOpts]  = useState({});
   const [loadingBeds, setLdBeds]  = useState(null);
   const [loadingMoreBedsId, setLoadingMoreBedsId] = useState(null);
@@ -1527,6 +1564,33 @@ useEffect(() => {
     catch (err) { alert(err.message || T.errGeneric); }
     finally { setActionId(null); }
   };
+  const doDelete = async (request) => {
+  if (!request?.id) return;
+
+  const confirmed = window.confirm(
+    T.deleteRequestConfirmText(request.student_name || T.dash)
+  );
+
+  if (!confirmed) return;
+
+  setDeletingId(request.id);
+
+  try {
+    await requestsAPI.delete(request.id);
+
+    setRequests(prev =>
+      prev.filter(r => r.id !== request.id)
+    );
+
+    if (selected?.id === request.id) {
+      setSelected(null);
+    }
+  } catch (err) {
+    alert(err.message || T.deleteRequestError);
+  } finally {
+    setDeletingId(null);
+  }
+};
 
   const statCards = [
     { key:'all',           label:T.statTotal,    Icon:Inbox,       color:'slate' },
@@ -1726,6 +1790,8 @@ onChange={(e) => {
                   request={selected} language={language} T={T}
                   acting={actionId === selected.id}
                   onApprove={doApprove} onReject={doReject}
+                    onDelete={doDelete}
+  deleting={deletingId === selected.id}
                   feasData={feasData[selected.id]}
                   checkingFeas={checkingFeas === selected.id}
                   onCheckFeas={checkFeasibility}
@@ -1859,6 +1925,46 @@ onChange={(e) => {
   display: flex;
   align-items: flex-start;
   gap: 10px;
+}
+.delete-request-section {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+
+.btn-delete-request {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+
+  padding: 8px 12px;
+
+  background: transparent;
+  border: 1px solid var(--rose-bdr);
+  border-radius: var(--r4);
+
+  color: var(--rose);
+
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+
+  cursor: pointer;
+
+  transition:
+    background .12s,
+    border-color .12s;
+}
+
+.btn-delete-request:hover:not(:disabled) {
+  background: var(--rose-bg);
+  border-color: var(--rose);
+}
+
+.btn-delete-request:disabled {
+  opacity: .5;
+  cursor: not-allowed;
 }
 
 .tp-title-row > div {

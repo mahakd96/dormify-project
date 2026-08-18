@@ -1826,6 +1826,58 @@ class BedViewSet(viewsets.ModelViewSet):
             )
         return super().update(request, *args, **kwargs)
 
+def _latest_run_unassigned_student_ids(user, region_value=None):
+    """
+    Return only students from the latest completed allocation run
+    who were sent to the solver and are still unassigned.
+    """
+
+    runs = AllocationRun.objects.filter(
+        status=AllocationRun.Status.COMPLETED
+    )
+
+    if user.is_central_admin:
+        if region_value:
+            region = _resolve_region(region_value)
+            if not region:
+                return []
+            runs = runs.filter(region=region)
+        else:
+            return []
+    else:
+        if not user.region_id:
+            return []
+        runs = runs.filter(region_id=user.region_id)
+
+    latest_run = runs.order_by('-started_at').first()
+
+    if not latest_run:
+        return []
+
+    population_summary = (
+        (latest_run.diagnostics or {}).get('population_summary') or {}
+    )
+
+    run_student_ids = population_summary.get(
+        'sent_to_solver_student_ids'
+    ) or []
+
+    if not run_student_ids:
+        return []
+
+    return list(
+        Student.objects.filter(
+            id__in=run_student_ids,
+            assigned_room__isnull=True,
+        )
+        .exclude(
+            category=Student.StudentCategory.LEAVING
+        )
+        .exclude(
+            accessibility_flag=True
+        )
+        .values_list('id', flat=True)
+    )
 
 class StudentViewSet(viewsets.ModelViewSet):
     serializer_class = StudentSerializer
@@ -1972,12 +2024,26 @@ class StudentViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(assigned_room_id__in=rooms)
 
         status_filter = self.request.query_params.get('status')
+
         if status_filter == 'assigned':
-            queryset = queryset.filter(assigned_room__isnull=False)
+            queryset = queryset.filter(
+                assigned_room__isnull=False
+            )
+
         elif status_filter == 'unassigned':
-            queryset = queryset.filter(assigned_room__isnull=True)
+            unassigned_ids = _latest_run_unassigned_student_ids(
+                self.request.user,
+                self.request.query_params.get('region'),
+            )
+
+            queryset = queryset.filter(
+                id__in=unassigned_ids
+            )
+
         elif status_filter == 'priority':
-            queryset = queryset.filter(is_priority=True)
+            queryset = queryset.filter(
+                is_priority=True
+            )
 
         has_roommate = self.request.query_params.get('has_roommate_request')
         if has_roommate in ('yes', 'no'):
@@ -2028,15 +2094,31 @@ class StudentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def counts(self, request):
         queryset = self.get_queryset()
+
         by_category = dict(
             queryset.values_list('category').annotate(n=Count('id'))
         )
+
+        unassigned_ids = _latest_run_unassigned_student_ids(
+            request.user,
+            request.query_params.get('region'),
+        )
+
         return Response({
             'all': queryset.count(),
-            'continuing': by_category.get(Student.StudentCategory.CONTINUING, 0),
-            'new': by_category.get(Student.StudentCategory.NEW, 0),
-            'transfer': by_category.get(Student.StudentCategory.TRANSFER, 0),
-            'leaving': by_category.get(Student.StudentCategory.LEAVING, 0),
+            'continuing': by_category.get(
+                Student.StudentCategory.CONTINUING, 0
+            ),
+            'new': by_category.get(
+                Student.StudentCategory.NEW, 0
+            ),
+            'transfer': by_category.get(
+                Student.StudentCategory.TRANSFER, 0
+            ),
+            'leaving': by_category.get(
+                Student.StudentCategory.LEAVING, 0
+            ),
+            'unassigned': len(unassigned_ids),
         })
 
     @action(detail=False, methods=['get'], url_path='filter-options')
@@ -3713,6 +3795,32 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
                 changed.append('current_assignment_snapshot')
             if changed:
                 instance.save(update_fields=changed)
+
+    def destroy(self, request, *args, **kwargs):
+        if not request.user.is_boss:
+            return Response(
+                {'error': 'רק מנהל יכול למחוק בקשות'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        req = self.get_object()
+
+        if req.status not in (
+                StudentRequest.Status.PENDING,
+                StudentRequest.Status.REJECTED,
+                StudentRequest.Status.CANCELLED,
+        ):
+            return Response(
+                {'error': 'ניתן למחוק רק בקשה ממתינה, שנדחתה או שבוטלה'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        req.delete()
+
+        return Response(
+            {'message': 'הבקשה נמחקה בהצלחה'},
+            status=status.HTTP_200_OK,
+        )
 
     @staticmethod
     def _pagination_params(source):
@@ -9337,7 +9445,12 @@ def home_dashboard(request):
             _home_action('view_region_status', 'צפייה בסטטוס האזור', 'View regional status', '/allocation')
         )
     elif has_completed_run and unassigned_students > 0:
-        primary_action = _home_action('review_unassigned', 'סקירת סטודנטים ללא שיבוץ', 'Review unassigned students', '/students')
+        primary_action = _home_action(
+            'review_unassigned',
+            'סקירת סטודנטים ללא שיבוץ',
+            'Review unassigned students',
+            '/students?tab=unassigned'
+        )
     elif pending_requests > 0:
         primary_action = (
             _home_action('review_requests', 'סקירת בקשות ממתינות', 'Review pending requests', '/transfers')
@@ -9356,7 +9469,7 @@ def home_dashboard(request):
             'title_he': 'סטודנטים ללא שיבוץ', 'title_en': 'Unassigned students',
             'description_he': f'{unassigned_students} סטודנטים ממתינים לשיבוץ לחדר',
             'description_en': f'{unassigned_students} students are waiting for a room assignment',
-            'route': '/students',
+            'route': '/students?tab=unassigned',
         })
 
     if pending_requests > 0:
