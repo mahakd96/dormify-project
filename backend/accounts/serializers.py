@@ -1,6 +1,9 @@
 from django.contrib.auth import get_user_model
+from django.db import transaction
 
 from rest_framework import serializers
+
+from api.models import Region
 
 
 User = get_user_model()
@@ -196,29 +199,62 @@ class StaffUserSerializer(
             "password"
         )
 
-        model_field_names = {
-            field.name
-            for field
-            in User._meta.get_fields()
-        }
+        role = validated_data.get("role")
+        region_id = validated_data.get("region_id")
 
-        # Necessary when the project uses
-        # AbstractUser and still has username.
-        if (
-            "username" in model_field_names
-            and not validated_data.get(
-                "username"
-            )
-        ):
-            validated_data["username"] = (
-                validated_data["email"]
-            )
+        # G3-19: "exactly one region_boss per region" - enforced here at
+        # the application level (a DB partial-unique-constraint migration
+        # also exists as a backstop, see api.models.User.Meta.constraints
+        # and its migration - NOT applied to the real Azure database yet,
+        # see project-quality/security/GROUP3_SECURITY_IMPLEMENTATION_REPORT.md
+        # for why). select_for_update() locks the REGION row itself as the
+        # serialization point: two concurrent "create a region_boss for
+        # region X" requests can never both pass the exists() check below -
+        # the second blocks on this lock until the first's transaction
+        # commits (creating the row the second must then see), so it is
+        # never possible to end up with two region_boss users for the same
+        # region even under a genuine race.
+        with transaction.atomic():
+            if role == "region_boss" and region_id:
+                try:
+                    Region.objects.select_for_update().get(pk=region_id)
+                except Region.DoesNotExist:
+                    raise serializers.ValidationError({
+                        "regionId": "Region not found."
+                    })
 
-        user = User(**validated_data)
+                if User.objects.filter(role="region_boss", region_id=region_id).exists():
+                    raise serializers.ValidationError({
+                        "role": (
+                            "This region already has a regional manager. "
+                            "Demote or reassign the existing regional "
+                            "manager before creating a new one."
+                        )
+                    })
 
-        # Never store a raw password.
-        user.set_password(password)
+            model_field_names = {
+                field.name
+                for field
+                in User._meta.get_fields()
+            }
 
-        user.save()
+            # Necessary when the project uses
+            # AbstractUser and still has username.
+            if (
+                "username" in model_field_names
+                and not validated_data.get(
+                    "username"
+                )
+            ):
+                validated_data["username"] = (
+                    validated_data["email"]
+                )
+
+            user = User(**validated_data)
+
+            # Never store a raw password.
+            user.set_password(password)
+
+            user.save()
 
         return user

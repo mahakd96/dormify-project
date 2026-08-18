@@ -7,10 +7,17 @@ services:
       - local-db
     environment:
       POSTGRES_DB: dormify_test
-      POSTGRES_USER: dormify_user
-      POSTGRES_PASSWORD: dormify_password
+      POSTGRES_USER: ${TEST_DB_USER:-dormify_user}
+      POSTGRES_PASSWORD: ${TEST_DB_PASSWORD:-dormify_password}
     ports:
-      - "5433:5432"
+      # G3-20: localhost-only, not 0.0.0.0 - this is a disposable local
+      # test database (never real data), but there's no reason to expose
+      # it on every network interface. Same-machine connections
+      # (ENV_FILE=.env.test -> DB_HOST=localhost) are unaffected either
+      # way. TEST_DB_USER/TEST_DB_PASSWORD may be overridden via an
+      # untracked .env for local hygiene; the defaults keep `docker-compose
+      # up` working out of the box with no setup required.
+      - "127.0.0.1:5433:5432"
     volumes:
       - dormify_test_pgdata:/var/lib/postgresql/data
 
@@ -25,6 +32,17 @@ services:
     ports:
       - "8000:8000"
     environment:
+      # G3-13: Django's DEBUG now defaults to False when the variable is
+      # absent (secure by default). This container never sees the
+      # repo-root .env at all (only ./backend is mounted, not the repo
+      # root - see settings.py's ENV_FILE/load_dotenv() call, which finds
+      # nothing to load in here), so DEBUG must be supplied explicitly
+      # right here for local Docker development to keep behaving like
+      # development. SECRET_KEY is deliberately left unset - DEBUG=True
+      # makes settings.py fall back to a fixed, clearly-labeled
+      # development-only key (see settings.py), which is fine for a
+      # throwaway local container and keeps one fewer thing to configure.
+      DEBUG: "True"
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
