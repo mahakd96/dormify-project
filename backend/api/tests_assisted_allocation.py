@@ -7,6 +7,7 @@ Run with the test database (never the production Azure DB):
 """
 
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
 
@@ -213,6 +214,104 @@ class AccessibilityManualPlacementTests(TestCase):
         resp = self.client.get('/api/assisted-allocation/queue/', {'tab': 'resolved'})
         ids = {s['student_id'] for s in resp.data['students']}
         self.assertIn('ACC001', ids)
+
+
+# ---------------------------------------------------------------------------
+# Post-assignment state: the detail/recommendations endpoints and a second
+# manual-placement attempt must all reflect that a student is already
+# placed, instead of continuing to present them as actionable. Regression
+# coverage for the bug where a successful manual placement appeared to
+# "revert" - persistence was always correct (assigned_room/BedAssignment),
+# but the detail panel and recommendations endpoint never checked
+# student.is_assigned, so re-selecting the same (now-assigned) student kept
+# showing a full, clickable candidate list as if nothing had been saved.
+# ---------------------------------------------------------------------------
+
+class PostAssignmentStateTests(TestCase):
+    def setUp(self):
+        self.region = _make_region()
+        self.dorm_type = _make_dorm_type(self.region)
+        self.building, self.apartment = _make_apartment(
+            self.dorm_type, category='male', apartment_type='single',
+        )
+        self.room, self.beds = _make_room_with_beds(
+            self.apartment, capacity=2, bed_labels=('A', 'B'),
+        )
+        self.boss = _make_region_boss(self.region)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.boss)
+        self.student = _make_student(self.dorm_type, student_id='POST001', housing_type='רווקים')
+
+    def _assign(self, bed_id):
+        return self.client.post(
+            f'/api/assisted-allocation/students/{self.student.id}/assign/',
+            {'bed_id': bed_id},
+        )
+
+    def test_detail_shows_resolved_group_and_placement_after_assign(self):
+        resp = self._assign(self.beds[0].id)
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        detail = self.client.get(f'/api/assisted-allocation/students/{self.student.id}/detail/')
+        self.assertEqual(detail.data['student']['group'], 'resolved')
+        placement = detail.data['current_placement']
+        self.assertTrue(placement['assigned'])
+        self.assertEqual(placement['room_id'], self.room.id)
+        self.assertEqual(placement['bed_id'], self.beds[0].id)
+
+    def test_recommendations_empty_after_assign(self):
+        resp = self._assign(self.beds[0].id)
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        rec = self.client.get(
+            f'/api/assisted-allocation/students/{self.student.id}/recommendations/'
+        )
+        self.assertEqual(rec.data['candidates']['total_valid_beds'], 0)
+        self.assertEqual(rec.data['candidates']['buildings'], [])
+        self.assertTrue(rec.data.get('already_assigned'))
+
+    def test_second_manual_assign_rejected_and_no_new_assignment_created(self):
+        first = self._assign(self.beds[0].id)
+        self.assertEqual(first.status_code, 200, first.data)
+        first_assignment_id = first.data['assignment_id']
+
+        second = self._assign(self.beds[1].id)
+        self.assertEqual(second.status_code, 400)
+
+        active = BedAssignment.objects.filter(
+            student=self.student, status=BedAssignment.Status.ACTIVE,
+        )
+        self.assertEqual(active.count(), 1)
+        self.assertEqual(active.first().id, first_assignment_id)
+        self.assertEqual(active.first().bed_id, self.beds[0].id)
+        # No second audit row for a rejected re-assignment attempt.
+        self.assertEqual(
+            AssistedAllocationAudit.objects.filter(student=self.student).count(), 1,
+        )
+
+    def test_second_override_rejected_after_manual_assign(self):
+        first = self._assign(self.beds[0].id)
+        self.assertEqual(first.status_code, 200, first.data)
+
+        second = self.client.post(
+            f'/api/assisted-allocation/students/{self.student.id}/override/',
+            {'bed_id': self.beds[1].id, 'note': 'trying again'},
+        )
+        self.assertEqual(second.status_code, 400)
+        self.assertEqual(
+            BedAssignment.objects.filter(
+                student=self.student, status=BedAssignment.Status.ACTIVE,
+            ).count(),
+            1,
+        )
+
+    def test_queue_still_excludes_resolved_student_from_needs_placement(self):
+        resp = self._assign(self.beds[0].id)
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        q = self.client.get('/api/assisted-allocation/queue/', {'tab': 'needs_placement'})
+        ids = {s['student_id'] for s in q.data['students']}
+        self.assertNotIn('POST001', ids)
 
 
 # ---------------------------------------------------------------------------
@@ -622,17 +721,35 @@ class TransferRequestIntegrationTests(TestCase):
         self.client.force_authenticate(user=self.boss)
         self.student = _make_student(self.dorm_type, student_id='TR001', housing_type='רווקים')
 
-    def test_transfer_requested_reflected_in_queue(self):
+    def test_transfer_requested_moves_out_of_unassigned_into_transfer_pending_tab(self):
+        # Before the transfer request: an ordinary unassigned/actionable student.
+        before = self.client.get('/api/assisted-allocation/queue/', {'tab': 'unassigned'})
+        self.assertIn('TR001', {s['student_id'] for s in before.data['students']})
+        self.assertEqual(before.data['counts']['transfer_requested'], 0)
+
         StudentRequest.objects.create(
             request_type=StudentRequest.RequestType.REGION_TRANSFER,
             student=self.student,
             reason='אין מקום פנוי באזור',
             requested_by=self.boss,
         )
-        resp = self.client.get('/api/assisted-allocation/queue/', {'tab': 'unassigned'})
-        row = next(s for s in resp.data['students'] if s['student_id'] == 'TR001')
-        self.assertTrue(row['is_transfer_requested'])
-        self.assertEqual(resp.data['counts']['transfer_requested'], 1)
+
+        # A pending region_transfer takes the student OUT of the ordinary
+        # unassigned/needs_placement population - never simultaneously
+        # "actionable locally" and "pending transfer".
+        unassigned = self.client.get('/api/assisted-allocation/queue/', {'tab': 'unassigned'})
+        self.assertNotIn('TR001', {s['student_id'] for s in unassigned.data['students']})
+
+        needs_placement = self.client.get('/api/assisted-allocation/queue/', {'tab': 'needs_placement'})
+        self.assertNotIn('TR001', {s['student_id'] for s in needs_placement.data['students']})
+        self.assertEqual(needs_placement.data['counts']['unassigned'], 0)
+
+        pending = self.client.get('/api/assisted-allocation/queue/', {'tab': 'transfer_pending'})
+        rows = {s['student_id']: s for s in pending.data['students']}
+        self.assertIn('TR001', rows)
+        self.assertTrue(rows['TR001']['is_transfer_requested'])
+        self.assertEqual(rows['TR001']['group'], 'transfer_pending')
+        self.assertEqual(pending.data['counts']['transfer_requested'], 1)
 
 
 # ---------------------------------------------------------------------------
@@ -835,3 +952,210 @@ class DormTypeRestrictionAndTieringTests(TestCase):
             apartment.id,
             {a['apartment_id'] for b in after.data['candidates']['buildings'] for a in b['apartments']},
         )
+
+
+# ---------------------------------------------------------------------------
+# Pending region_transfer state machine: a student with a PENDING
+# region_transfer request must be mutually exclusive with "locally
+# actionable" everywhere - the queue, detail, recommendations, and the
+# assign/override write endpoints all key off the SAME
+# _pending_region_transfer() lookup (see views.py) so they can never drift.
+# Covers the full lifecycle: pending -> rejected / cancelled (back to the
+# ordinary queue) and pending -> approved (leaves the source queue for good).
+# ---------------------------------------------------------------------------
+
+class TransferPendingStateMachineTests(TestCase):
+    def setUp(self):
+        self.region = _make_region()
+        self.dest_region = _make_region('DestRegion')
+        self.dorm_type = _make_dorm_type(self.region)
+        self.dest_dorm_type = _make_dorm_type(self.dest_region)
+        self.building, self.apartment = _make_apartment(
+            self.dorm_type, category='male', apartment_type='single',
+        )
+        self.room, self.beds = _make_room_with_beds(self.apartment, capacity=2, bed_labels=('A', 'B'))
+
+        self.dest_building, self.dest_apartment = _make_apartment(
+            self.dest_dorm_type, category='male', apartment_type='single',
+        )
+        self.dest_room, self.dest_beds = _make_room_with_beds(
+            self.dest_apartment, room_name='201', capacity=1, bed_labels=('A',),
+        )
+
+        self.boss = _make_region_boss(self.region)
+        self.admin = _make_central_admin()
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.boss)
+
+        self.student = _make_student(self.dorm_type, student_id='XFER001', housing_type='רווקים')
+
+        self.req = StudentRequest.objects.create(
+            request_type=StudentRequest.RequestType.REGION_TRANSFER,
+            student=self.student,
+            target_region=self.dest_region,
+            reason='אין מקום פנוי באזור',
+            requested_by=self.boss,
+        )
+
+    def test_detail_exposes_pending_transfer_and_blocks_local_reason(self):
+        resp = self.client.get(f'/api/assisted-allocation/students/{self.student.id}/detail/')
+        self.assertEqual(resp.data['student']['group'], 'transfer_pending')
+        self.assertTrue(resp.data['student']['is_transfer_requested'])
+        pending = resp.data['pending_transfer_request']
+        self.assertEqual(pending['id'], self.req.id)
+        self.assertEqual(pending['status'], 'pending')
+        self.assertEqual(pending['target_region'], self.dest_region.id)
+        self.assertEqual(pending['target_region_name'], self.dest_region.name)
+        # No "why can't we place them locally" banner while mid-transfer.
+        self.assertIsNone(resp.data['reason'])
+
+    def test_recommendations_blocked_while_pending(self):
+        resp = self.client.get(f'/api/assisted-allocation/students/{self.student.id}/recommendations/')
+        self.assertEqual(resp.data['candidates']['total_valid_beds'], 0)
+        self.assertEqual(resp.data['candidates']['buildings'], [])
+        self.assertTrue(resp.data.get('transfer_pending'))
+        self.assertFalse(resp.data.get('already_assigned'))
+
+    def test_manual_assign_blocked_while_pending(self):
+        resp = self.client.post(
+            f'/api/assisted-allocation/students/{self.student.id}/assign/',
+            {'bed_id': self.beds[0].id},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(BedAssignment.objects.filter(student=self.student).exists())
+
+    def test_override_blocked_while_pending(self):
+        resp = self.client.post(
+            f'/api/assisted-allocation/students/{self.student.id}/override/',
+            {'bed_id': self.beds[0].id, 'note': 'trying anyway'},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(BedAssignment.objects.filter(student=self.student).exists())
+
+    def test_rejected_transfer_returns_student_to_actionable_queue(self):
+        admin_client = APIClient()
+        admin_client.force_authenticate(self.admin)
+        resp = admin_client.put(f'/api/requests/{self.req.id}/reject/', {'reason': 'לא רלוונטי'})
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.status, 'rejected')
+
+        unassigned = self.client.get('/api/assisted-allocation/queue/', {'tab': 'unassigned'})
+        self.assertIn('XFER001', {s['student_id'] for s in unassigned.data['students']})
+        pending = self.client.get('/api/assisted-allocation/queue/', {'tab': 'transfer_pending'})
+        self.assertNotIn('XFER001', {s['student_id'] for s in pending.data['students']})
+
+        # Local placement works normally again.
+        assign = self.client.post(
+            f'/api/assisted-allocation/students/{self.student.id}/assign/',
+            {'bed_id': self.beds[0].id},
+        )
+        self.assertEqual(assign.status_code, 200, assign.data)
+
+    def test_requester_can_cancel_own_pending_transfer(self):
+        resp = self.client.put(f'/api/requests/{self.req.id}/cancel/')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.status, 'cancelled')
+        self.assertEqual(self.req.reviewed_by_id, self.boss.id)
+        self.assertIsNotNone(self.req.reviewed_at)
+
+        unassigned = self.client.get('/api/assisted-allocation/queue/', {'tab': 'unassigned'})
+        self.assertIn('XFER001', {s['student_id'] for s in unassigned.data['students']})
+        pending = self.client.get('/api/assisted-allocation/queue/', {'tab': 'transfer_pending'})
+        self.assertNotIn('XFER001', {s['student_id'] for s in pending.data['students']})
+
+        # Local placement (candidate recommendations + manual assign) works
+        # again after withdrawal - not stuck permanently under "בהעברה".
+        rec = self.client.get(f'/api/assisted-allocation/students/{self.student.id}/recommendations/')
+        self.assertFalse(rec.data.get('transfer_pending'))
+        assign = self.client.post(
+            f'/api/assisted-allocation/students/{self.student.id}/assign/',
+            {'bed_id': self.beds[0].id},
+        )
+        self.assertEqual(assign.status_code, 200, assign.data)
+
+    def test_central_admin_can_cancel_source_regions_pending_transfer(self):
+        admin_client = APIClient()
+        admin_client.force_authenticate(self.admin)
+        resp = admin_client.put(f'/api/requests/{self.req.id}/cancel/')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.status, 'cancelled')
+
+    def test_unrelated_region_user_cannot_cancel(self):
+        other_region = _make_region('OtherRegion')
+        other_boss = _make_region_boss(other_region, email='other-boss@test.com')
+        other_client = APIClient()
+        other_client.force_authenticate(other_boss)
+
+        # StudentRequestViewSet.get_queryset() already scopes a non-central
+        # user's visible requests to their own region (requested_by/
+        # student/target_room region) - an unrelated region's request is
+        # invisible before cancel()'s own is_requester/_user_can_review_
+        # request check is ever reached, so this 404s rather than 403s.
+        # Same behavior approve()/reject() already have on this viewset.
+        resp = other_client.put(f'/api/requests/{self.req.id}/cancel/')
+        self.assertEqual(resp.status_code, 404)
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.status, 'pending')
+
+    def test_unauthenticated_cannot_cancel(self):
+        resp = APIClient().put(f'/api/requests/{self.req.id}/cancel/')
+        self.assertEqual(resp.status_code, 401)
+
+    def test_cannot_cancel_already_rejected_request(self):
+        self.req.status = StudentRequest.Status.REJECTED
+        self.req.reviewed_by = self.admin
+        self.req.reviewed_at = timezone.now()
+        self.req.save()
+
+        resp = self.client.put(f'/api/requests/{self.req.id}/cancel/')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_cannot_cancel_already_cancelled_request(self):
+        self.req.status = StudentRequest.Status.CANCELLED
+        self.req.reviewed_by = self.boss
+        self.req.reviewed_at = timezone.now()
+        self.req.save()
+
+        resp = self.client.put(f'/api/requests/{self.req.id}/cancel/')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_cannot_cancel_already_approved_request(self):
+        admin_client = APIClient()
+        admin_client.force_authenticate(self.admin)
+        approve = admin_client.put(f'/api/requests/{self.req.id}/approve/', {
+            'target_room': self.dest_room.id, 'bed_id': self.dest_beds[0].id,
+        })
+        self.assertEqual(approve.status_code, 200, approve.data)
+
+        resp = self.client.put(f'/api/requests/{self.req.id}/cancel/')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_approved_transfer_leaves_source_queue_for_good(self):
+        admin_client = APIClient()
+        admin_client.force_authenticate(self.admin)
+        approve = admin_client.put(f'/api/requests/{self.req.id}/approve/', {
+            'target_room': self.dest_room.id, 'bed_id': self.dest_beds[0].id,
+        })
+        self.assertEqual(approve.status_code, 200, approve.data)
+
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.assigned_room_id, self.dest_room.id)
+        self.assertTrue(
+            BedAssignment.objects.filter(
+                student=self.student, bed__in=self.dest_beds, status=BedAssignment.Status.ACTIVE,
+            ).exists()
+        )
+
+        # Gone from every source-region actionable/pending tab - the real
+        # BedAssignment is authoritative, not a frontend boolean.
+        pending = self.client.get('/api/assisted-allocation/queue/', {'tab': 'transfer_pending'})
+        self.assertNotIn('XFER001', {s['student_id'] for s in pending.data['students']})
+        unassigned = self.client.get('/api/assisted-allocation/queue/', {'tab': 'unassigned'})
+        self.assertNotIn('XFER001', {s['student_id'] for s in unassigned.data['students']})
+
+        detail = self.client.get(f'/api/assisted-allocation/students/{self.student.id}/detail/')
+        self.assertEqual(detail.data['student']['group'], 'resolved')

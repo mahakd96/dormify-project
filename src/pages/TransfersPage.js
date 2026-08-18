@@ -37,6 +37,7 @@ const TYPE_CFG = {
   add_student:    { color:'blue',   labelHe:'הוספת סטודנט', labelEn:'Add Student',      Icon: UserPlus  },
   remove_student: { color:'rose',   labelHe:'הסרה ממעונות', labelEn:'Remove Student',   Icon: UserMinus },
   swap:           { color:'indigo', labelHe:'חילוף בין סטודנטים', labelEn:'Student Swap', Icon: RefreshCw },
+  region_transfer:{ color:'violet', labelHe:'העברה בין אזורים', labelEn:'Region Transfer', Icon: MapPin },
 };
 // Cross-region transfers are stored as room/apartment + transfer_scope -
 // but must never be LABELED "מעבר מדירה"; the scope is the meaningful type.
@@ -245,6 +246,10 @@ function buildT(isHe) {
 
     // ── ActionPanel ──
     actionsLabel: p('פעולות', 'Actions'),
+    pendingDestinationReviewNote: p(
+      'בקשת ההעברה ממתינה לבדיקה ואישור על ידי אזור היעד',
+      "The transfer request is awaiting review and approval by the destination region"
+    ),
     rejectPlaceholder: p('סיבת הדחייה (אופציונלי)...', 'Rejection reason (optional)...'),
     rejectBtn: p('דחה', 'Reject'),
     approveRemoveBtn: p('אשר הסרה', 'Confirm Removal'),
@@ -962,6 +967,7 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
   roomId, onSetRoom,
   selFeasOpt, onSelFeasOpt, T, language }) => {
 
+  const { canEditRegion } = useAuth();
   const [rejectText, setRejectText] = useState('');
   const [showReject, setShowReject] = useState(false);
   const isAdd = request.request_type==='add_student';
@@ -970,6 +976,28 @@ const ActionPanel = ({ request, onApprove, onReject, acting,
   const hasFeas = feasData?.feasible !== undefined;
 
   if (request.status!=='pending') return null;
+
+  // A region_transfer's approve/reject authority is the DESTINATION
+  // region (or central admin) - see _user_can_review_request() in
+  // views.py, which the backend already enforces regardless of what the
+  // frontend shows. canEditRegion() is the same region-authority check
+  // already used elsewhere in the app (EDIT_ANY_REGION for central admin,
+  // EDIT_OWN_REGION matched against the target region for a regional
+  // boss), reused here rather than re-derived, so this can never drift
+  // from the backend's own rule. The SOURCE region (and any unrelated
+  // region) can still see this request in the list/detail pane - they
+  // just get a status note here instead of action buttons they could
+  // never actually use.
+  if (request.request_type === 'region_transfer' && !canEditRegion(request.target_region)) {
+    return (
+      <div className="action-panel">
+        <span className="ap-label">{T.actionsLabel}</span>
+        <div className="scope-region-note">
+          <MapPin size={13}/> {T.pendingDestinationReviewNote}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="action-panel">
