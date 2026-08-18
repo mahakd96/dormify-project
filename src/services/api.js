@@ -722,6 +722,10 @@ export const studentsAPI = {
           isStatus(s, ["leaving", "leave", "׳¢׳–׳™׳‘׳”", "׳¢׳•׳–׳‘"])
         ).length;
 
+        const unassigned = list.filter(
+  (s) => !s.is_assigned && s.category !== 'leaving'
+).length;
+
         return {
           total,
           all: total,
@@ -740,6 +744,9 @@ export const studentsAPI = {
 
           leaving,
           leaving_students: leaving,
+
+          unassigned,
+
         };
       } catch (fallbackErr) {
         console.warn(
@@ -757,6 +764,8 @@ export const studentsAPI = {
           new_students: 0,
           transferring: 0,
           leaving: 0,
+          unassigned: 0,
+
         };
       }
     }
