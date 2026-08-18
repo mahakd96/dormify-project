@@ -1,9 +1,11 @@
+import { getAccessToken } from './api';
+
 const API_BASE_URL =
   process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
 
-function getAccessToken() {
-  return localStorage.getItem('dormify_access_token');
-}
+// G3-17: the access token lives only in services/api.js's in-memory
+// module state now (never localStorage) - imported here rather than
+// duplicating a second copy of the auth mechanism.
 
 async function apiRequest(path, options = {}) {
   const token = getAccessToken();
