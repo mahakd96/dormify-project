@@ -37,8 +37,11 @@ function Sidebar({ collapsed, onToggle, language }) {
   // ✅ FIX: your AuthContext provides canManageUsers() now (alias)
   const canManageUsers = typeof auth?.canManageUsers === 'function' ? auth.canManageUsers : () => false;
 
-  const handleLogout = () => {
-    if (typeof logout === 'function') logout();
+  const handleLogout = async () => {
+    // G3-14: logout() now calls the backend to revoke the refresh token -
+    // awaited so that happens before navigating away, though the in-memory
+    // auth state is cleared either way even if the network call fails.
+    if (typeof logout === 'function') await logout();
     navigate('/login');
   };
 
