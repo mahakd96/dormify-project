@@ -61,6 +61,13 @@ function Spinner({ size = 16 }) {
   return <Loader2 size={size} className="aa-spin" />;
 }
 
+// Same he-IL date formatting convention as TransfersPage.js's fmtDate.
+const fmtDate = (iso) => {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleDateString('he-IL', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+  catch { return iso; }
+};
+
 function MetricChip({ label, value, active, onClick, tone }) {
   return (
     <button type="button" className={`aa-metric aa-metric-${tone}${active ? ' aa-metric-active' : ''}`} onClick={onClick}>
@@ -73,6 +80,7 @@ function MetricChip({ label, value, active, onClick, tone }) {
 function GroupBadge({ group, T }) {
   if (group === 'accessibility') return <span className="aa-badge aa-badge-accessibility"><Accessibility size={11} /> {T.badgeAccessibility}</span>;
   if (group === 'resolved') return <span className="aa-badge aa-badge-resolved"><CheckCircle2 size={11} /> {T.badgeResolved}</span>;
+  if (group === 'transfer_pending') return <span className="aa-badge aa-badge-transfer"><Send size={11} /> {T.badgeTransferPending}</span>;
   return <span className="aa-badge aa-badge-unassigned"><UserX size={11} /> {T.badgeUnassigned}</span>;
 }
 
@@ -89,7 +97,6 @@ function StudentRow({ student, selected, onSelect, T }) {
         {student.gender && <span className="aa-tag">{T.genderOf(student.gender)}</span>}
         {student.region && <span className="aa-tag">{student.region}</span>}
         {student.accepted_dorm_type && <span className="aa-tag">{student.accepted_dorm_type}</span>}
-        {student.is_transfer_requested && <span className="aa-tag aa-tag-transfer">{T.tagTransferring}</span>}
       </div>
     </button>
   );
@@ -205,7 +212,7 @@ function SelectionPanel({ student, selection, onClear, onConfirm, confirming, er
   );
 }
 
-function ConfirmDialog({ title, onCancel, onConfirm, confirming, error, confirmLabel, children, danger, T }) {
+function ConfirmDialog({ title, onCancel, onConfirm, confirming, disableConfirm, error, confirmLabel, children, danger, T }) {
   return (
     <div className="aa-modal-backdrop" onClick={onCancel}>
       <div className="aa-modal" onClick={(e) => e.stopPropagation()}>
@@ -220,7 +227,7 @@ function ConfirmDialog({ title, onCancel, onConfirm, confirming, error, confirmL
           <button
             type="button"
             className={`aa-btn ${danger ? 'aa-btn-danger' : 'aa-btn-primary'}`}
-            disabled={confirming}
+            disabled={confirming || !!disableConfirm}
             onClick={onConfirm}
           >
             {confirming ? <Spinner size={13} /> : confirmLabel}
@@ -247,10 +254,15 @@ function buildT(isHe) {
     badgeAccessibility: p('נגישות', 'Accessibility'),
     badgeResolved: p('טופל', 'Resolved'),
     badgeUnassigned: p('לא משובץ', 'Unassigned'),
-    tagTransferring: p('בהעברה', 'Transferring'),
+    badgeTransferPending: p('בהעברה', 'Transferring'),
 
     locBuildingApt: (b, a) => p(`בניין ${b ?? ''} · דירה ${a ?? ''}`, `Building ${b ?? ''} · Apt ${a ?? ''}`),
     locBuilding: (b) => p(`בניין ${b ?? ''}`, `Building ${b ?? ''}`),
+    loc3WithRegion: (region, b, a, r) => p(
+      `${region ? `${region} · ` : ''}בניין ${b ?? ''} · דירה ${a ?? ''} · חדר ${r ?? ''}`,
+      `${region ? `${region} · ` : ''}Building ${b ?? ''} · Apt ${a ?? ''} · Room ${r ?? ''}`,
+    ),
+    alreadyPlacedTitle: p('הסטודנט/ית כבר משובץ/ת', 'Student is already placed'),
     bedsWillFree: (n) => p(`${n} מיטות יתפנו`, `${n} beds will free up`),
     suitsStudentsInQueue: (n) => p(`מתאים ל־${n} סטודנטים בתור`, `Suits ${n} students in queue`),
     relevantToSelected: p('רלוונטי לסטודנט/ית הנבחר/ת', 'Relevant to the selected student'),
@@ -285,6 +297,7 @@ function buildT(isHe) {
     emptyUnassignedDone: p('כל הסטודנטים באזור שובצו', 'All students in the region have been assigned'),
     emptyResolvedNone: p('אין פעולות שיבוץ שבוצעו עדיין', 'No assignment actions performed yet'),
     emptyNeedsPlacementNone: p('אין סטודנטים הממתינים לטיפול', 'No students awaiting placement'),
+    emptyTransferPendingNone: p('אין בקשות העברה ממתינות', 'No pending transfer requests'),
     detailLoadError: p('שגיאה בטעינת פרטי הסטודנט', "Failed to load the student's details"),
     selectStudentPrompt: p('בחרו סטודנט מהרשימה כדי להתחיל', 'Select a student from the list to begin'),
     recLoadError: p('שגיאה בטעינת אפשרויות שיבוץ', 'Failed to load assignment options'),
@@ -329,17 +342,42 @@ function buildT(isHe) {
 
     transferDialogTitle: p('בקשת העברה לאזור אחר', 'Transfer Request to Another Region'),
     transferDialogConfirmLabel: p('שליחת בקשה', 'Send Request'),
+    transferRegionLabel: p('אזור יעד', 'Destination region'),
+    transferRegionPlaceholder: p('בחר/י אזור יעד', 'Select a destination region'),
     transferReasonLabel: p('סיבה', 'Reason'),
     transferReasonPlaceholder: p('לדוגמה: אין מקום פנוי באזור התואם לסטודנט', "e.g. no free place in the student's matching region"),
+    errNeedRegion: p('יש לבחור אזור יעד', 'A destination region is required'),
     errNeedReason: p('יש להזין סיבה', 'A reason is required'),
+    loadingEllipsis: p('טוען...', 'Loading...'),
+    errLoadTargetRegions: p('לא ניתן לטעון את אזורי היעד', 'Could not load the destination regions'),
+    noTargetRegionsFound: p('לא נמצאו אזורי יעד זמינים להעברה', 'No destination regions are available for transfer'),
 
     successOverrideAssigned: p('השיבוץ בוצע בחריגה', 'Assignment completed with an override'),
     successAssigned: p('הסטודנט שובץ בהצלחה', 'The student was assigned successfully'),
     errAssignFailed: p('השיבוץ נכשל', 'Assignment failed'),
     successConfigUpdated: p('הגדרת הדירה עודכנה', 'Apartment configuration updated'),
     errConfigUpdateFailed: p('עדכון ההגדרה נכשל', 'Configuration update failed'),
-    successTransferSent: p('בקשת ההעברה נשלחה', 'Transfer request sent'),
+    successTransferSent: p('בקשת ההעברה נשלחה וממתינה לאישור', 'Transfer request sent and is now pending approval'),
     errTransferFailed: p('שליחת הבקשה נכשלה', 'Failed to send the request'),
+
+    activeTransferTitle: p('בקשת העברה פעילה', 'Active Transfer Request'),
+    tsStatus: p('סטטוס', 'Status'),
+    tsSourceRegion: p('אזור מקור', 'Source region'),
+    tsTargetRegion: p('אזור יעד', 'Target region'),
+    tsReason: p('סיבה', 'Reason'),
+    tsSentAt: p('נשלח בתאריך', 'Submitted on'),
+    tsSentBy: p('נשלח על ידי', 'Submitted by'),
+    tsHandledBy: p('טופל על ידי', 'Handled by'),
+    tsHandledAt: p('תאריך טיפול', 'Handled on'),
+    cancelTransferBtn: p('ביטול בקשת העברה', 'Cancel Transfer Request'),
+    cancelTransferDialogTitle: p('ביטול בקשת העברה', 'Cancel Transfer Request'),
+    cancelTransferDialogConfirmLabel: p('ביטול הבקשה', 'Cancel Request'),
+    cancelTransferDialogBody: p(
+      'הבקשה תבוטל והסטודנט/ית יחזור/תחזור לטיפול מקומי רגיל באזור הנוכחי. הפעולה אינה מבטלת שיבוץ שכבר בוצע.',
+      "The request will be cancelled and the student will return to the normal local queue in the current region. This does not undo an assignment that has already been completed."
+    ),
+    successTransferCancelled: p('בקשת ההעברה בוטלה', 'Transfer request cancelled'),
+    errTransferCancelFailed: p('ביטול הבקשה נכשל', 'Failed to cancel the request'),
   };
 }
 
@@ -379,8 +417,17 @@ export default function AssistedAllocationPage({ language = 'he' }) {
 
   const [configDialog, setConfigDialog] = useState(null); // { opportunity, submitting, error }
   const [transferDialog, setTransferDialog] = useState(null); // { reason, submitting, error }
+  const [transferTargetRegions, setTransferTargetRegions] = useState([]);
+  const [transferTargetRegionsLoading, setTransferTargetRegionsLoading] = useState(false);
+  const [transferTargetRegionsError, setTransferTargetRegionsError] = useState('');
+  const [cancelTransferDialog, setCancelTransferDialog] = useState(null); // { requestId, submitting, error }
 
   useEffect(() => {
+    // The central-admin-only region filter dropdown above the queue.
+    // NOT used for the transfer dialog's destination-region picker - that
+    // uses requestsAPI.getTransferTargetRegions() instead, since
+    // regionsAPI.getAll() (RegionViewSet) intentionally scopes a
+    // non-central user to only their own region.
     if (isCentralAdmin()) {
       regionsAPI.getAll().then(setRegions).catch(() => setRegions([]));
     }
@@ -498,9 +545,29 @@ export default function AssistedAllocationPage({ language = 'he' }) {
     }
   };
 
-  const openTransferDialog = () => setTransferDialog({ reason: '', submitting: false, error: '' });
+  const openTransferDialog = () => {
+    setTransferDialog({ reason: '', targetRegion: '', submitting: false, error: '' });
+    setTransferTargetRegionsError('');
+    setTransferTargetRegionsLoading(true);
+    requestsAPI.getTransferTargetRegions()
+      .then(setTransferTargetRegions)
+      .catch((e) => { setTransferTargetRegions([]); setTransferTargetRegionsError(e.message || T.errLoadTargetRegions); })
+      .finally(() => setTransferTargetRegionsLoading(false));
+  };
+
+  // A region_transfer request only needs its destination region at creation
+  // time - the destination dorm type/room is chosen later, at approval, via
+  // the same feasibility-check + bed-picker flow TransfersPage already uses
+  // for every other request type (see StudentRequestViewSet.feasibility()/
+  // approve() branching on request_type===REGION_TRANSFER). So the only
+  // required field here beyond the reason is target_region.
+  const transferDialogValid = !!transferDialog?.targetRegion && !!transferDialog?.reason?.trim();
 
   const confirmTransfer = async () => {
+    if (!transferDialog?.targetRegion) {
+      setTransferDialog((prev) => ({ ...prev, error: T.errNeedRegion }));
+      return;
+    }
     if (!transferDialog?.reason?.trim()) {
       setTransferDialog((prev) => ({ ...prev, error: T.errNeedReason }));
       return;
@@ -510,6 +577,7 @@ export default function AssistedAllocationPage({ language = 'he' }) {
       await requestsAPI.create({
         student: selectedId,
         request_type: 'region_transfer',
+        target_region: transferDialog.targetRegion,
         reason: transferDialog.reason.trim(),
         priority: 'high',
       });
@@ -521,14 +589,42 @@ export default function AssistedAllocationPage({ language = 'he' }) {
     }
   };
 
+  const openCancelTransferDialog = () => {
+    if (!detail?.pending_transfer_request?.id) return;
+    setCancelTransferDialog({ requestId: detail.pending_transfer_request.id, submitting: false, error: '' });
+  };
+
+  const confirmCancelTransfer = async () => {
+    if (!cancelTransferDialog) return;
+    setCancelTransferDialog((prev) => ({ ...prev, submitting: true, error: '' }));
+    try {
+      await requestsAPI.cancel(cancelTransferDialog.requestId);
+      setCancelTransferDialog(null);
+      setSuccessMessage(T.successTransferCancelled);
+      refreshAfterAction();
+    } catch (e) {
+      setCancelTransferDialog((prev) => ({ ...prev, submitting: false, error: e.message || T.errTransferCancelFailed }));
+    }
+  };
+
   const counts = queueData.counts || {};
   const students = queueData.students || [];
+
+  // Destination regions for the transfer dialog: every legal transfer
+  // target (requestsAPI.getTransferTargetRegions() - NOT the central-admin-
+  // scoped `regions` state above) except the student's current one (this
+  // action is explicitly "transfer to ANOTHER region" - target_region is
+  // the student's accepted-dorm-type region, per
+  // _assisted_allocation_student_row()). Students with no accepted dorm
+  // type/region yet (region_id === '') get the full list.
+  const transferDestinationRegions = transferTargetRegions.filter((r) => r.id !== detail?.student?.region_id);
 
   const emptyQueueMessage = useMemo(() => {
     if (queueLoading || students.length > 0) return null;
     if (tab === 'accessibility') return T.emptyAccessibilityDone;
     if (tab === 'unassigned') return T.emptyUnassignedDone;
     if (tab === 'resolved') return T.emptyResolvedNone;
+    if (tab === 'transfer_pending') return T.emptyTransferPendingNone;
     return T.emptyNeedsPlacementNone;
   }, [queueLoading, students.length, tab]); // eslint-disable-line
 
@@ -556,7 +652,7 @@ export default function AssistedAllocationPage({ language = 'he' }) {
         <MetricChip label={TAB_LABEL.accessibility} value={counts.accessibility_pending ?? '—'} tone="violet" active={tab === 'accessibility'} onClick={() => setTab('accessibility')} />
         <MetricChip label={TAB_LABEL.unassigned} value={counts.unassigned ?? '—'} tone="amber" active={tab === 'unassigned'} onClick={() => setTab('unassigned')} />
         <MetricChip label={TAB_LABEL.resolved} value={counts.resolved ?? '—'} tone="green" active={tab === 'resolved'} onClick={() => setTab('resolved')} />
-        <MetricChip label={T.metricTransferring} value={counts.transfer_requested ?? '—'} tone="gray" active={false} onClick={() => {}} />
+        <MetricChip label={T.metricTransferring} value={counts.transfer_requested ?? '—'} tone="gray" active={tab === 'transfer_pending'} onClick={() => setTab('transfer_pending')} />
       </div>
 
       <div className="aa-body">
@@ -650,6 +746,70 @@ export default function AssistedAllocationPage({ language = 'he' }) {
 
               {actionError && <div className="aa-error-pane">{actionError}</div>}
 
+              {detail.student.group === 'resolved' ? (
+                // The student already has a real, persisted ACTIVE
+                // BedAssignment (detail.student.group is computed
+                // server-side from student.is_assigned - see
+                // assisted_allocation_student_detail() in views.py).
+                // Never show the placement workbench for a resolved
+                // student: assisted_allocation_recommendations() now
+                // returns zero candidates for them too (defense in depth),
+                // but rendering the tiers at all invited staff to "assign"
+                // an already-placed student again, silently moving them to
+                // a different bed with no indication anything had already
+                // been saved. This is the fix for that.
+                <div className="aa-resolved-panel">
+                  <CheckCircle2 size={16} />
+                  <div>
+                    <div className="aa-resolved-title">{T.alreadyPlacedTitle}</div>
+                    {detail.current_placement?.assigned && (
+                      <div className="aa-resolved-loc">
+                        {T.loc3WithRegion(
+                          detail.current_placement.region_name,
+                          detail.current_placement.building_number,
+                          detail.current_placement.apartment_number,
+                          detail.current_placement.room_name,
+                        )}
+                        {detail.current_placement.bed_label ? ` · ${detail.current_placement.bed_label}` : ''}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : detail.student.group === 'transfer_pending' ? (
+                // A pending region_transfer request takes the student out
+                // of the local placement workbench entirely (same
+                // is_assigned-style guard, extended to this state - see
+                // _pending_region_transfer() in views.py, reused by the
+                // queue, this detail endpoint, recommendations, and the
+                // assign/override write endpoints). Read-only status only,
+                // reusing the SAME StudentRequest data TransfersPage
+                // renders/approves/rejects (StudentRequestSerializer via
+                // detail.pending_transfer_request) - nothing here is a
+                // second, independently-tracked transfer state.
+                <div className="aa-transfer-status-panel">
+                  <div className="aa-transfer-status-head">
+                    <Send size={16} />
+                    <span>{T.activeTransferTitle}</span>
+                  </div>
+                  <div className="aa-transfer-status-rows">
+                    <div className="aa-ts-row"><span>{T.tsStatus}</span><strong>{detail.pending_transfer_request?.status_display}</strong></div>
+                    <div className="aa-ts-row"><span>{T.tsSourceRegion}</span><strong>{detail.pending_transfer_request?.source_region_name || detail.student.region || '—'}</strong></div>
+                    <div className="aa-ts-row"><span>{T.tsTargetRegion}</span><strong>{detail.pending_transfer_request?.target_region_name || '—'}</strong></div>
+                    {detail.pending_transfer_request?.reason && (
+                      <div className="aa-ts-row"><span>{T.tsReason}</span><strong>{detail.pending_transfer_request.reason}</strong></div>
+                    )}
+                    <div className="aa-ts-row"><span>{T.tsSentAt}</span><strong>{fmtDate(detail.pending_transfer_request?.created_at)}</strong></div>
+                    <div className="aa-ts-row"><span>{T.tsSentBy}</span><strong>{detail.pending_transfer_request?.requested_by_name || '—'}</strong></div>
+                    {detail.pending_transfer_request?.reviewed_by_name && (<>
+                      <div className="aa-ts-row"><span>{T.tsHandledBy}</span><strong>{detail.pending_transfer_request.reviewed_by_name}</strong></div>
+                      <div className="aa-ts-row"><span>{T.tsHandledAt}</span><strong>{fmtDate(detail.pending_transfer_request?.reviewed_at)}</strong></div>
+                    </>)}
+                  </div>
+                  <button type="button" className="aa-btn aa-btn-secondary" onClick={openCancelTransferDialog}>
+                    <X size={13} /> {T.cancelTransferBtn}
+                  </button>
+                </div>
+              ) : (
               <div className="aa-tiers">
                 <section className="aa-tier">
                   <h3>{T.tierAssignmentOptionsTitle}{rec?.accepted_dorm_type ? ` — ${rec.accepted_dorm_type.name}` : ''}</h3>
@@ -712,16 +872,20 @@ export default function AssistedAllocationPage({ language = 'he' }) {
 
                 <section className="aa-tier">
                   <h3>{T.tierTransferTitle}</h3>
+                  {/* Reaching this tier at all already means the student has
+                      no pending region_transfer - detail.student.group would
+                      be 'transfer_pending' otherwise, and this whole tiers
+                      block is replaced by the transfer-status panel above -
+                      so there is no "already requested" case to guard here. */}
                   <p className="aa-tier-hint">
-                    {noCandidatesInDormType
-                      ? T.transferHintNoCandidates
-                      : T.transferHintDefault}
+                    {noCandidatesInDormType ? T.transferHintNoCandidates : T.transferHintDefault}
                   </p>
                   <button type="button" className={`aa-btn ${noCandidatesInDormType ? 'aa-btn-primary' : 'aa-btn-secondary'}`} onClick={openTransferDialog}>
                     <Send size={13} /> {T.createTransferBtn}
                   </button>
                 </section>
               </div>
+              )}
 
               {detail.history?.length > 0 && (
                 <section className="aa-tier">
@@ -766,23 +930,67 @@ export default function AssistedAllocationPage({ language = 'he' }) {
         </ConfirmDialog>
       )}
 
-      {transferDialog && (
+      {transferDialog && detail && (
         <ConfirmDialog
           title={T.transferDialogTitle}
           onCancel={() => setTransferDialog(null)}
           onConfirm={confirmTransfer}
           confirming={transferDialog.submitting}
+          disableConfirm={!transferDialogValid}
           error={transferDialog.error}
           confirmLabel={T.transferDialogConfirmLabel}
           T={T}
         >
-          <label className="aa-field-label">{T.transferReasonLabel}</label>
+          <div className="aa-transfer-student-summary">
+            <strong>{detail.student.full_name}</strong>
+            <span>{detail.student.student_id}</span>
+            {detail.student.region && <span>{detail.student.region}</span>}
+          </div>
+
+          <label className="aa-field-label">{T.transferRegionLabel}<span className="aa-req">*</span></label>
+          {transferTargetRegionsLoading ? (
+            <div className="aa-transfer-region-status"><Spinner size={13} /> {T.loadingEllipsis}</div>
+          ) : transferTargetRegionsError ? (
+            <div className="aa-transfer-region-status aa-transfer-region-status-err">
+              <AlertTriangle size={13} /> {T.errLoadTargetRegions}
+            </div>
+          ) : transferDestinationRegions.length === 0 ? (
+            <div className="aa-transfer-region-status">{T.noTargetRegionsFound}</div>
+          ) : (
+            <select
+              className="aa-transfer-region-select"
+              value={transferDialog.targetRegion}
+              onChange={(e) => setTransferDialog((prev) => ({ ...prev, targetRegion: e.target.value }))}
+            >
+              <option value="">{T.transferRegionPlaceholder}</option>
+              {transferDestinationRegions.map((r) => (
+                <option key={r.id} value={r.id}>{r.name}</option>
+              ))}
+            </select>
+          )}
+
+          <label className="aa-field-label">{T.transferReasonLabel}<span className="aa-req">*</span></label>
           <textarea
             rows={3}
             value={transferDialog.reason}
             onChange={(e) => setTransferDialog((prev) => ({ ...prev, reason: e.target.value }))}
             placeholder={T.transferReasonPlaceholder}
           />
+        </ConfirmDialog>
+      )}
+
+      {cancelTransferDialog && (
+        <ConfirmDialog
+          title={T.cancelTransferDialogTitle}
+          onCancel={() => setCancelTransferDialog(null)}
+          onConfirm={confirmCancelTransfer}
+          confirming={cancelTransferDialog.submitting}
+          error={cancelTransferDialog.error}
+          confirmLabel={T.cancelTransferDialogConfirmLabel}
+          danger
+          T={T}
+        >
+          <p className="aa-note-line">{T.cancelTransferDialogBody}</p>
         </ConfirmDialog>
       )}
 
@@ -833,12 +1041,12 @@ export default function AssistedAllocationPage({ language = 'he' }) {
         .aa-row-tags { display: flex; flex-wrap: wrap; gap: 5px; }
 
         .aa-tag { font-size: 11px; background: #f4f5f7; color: #42526e; padding: 2px 8px; border-radius: 999px; }
-        .aa-tag-transfer { background: #eae6ff; color: #5243aa; }
 
         .aa-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; }
         .aa-badge-accessibility { background: #eae6ff; color: #5243aa; }
         .aa-badge-unassigned { background: #fff7e6; color: #974f0c; }
         .aa-badge-resolved { background: #e3fcef; color: #006644; }
+        .aa-badge-transfer { background: #f4f5f7; color: #42526e; }
 
         .aa-detail { background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(23,43,77,0.1); padding: 18px; min-height: 400px; }
         .aa-center-pad { display: flex; justify-content: center; padding: 30px; color: #97a0af; }
@@ -864,6 +1072,18 @@ export default function AssistedAllocationPage({ language = 'he' }) {
         .aa-reason-banner svg { color: #974f0c; flex-shrink: 0; margin-top: 2px; }
         .aa-reason-title { font-weight: 700; font-size: 13.5px; margin-bottom: 6px; }
         .aa-reason-breakdown { display: flex; flex-wrap: wrap; gap: 6px; }
+
+        .aa-resolved-panel { display: flex; gap: 10px; background: #e3fcef; border: 1px solid #57d9a3; border-radius: 10px; padding: 14px; }
+        .aa-resolved-panel svg { color: #006644; flex-shrink: 0; margin-top: 2px; }
+        .aa-resolved-title { font-weight: 700; font-size: 13.5px; color: #006644; }
+        .aa-resolved-loc { font-size: 12.5px; color: #5e6c84; margin-top: 4px; }
+
+        .aa-transfer-status-panel { background: #fff; border: 1px solid #dfe1e6; border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+        .aa-transfer-status-head { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14.5px; color: #172b4d; }
+        .aa-transfer-status-rows { display: flex; flex-direction: column; gap: 8px; }
+        .aa-ts-row { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 6px 0; border-bottom: 1px solid #f4f5f7; }
+        .aa-ts-row span { color: #5e6c84; }
+        .aa-ts-row strong { font-weight: 600; text-align: end; }
 
         .aa-tiers { display: flex; flex-direction: column; gap: 22px; }
         .aa-tier h3 { font-size: 14.5px; font-weight: 700; margin-bottom: 8px; }
@@ -921,7 +1141,12 @@ export default function AssistedAllocationPage({ language = 'he' }) {
         .aa-override-box { display: flex; flex-direction: column; gap: 8px; }
         .aa-override-title { display: flex; align-items: center; gap: 6px; font-weight: 800; color: #92400e; font-size: 13px; }
         .aa-field-label { font-size: 12.5px; font-weight: 600; color: #5e6c84; margin-top: 2px; }
-        .aa-override-box textarea, .aa-modal-body textarea { width: 100%; border: 1px solid #dfe1e6; border-radius: 8px; padding: 8px 10px; font-family: inherit; font-size: 13px; resize: vertical; }
+        .aa-req { color: #ae2e24; margin-inline-start: 2px; }
+        .aa-override-box textarea, .aa-modal-body textarea, .aa-modal-body select { width: 100%; border: 1px solid #dfe1e6; border-radius: 8px; padding: 8px 10px; font-family: inherit; font-size: 13px; resize: vertical; background: #fff; }
+        .aa-transfer-student-summary { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; background: #f4f5f7; border-radius: 8px; padding: 8px 10px; font-size: 12.5px; color: #5e6c84; }
+        .aa-transfer-student-summary strong { font-size: 13.5px; color: #172b4d; }
+        .aa-transfer-region-status { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: #5e6c84; padding: 8px 10px; background: #f4f5f7; border-radius: 8px; }
+        .aa-transfer-region-status-err { background: #ffebe6; color: #bf2600; }
 
         .aa-confirm-btn { align-self: flex-start; margin-top: 4px; }
 

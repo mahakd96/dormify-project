@@ -345,3 +345,177 @@ class ApprovalTests(TransferRegionTestBase):
         self.assertTrue(BedAssignment.objects.filter(
             student=self.student, bed__room=self.room_a1, status='active').exists(),
             'the current assignment must survive a failed transfer')
+
+
+# ---------------------------------------------------------------------------
+# /api/requests/transfer-target-regions/ - the region_transfer destination
+# picker. Deliberately NOT /api/regions/: RegionViewSet.get_queryset() scopes
+# a non-central user to only their own region, which is correct for general
+# operational access but would leave a regional employee unable to see any
+# other region to request a transfer to (region_transfer creation itself has
+# no role/region restriction - see StudentRequestSerializer.validate() - only
+# its approval is central-admin-gated).
+# ---------------------------------------------------------------------------
+
+class TransferTargetRegionsTests(TransferRegionTestBase):
+    def test_regular_regions_endpoint_still_scoped_to_own_region_for_regional_user(self):
+        resp = self._client(self.boss_a).get('/api/regions/')
+        ids = {r['id'] for r in resp.data}
+        self.assertEqual(ids, {self.region_a.id})
+
+    def test_transfer_target_regions_unscoped_for_regional_user(self):
+        resp = self._client(self.boss_a).get('/api/requests/transfer-target-regions/')
+        self.assertEqual(resp.status_code, 200)
+        ids = {r['id'] for r in resp.data}
+        self.assertEqual(ids, {self.region_a.id, self.region_b.id, self.region_c.id})
+        # Minimal shape only - id + name, nothing operational.
+        self.assertEqual(set(resp.data[0].keys()), {'id', 'name'})
+
+    def test_transfer_target_regions_same_for_central_admin(self):
+        resp = self._client(self.admin).get('/api/requests/transfer-target-regions/')
+        self.assertEqual(resp.status_code, 200)
+        ids = {r['id'] for r in resp.data}
+        self.assertEqual(ids, {self.region_a.id, self.region_b.id, self.region_c.id})
+
+    def test_transfer_target_regions_requires_authentication(self):
+        resp = APIClient().get('/api/requests/transfer-target-regions/')
+        self.assertEqual(resp.status_code, 401)
+
+    def test_transfer_target_regions_does_not_grant_cross_region_inventory_access(self):
+        # Seeing region B/C's id+name must not translate into any ability
+        # to read region B's buildings/rooms - Building/Room scoping is
+        # untouched by this endpoint.
+        resp = self._client(self.boss_a).get('/api/buildings/')
+        building_ids = {b['id'] for b in resp.data}
+        # room_b1's building (region B) must not be visible to boss_a.
+        b_building_id = self.room_b1.apartment.building_id
+        self.assertNotIn(b_building_id, building_ids)
+
+
+# ---------------------------------------------------------------------------
+# region_transfer approval ownership: the DESTINATION region owns the
+# incoming-placement decision (it has the inventory, checks availability,
+# and approves/rejects) - not the source region the student is leaving.
+# The source region keeps read-only visibility (outgoing status) and keeps
+# withdrawal authority (a source-side decision), but never approve/reject
+# authority over its own outgoing request.
+# ---------------------------------------------------------------------------
+
+class RegionTransferApprovalOwnershipTests(TransferRegionTestBase):
+    def setUp(self):
+        super().setUp()
+        self.boss_c = _make_user('bossc@test.com', User.Role.REGION_BOSS, self.region_c)
+        # self.student already lives in room_a1 (region A) via a real
+        # BedAssignment (set up by the base class) - region A is the
+        # SOURCE, region B is the DESTINATION for this transfer.
+        self.req = StudentRequest.objects.create(
+            student=self.student, request_type='region_transfer', reason='no room in A',
+            requested_by=self.employee_a, target_region=self.region_b,
+            source_region=self.region_a,
+            request_number='REQ-RTOWN00001',
+        )
+
+    def test_destination_boss_sees_request_in_list(self):
+        resp = self._client(self.boss_b).get('/api/requests/')
+        ids = {r['id'] for r in resp.data['results']} if 'results' in resp.data else {r['id'] for r in resp.data}
+        self.assertIn(self.req.id, ids)
+
+    def test_source_boss_still_sees_request_in_list(self):
+        # Read-only outgoing visibility is preserved for the source region.
+        resp = self._client(self.boss_a).get('/api/requests/')
+        ids = {r['id'] for r in resp.data['results']} if 'results' in resp.data else {r['id'] for r in resp.data}
+        self.assertIn(self.req.id, ids)
+
+    def test_unrelated_boss_cannot_see_request(self):
+        resp = self._client(self.boss_c).get('/api/requests/')
+        ids = {r['id'] for r in resp.data['results']} if 'results' in resp.data else {r['id'] for r in resp.data}
+        self.assertNotIn(self.req.id, ids)
+
+    def test_destination_boss_can_approve(self):
+        resp = self._client(self.boss_b).put(f'/api/requests/{self.req.id}/approve/', {
+            'target_room': self.room_b1.id,
+        }, format='json')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.status, 'approved')
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.assigned_room_id, self.room_b1.id)
+
+    def test_destination_boss_can_reject(self):
+        resp = self._client(self.boss_b).put(f'/api/requests/{self.req.id}/reject/', {
+            'reason': 'no capacity',
+        })
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.status, 'rejected')
+
+    def test_source_boss_cannot_approve(self):
+        resp = self._client(self.boss_a).put(f'/api/requests/{self.req.id}/approve/', {
+            'target_room': self.room_b1.id,
+        }, format='json')
+        self.assertEqual(resp.status_code, 403)
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.status, 'pending')
+
+    def test_source_boss_cannot_reject(self):
+        resp = self._client(self.boss_a).put(f'/api/requests/{self.req.id}/reject/', {
+            'reason': 'changed my mind',
+        })
+        self.assertEqual(resp.status_code, 403)
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.status, 'pending')
+
+    def test_unrelated_boss_cannot_approve_or_reject(self):
+        # Invisible in get_queryset() -> 404, not 403 (same pattern as
+        # every other viewset action gated by get_object()).
+        approve = self._client(self.boss_c).put(f'/api/requests/{self.req.id}/approve/', {
+            'target_room': self.room_b1.id,
+        }, format='json')
+        self.assertEqual(approve.status_code, 404)
+        reject = self._client(self.boss_c).put(f'/api/requests/{self.req.id}/reject/', {'reason': 'x'})
+        self.assertEqual(reject.status_code, 404)
+
+    def test_central_admin_can_approve(self):
+        resp = self.admin_client.put(f'/api/requests/{self.req.id}/approve/', {
+            'target_room': self.room_b1.id,
+        }, format='json')
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_central_admin_can_reject(self):
+        resp = self.admin_client.put(f'/api/requests/{self.req.id}/reject/', {'reason': 'x'})
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_feasibility_checked_against_destination_region_not_source(self):
+        resp = self._client(self.boss_b).get(f'/api/requests/{self.req.id}/feasibility/')
+        self.assertEqual(resp.status_code, 200)
+        region_ids = {r['id'] for r in resp.data['search_regions']}
+        self.assertEqual(region_ids, {self.region_b.id})
+
+    def test_source_boss_can_still_cancel_pending_transfer(self):
+        # Withdrawal remains a SOURCE-side decision - unaffected by the
+        # approve/reject ownership change above.
+        resp = self._client(self.boss_a).put(f'/api/requests/{self.req.id}/cancel/')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.status, 'cancelled')
+
+    def test_destination_boss_cannot_cancel(self):
+        # The destination region owns approve/reject, not withdrawal -
+        # cancelling is exclusively a source-side (or requester/central
+        # admin) action.
+        resp = self._client(self.boss_b).put(f'/api/requests/{self.req.id}/cancel/')
+        self.assertEqual(resp.status_code, 403)
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.status, 'pending')
+
+    def test_requester_can_still_cancel(self):
+        resp = self._client(self.employee_a).put(f'/api/requests/{self.req.id}/cancel/')
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_unauthenticated_cannot_approve_or_reject(self):
+        approve = APIClient().put(f'/api/requests/{self.req.id}/approve/', {
+            'target_room': self.room_b1.id,
+        }, format='json')
+        self.assertEqual(approve.status_code, 401)
+        reject = APIClient().put(f'/api/requests/{self.req.id}/reject/', {'reason': 'x'})
+        self.assertEqual(reject.status_code, 401)
