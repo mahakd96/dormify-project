@@ -20,7 +20,10 @@ router.register(r'requests', views.StudentRequestViewSet, basename='student-requ
 urlpatterns = [
     # Authentication
     path('auth/login/', views.login_view, name='login'),
-    path('auth/register/', views.register_view, name='register'),
+    # G3-01: public self-registration removed - see accounts.urls
+    # (/api/staff-users/) for the authorized staff-creation path.
+    path('auth/refresh/', views.refresh_view, name='token-refresh'),
+    path('auth/logout/', views.logout_view, name='logout'),
     path('auth/me/', views.me_view, name='me'),
     path('auth/change-password/', views.change_password_view, name='change-password'),
     path('auth/change-email/', views.change_email_view, name='change-email'),

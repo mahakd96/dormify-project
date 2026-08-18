@@ -83,36 +83,9 @@ class LoginSerializer(serializers.Serializer):
         return data
 
 
-class RegisterSerializer(serializers.ModelSerializer):
-    """Serialize registration request"""
-
-    password = serializers.CharField(write_only=True, min_length=6)
-
-    class Meta:
-        model = User
-        fields = [
-            'email',
-            'username',
-            'password',
-            'first_name',
-            'last_name',
-            'role',
-            'region',
-            'phone',
-        ]
-
-    def create(self, validated_data):
-        user = User.objects.create_user(
-            email=validated_data['email'],
-            username=validated_data.get('username', validated_data['email']),
-            password=validated_data['password'],
-            first_name=validated_data.get('first_name', ''),
-            last_name=validated_data.get('last_name', ''),
-            role=validated_data.get('role', User.Role.EMPLOYEE),
-            region=validated_data.get('region'),
-            phone=validated_data.get('phone', ''),
-        )
-        return user
+# G3-01: RegisterSerializer (backed the now-removed public /auth/register/
+# endpoint) intentionally deleted - the only authorized staff-creation path
+# is accounts.serializers.StaffUserSerializer via /api/staff-users/.
 
 
 # ===========================================
@@ -837,6 +810,15 @@ class StudentSerializer(serializers.ModelSerializer):
             'current_bed_label',
             'created_at',
             'updated_at',
+            # G3-06: assigned_room must never be settable through a direct
+            # Student PATCH/POST - it bypasses assign_student_to_room's
+            # locking, capacity checks, business validation, BedAssignment
+            # creation and audit trail entirely. All real placement changes
+            # go through room-assignments/assign|move|unassign/swap,
+            # StudentRequestViewSet.approve(), or assisted-allocation
+            # assign()/override() - every one of those writes assigned_room
+            # via the model layer (assign_student_to_room), not this field.
+            'assigned_room',
         ]
 
     def _current_bed_cached(self, obj):
@@ -1134,7 +1116,21 @@ class TransferSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        # G3-02/G3-22: status/reviewed_by/reviewed_at/rejection_reason are
+        # workflow-owned - they may only ever change through
+        # TransferViewSet.approve()/reject() (which apply
+        # user_can_approve_transfer(), the room-availability check, and
+        # create the actual BedAssignment), never through a generic
+        # PUT/PATCH to this serializer. requested_by is likewise
+        # system-owned (set from request.user in perform_create) so it can
+        # never be spoofed to misattribute who requested a transfer.
+        # movement_request is populated internally by perform_create/
+        # approve(), never client-supplied.
+        read_only_fields = [
+            'id', 'created_at', 'updated_at',
+            'status', 'reviewed_by', 'reviewed_at', 'rejection_reason',
+            'requested_by', 'movement_request',
+        ]
 
     def get_requested_by_name(self, obj):
         return obj.requested_by.get_full_name() or obj.requested_by.email

@@ -1,4 +1,5 @@
 from decimal import Decimal, InvalidOperation
+import os
 import re
 import threading
 from collections import defaultdict
@@ -6,13 +7,23 @@ import traceback
 import pandas as pd
 
 from rest_framework import viewsets, status, permissions
-from rest_framework.decorators import api_view, permission_classes, action
+from rest_framework.decorators import api_view, permission_classes, action, throttle_classes
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from rest_framework_simplejwt.settings import api_settings
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.exceptions import PermissionDenied as DRFPermissionDenied
+
+from django.conf import settings as django_settings
+
+from .throttling import (
+    LoginRateThrottle, SensitiveAccountActionRateThrottle,
+    TokenRefreshRateThrottle, LogoutRateThrottle,
+)
 
 from django.utils import timezone
 from django.db import transaction, IntegrityError
@@ -33,7 +44,7 @@ from .models import (
     AllocationRun, ImportBatch, RegionInbox, AssistedAllocationAudit
 )
 from .serializers import (
-    UserSerializer, LoginSerializer, RegisterSerializer,
+    UserSerializer, LoginSerializer,
     RegionSerializer, DormTypeSerializer, BuildingSerializer, ApartmentSerializer,
     RoomSerializer, BedSerializer, StudentSerializer, StudentListSerializer, TransferSerializer,
     StudentRequestSerializer,
@@ -55,8 +66,39 @@ class StandardResultsPagination(PageNumberPagination):
 # Auth Views
 # =========================
 
+def _set_refresh_cookie(response, refresh_token_str):
+    """
+    G3-14/G3-16/G3-17: the refresh token lives ONLY in an HttpOnly cookie -
+    it is never present in a JSON response body, so frontend JS can never
+    read or persist it (closing G3-17's localStorage exposure for the
+    refresh token specifically). Secure/SameSite/Path/Domain all come from
+    dormify.settings (see the JWT_REFRESH_COOKIE_* block there for the
+    DEBUG-gated rationale).
+    """
+    response.set_cookie(
+        django_settings.JWT_REFRESH_COOKIE_NAME,
+        refresh_token_str,
+        max_age=int(api_settings.REFRESH_TOKEN_LIFETIME.total_seconds()),
+        httponly=True,
+        secure=django_settings.JWT_REFRESH_COOKIE_SECURE,
+        samesite=django_settings.JWT_REFRESH_COOKIE_SAMESITE,
+        path=django_settings.JWT_REFRESH_COOKIE_PATH,
+        domain=django_settings.JWT_REFRESH_COOKIE_DOMAIN,
+    )
+
+
+def _clear_refresh_cookie(response):
+    response.delete_cookie(
+        django_settings.JWT_REFRESH_COOKIE_NAME,
+        path=django_settings.JWT_REFRESH_COOKIE_PATH,
+        domain=django_settings.JWT_REFRESH_COOKIE_DOMAIN,
+        samesite=django_settings.JWT_REFRESH_COOKIE_SAMESITE,
+    )
+
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([LoginRateThrottle])
 def login_view(request):
     serializer = LoginSerializer(data=request.data)
 
@@ -64,15 +106,16 @@ def login_view(request):
         user = serializer.validated_data['user']
         refresh = RefreshToken.for_user(user)
 
-        return Response({
+        response = Response({
             'message': 'התחברות בוצעה בהצלחה',
             'messageEn': 'Login successful',
             'user': UserSerializer(user).data,
-            'tokens': {
-                'access': str(refresh.access_token),
-                'refresh': str(refresh),
-            }
+            # Access token only - the refresh token goes out as an
+            # HttpOnly cookie below, never in the body (G3-17).
+            'access': str(refresh.access_token),
         })
+        _set_refresh_cookie(response, str(refresh))
+        return response
 
     return Response({
         'error': serializer.errors,
@@ -82,26 +125,85 @@ def login_view(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
-def register_view(request):
-    serializer = RegisterSerializer(data=request.data)
+@throttle_classes([TokenRefreshRateThrottle])
+def refresh_view(request):
+    """
+    G3-14/G3-16: reads the refresh token from the HttpOnly cookie (never
+    from the request body - frontend JS never has access to the raw
+    token), rotates it via SimpleJWT's own TokenRefreshSerializer (which
+    respects ROTATE_REFRESH_TOKENS/BLACKLIST_AFTER_ROTATION - the old
+    refresh token is blacklisted the moment a new one is issued), and
+    returns a fresh short-lived access token. Also returns the caller's
+    profile so the frontend can restore a full session (access token +
+    user) from this single call on page reload, without a second request
+    to /api/auth/me/.
+    """
+    raw_refresh = request.COOKIES.get(django_settings.JWT_REFRESH_COOKIE_NAME)
+    if not raw_refresh:
+        return Response({'error': 'לא נמצא טוקן רענון'}, status=status.HTTP_401_UNAUTHORIZED)
 
-    if serializer.is_valid():
-        user = serializer.save()
-        refresh = RefreshToken.for_user(user)
+    serializer = TokenRefreshSerializer(data={'refresh': raw_refresh})
+    try:
+        serializer.is_valid(raise_exception=True)
+    except (TokenError, DRFValidationError):
+        response = Response({'error': 'טוקן רענון לא תקין או פג תוקף'}, status=status.HTTP_401_UNAUTHORIZED)
+        _clear_refresh_cookie(response)
+        return response
 
-        return Response({
-            'message': 'משתמש נוצר בהצלחה',
-            'messageEn': 'User created successfully',
-            'user': UserSerializer(user).data,
-            'tokens': {
-                'access': str(refresh.access_token),
-                'refresh': str(refresh),
-            }
-        }, status=status.HTTP_201_CREATED)
+    data = serializer.validated_data
+    new_access = data['access']
 
-    return Response({
-        'error': serializer.errors
-    }, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        user_id = AccessToken(new_access)['user_id']
+        user = User.objects.get(pk=user_id)
+        user_data = UserSerializer(user).data
+    except (TokenError, User.DoesNotExist):
+        user_data = None
+
+    response = Response({'access': new_access, 'user': user_data})
+
+    new_refresh = data.get('refresh')
+    if new_refresh:
+        _set_refresh_cookie(response, new_refresh)
+
+    return response
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+@throttle_classes([LogoutRateThrottle])
+def logout_view(request):
+    """
+    G3-14: actually revokes the refresh token server-side (blacklists it,
+    now that rest_framework_simplejwt.token_blacklist is installed) instead
+    of only clearing client-side storage. Deliberately AllowAny rather than
+    IsAuthenticated: the whole point is to be able to kill a long-lived
+    refresh cookie even if the short-lived access token has already
+    expired - requiring a currently-valid access token to log out would
+    leave exactly that case unable to revoke anything. A missing/already-
+    invalid refresh cookie still returns success; logout is idempotent.
+    """
+    raw_refresh = request.COOKIES.get(django_settings.JWT_REFRESH_COOKIE_NAME)
+    if raw_refresh:
+        try:
+            RefreshToken(raw_refresh).blacklist()
+        except TokenError:
+            pass
+
+    response = Response({'success': True, 'message': 'התנתקת בהצלחה'})
+    _clear_refresh_cookie(response)
+    return response
+
+
+# G3-01: unrestricted public staff self-registration removed. Dormify is an
+# internal staff-management system - the only authorized way to create a
+# staff account is the role/region-validated accounts.views.
+# StaffUserListCreateView (/api/staff-users/), which enforces business rules
+# 2-4 (central admin manages anyone, a regional manager may only create
+# employees in their own region, an employee cannot create staff at all).
+# No frontend code called /auth/register/ (verified: no "register" reference
+# anywhere under src/), so removing it is safe. The route below intentionally
+# does not exist any more; see tests in api/security_tests/test_registration.py.
 
 
 @api_view(['GET'])
@@ -113,6 +215,7 @@ def me_view(request):
 
 @api_view(['PUT', 'POST'])
 @permission_classes([IsAuthenticated])
+@throttle_classes([SensitiveAccountActionRateThrottle])
 def change_password_view(request):
     user = request.user
 
@@ -154,17 +257,30 @@ def change_password_view(request):
 
 @api_view(['PUT', 'POST'])
 @permission_classes([IsAuthenticated])
+@throttle_classes([SensitiveAccountActionRateThrottle])
 def change_email_view(request):
     user = request.user
 
     current_email = request.data.get('current_email')
     new_email = request.data.get('new_email')
     confirm_email = request.data.get('confirm_email')
+    # G3-18: email is not a secret - matching it alone (as this endpoint
+    # used to require) proves nothing an attacker with a hijacked session
+    # doesn't already know. Reuses the exact same check_password() call
+    # change_password_view already uses above, so changing account email
+    # requires the same proof of identity changing the password does.
+    password = request.data.get('password')
 
-    if not current_email or not new_email or not confirm_email:
+    if not current_email or not new_email or not confirm_email or not password:
         return Response({
             'success': False,
             'error': 'יש למלא את כל השדות'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    if not user.check_password(password):
+        return Response({
+            'success': False,
+            'error': 'הסיסמה שגויה'
         }, status=status.HTTP_400_BAD_REQUEST)
 
     if not user.email or user.email.lower() != current_email.lower():
@@ -254,6 +370,53 @@ def _resolve_region(region_value):
         pass
 
     return None
+
+
+def resolve_scoped_region(user, region_value, *, allow_central_all=True):
+    """
+    Centralized, single-source-of-truth ?region= resolution for every
+    region-scoped read endpoint (G3-03/G3-04/G3-08: statistics,
+    allocation_summary, allocation_results, assisted_allocation_queue,
+    get_active_allocation_run, and the Building/Apartment/Room viewsets'
+    get_queryset()). Returns (region, error_response):
+
+    - central_admin: may explicitly select any region via region_value
+      (global-administration workflows are intentionally allowed to do
+      this); omitting it returns (None, None) meaning "no region filter"
+      when allow_central_all=True, or a clean 400 ("a region is required")
+      when the caller's endpoint always needs exactly one region.
+
+    - region_boss / employee: NEVER get a foreign region, regardless of
+      what ?region= names. If region_value is empty, they're scoped to
+      their own user.region. If region_value is supplied and does not
+      match their own region, this returns a clean 403 - it deliberately
+      does NOT silently substitute their own region for a mismatched
+      request, so a caller can never mistake the response for data about
+      the region they actually asked for.
+
+    A user with no region assigned (and who isn't central_admin) always
+    gets a clean 400, matching the existing behavior at every call site
+    this replaces.
+    """
+    if user.is_central_admin:
+        if region_value:
+            region = _resolve_region(region_value)
+            if not region:
+                return None, Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+            return region, None
+        if allow_central_all:
+            return None, None
+        return None, Response({'error': 'נדרש לבחור אזור'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not user.region_id:
+        return None, Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if region_value:
+        requested = _resolve_region(region_value)
+        if not requested or requested.id != user.region_id:
+            return None, Response({'error': 'אין הרשאה לאזור זה'}, status=status.HTTP_403_FORBIDDEN)
+
+    return user.region, None
 
 
 HARD_ALLOCATION_CONSTRAINTS = {
@@ -666,6 +829,15 @@ class RegionViewSet(viewsets.ModelViewSet):
     serializer_class = RegionSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_permissions(self):
+        # G3-05: Region is a system-level definition, not operational data -
+        # any authenticated regional/employee user may still read it
+        # (scoped to their own region below), but creating/editing/deleting
+        # a region is a central-admin-only action.
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsAuthenticated(), IsCentralAdmin()]
+        return [IsAuthenticated()]
+
     def get_queryset(self):
         queryset = Region.objects.all()
         user = self.request.user
@@ -681,6 +853,13 @@ class RegionViewSet(viewsets.ModelViewSet):
 class DormTypeViewSet(viewsets.ModelViewSet):
     serializer_class = DormTypeSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        # G3-05: same rule as RegionViewSet above - DormType is a
+        # system-level definition, central-admin-only to write.
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsAuthenticated(), IsCentralAdmin()]
+        return [IsAuthenticated()]
 
     def get_queryset(self):
         queryset = DormType.objects.select_related('region').all()
@@ -710,6 +889,48 @@ def _parse_is_active_filter(request, default='true'):
     if raw in ('false', '0', 'inactive'):
         return False
     return None
+
+
+def _region_scoped_inventory_queryset(user, queryset, region_value, region_field):
+    """
+    Shared read-path region filtering for Building/Apartment/Room
+    get_queryset() (G3-04). Mirrors resolve_scoped_region()'s authorization
+    semantics but returns a queryset rather than a Response, since
+    ModelViewSet.get_queryset() cannot itself return an HTTP response:
+
+    - central_admin: may filter by any region via region_value, or see
+      everything with none supplied.
+    - region_boss / employee: a ?region= that is not their own always
+      yields queryset.none() - never the requested foreign region's data,
+      and never their own region silently substituted for a request that
+      named someone else's. Since get_object() (used by
+      retrieve/update/destroy) is built from this same queryset, a
+      mismatched ?region= can never be used to pull a foreign-region
+      object into scope for a write either - closing the exact bug where
+      supplying the *target's own real region* string used to make
+      get_object() succeed regardless of the caller's own region.
+
+    `region_field` is the relation path to Region from this model (e.g.
+    'dorm_type__region' for Building) - `f'{region_field}_id'` is valid
+    Django ORM syntax for the id shortcut on the terminal FK hop.
+    """
+    if user.is_central_admin:
+        if region_value:
+            region = _resolve_region(region_value)
+            if not region:
+                return queryset.none()
+            return queryset.filter(**{region_field: region})
+        return queryset
+
+    if not user.region_id:
+        return queryset.none()
+
+    if region_value:
+        requested = _resolve_region(region_value)
+        if not requested or requested.id != user.region_id:
+            return queryset.none()
+
+    return queryset.filter(**{f'{region_field}_id': user.region_id})
 
 
 def _inventory_create_permission_error():
@@ -801,23 +1022,7 @@ class BuildingViewSet(viewsets.ModelViewSet):
 
         user = self.request.user
         region_value = self.request.query_params.get('region')
-
-        if user.is_central_admin or user.is_boss:
-            if region_value:
-                region = _resolve_region(region_value)
-                if not region:
-                    return queryset.none()
-                return queryset.filter(dorm_type__region=region)
-            if user.is_central_admin:
-                return queryset
-            if not user.region_id:
-                return queryset.none()
-            return queryset.filter(dorm_type__region_id=user.region_id)
-
-        if not user.region_id:
-            return queryset.none()
-
-        return queryset.filter(dorm_type__region_id=user.region_id)
+        return _region_scoped_inventory_queryset(user, queryset, region_value, 'dorm_type__region')
 
     def create(self, request, *args, **kwargs):
         if not request.user.is_boss:
@@ -852,6 +1057,33 @@ class BuildingViewSet(viewsets.ModelViewSet):
             )
 
         instance = self.get_object()
+
+        # G3-04: explicitly re-validate the OBJECT'S REAL region against
+        # the caller's own region - never rely solely on get_queryset()
+        # (which is itself query-param-influenced) as the authorization
+        # check for a write. Belt-and-braces alongside the
+        # _region_scoped_inventory_queryset() fix above.
+        if not request.user.is_central_admin:
+            real_region_id = instance.dorm_type.region_id if instance.dorm_type else None
+            if real_region_id != request.user.region_id:
+                return Response(
+                    {'error': 'אין הרשאה לערוך בניין באזור זה'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # G3-12: reparenting - a PATCH that changes dorm_type must not
+            # move this building into a DormType belonging to another
+            # region. Only relevant when 'dorm_type' is actually present in
+            # the request body (a normal edit that omits it is unaffected).
+            new_dorm_type_id = request.data.get('dorm_type')
+            if new_dorm_type_id is not None and str(new_dorm_type_id) != str(instance.dorm_type_id):
+                new_dorm_type = DormType.objects.filter(pk=new_dorm_type_id).select_related('region').first()
+                if not new_dorm_type or new_dorm_type.region_id != request.user.region_id:
+                    return Response(
+                        {'error': 'לא ניתן להעביר בניין לסוג מעונות מחוץ לאזור המשויך למשתמש'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
         with transaction.atomic():
             # Lock this building's row AND every apartment in it before
             # re-checking occupancy: a building-level gender_restriction
@@ -1195,19 +1427,13 @@ class ApartmentViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(building_id=building_id)
 
         user = self.request.user
-
         region_value = self.request.query_params.get('region')
-        if (user.is_central_admin or user.is_boss) and region_value:
-            region = _resolve_region(region_value)
-            if not region:
-                return queryset.none()
-            queryset = queryset.filter(building__dorm_type__region=region)
-        elif not user.is_central_admin:
-            if not user.region_id:
-                return queryset.none()
-            queryset = queryset.filter(
-                building__dorm_type__region=user.region
-            )
+        # G3-04: centralized region scoping (see
+        # _region_scoped_inventory_queryset) - a mismatched ?region= for a
+        # region_boss/employee yields no results, never the foreign
+        # region's apartments (and, since get_object() is built from this
+        # same queryset, never a foreign apartment to write to either).
+        queryset = _region_scoped_inventory_queryset(user, queryset, region_value, 'building__dorm_type__region')
 
         return queryset.order_by(
             'building__number',
@@ -1242,6 +1468,36 @@ class ApartmentViewSet(viewsets.ModelViewSet):
             )
 
         instance = self.get_object()
+
+        # G3-04/G3-12: explicitly re-validate the OBJECT'S REAL region
+        # (never rely solely on get_queryset()), and if this PATCH
+        # reparents the apartment to a different building, validate that
+        # NEW building's region too - a regional manager must never move an
+        # apartment into a building belonging to another region.
+        if not request.user.is_central_admin:
+            real_region_id = (
+                instance.building.dorm_type.region_id
+                if instance.building and instance.building.dorm_type else None
+            )
+            if real_region_id != request.user.region_id:
+                return Response(
+                    {'error': 'אין הרשאה לערוך דירה באזור זה'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            new_building_id = request.data.get('building')
+            if new_building_id is not None and str(new_building_id) != str(instance.building_id):
+                new_building = Building.objects.filter(pk=new_building_id).select_related('dorm_type').first()
+                new_building_region_id = (
+                    new_building.dorm_type.region_id
+                    if new_building and new_building.dorm_type else None
+                )
+                if new_building_region_id != request.user.region_id:
+                    return Response(
+                        {'error': 'לא ניתן להעביר דירה לבניין מחוץ לאזור המשויך למשתמש'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
         with transaction.atomic():
             # Lock this apartment's row before re-checking occupancy:
             # assign_student_to_room locks the same Apartment pk via
@@ -1398,20 +1654,12 @@ class RoomViewSet(viewsets.ModelViewSet):
 
         user = self.request.user
         region_value = self.request.query_params.get('region')
-
-        if (user.is_central_admin or user.is_boss) and region_value:
-            region = _resolve_region(region_value)
-            if not region:
-                return queryset.none()
-            queryset = queryset.filter(
-                apartment__building__dorm_type__region=region
-            )
-        elif not user.is_central_admin:
-            if not user.region_id:
-                return queryset.none()
-            queryset = queryset.filter(
-                apartment__building__dorm_type__region=user.region
-            )
+        # G3-04: centralized region scoping (see
+        # _region_scoped_inventory_queryset) - see BuildingViewSet/
+        # ApartmentViewSet above for the full rationale.
+        queryset = _region_scoped_inventory_queryset(
+            user, queryset, region_value, 'apartment__building__dorm_type__region'
+        )
 
         return queryset.order_by(
             'apartment__building__number',
@@ -1451,7 +1699,37 @@ class RoomViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        conflict = check_room_write_conflict(self.get_object(), request.data)
+        instance = self.get_object()
+
+        # G3-04/G3-12: explicitly re-validate the OBJECT'S REAL region, and
+        # if this PATCH reparents the room to a different apartment,
+        # validate that NEW apartment's region too.
+        if not request.user.is_central_admin:
+            real_region = _room_region(instance)
+            real_region_id = real_region.id if real_region else None
+            if real_region_id != request.user.region_id:
+                return Response(
+                    {'error': 'אין הרשאה לערוך חדר באזור זה'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            new_apartment_id = request.data.get('apartment')
+            if new_apartment_id is not None and str(new_apartment_id) != str(instance.apartment_id):
+                new_apartment = Apartment.objects.filter(pk=new_apartment_id).select_related(
+                    'building__dorm_type'
+                ).first()
+                new_region_id = (
+                    new_apartment.building.dorm_type.region_id
+                    if new_apartment and new_apartment.building and new_apartment.building.dorm_type
+                    else None
+                )
+                if new_region_id != request.user.region_id:
+                    return Response(
+                        {'error': 'לא ניתן להעביר חדר לדירה מחוץ לאזור המשויך למשתמש'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
+        conflict = check_room_write_conflict(instance, request.data)
         if conflict:
             return Response(conflict, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1553,6 +1831,14 @@ class StudentViewSet(viewsets.ModelViewSet):
     serializer_class = StudentSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsPagination
+    # G3-15: Student records must never be hard-deletable through generic
+    # CRUD - there is no legitimate "delete a student record" workflow in
+    # this codebase (the existing REMOVE_STUDENT StudentRequest workflow
+    # ends the active BedAssignment and clears assigned_room, it never
+    # deletes the Student row - see StudentRequestViewSet.approve()). No
+    # 'delete' is intentionally listed here rather than inventing a new
+    # broad delete privilege.
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
     def get_serializer_class(self):
 
@@ -1805,6 +2091,13 @@ class StudentViewSet(viewsets.ModelViewSet):
 class TransferViewSet(viewsets.ModelViewSet):
     serializer_class = TransferSerializer
     permission_classes = [IsAuthenticated]
+    # G3-24: Transfer rows are workflow/audit history - 'delete' is
+    # intentionally absent so no authenticated user can erase a transfer
+    # record through generic CRUD. 'put'/'patch' stay listed (the
+    # approve()/reject() actions below need PUT on their own sub-URLs), but
+    # update()/partial_update() to the base '/transfers/<pk>/' resource are
+    # overridden below to refuse writes (G3-02).
+    http_method_names = ['get', 'post', 'put', 'patch', 'head', 'options']
 
     def get_queryset(self):
         queryset = Transfer.objects.select_related(
@@ -1826,6 +2119,19 @@ class TransferViewSet(viewsets.ModelViewSet):
 
         return queryset.order_by('-created_at')
 
+    def update(self, request, *args, **kwargs):
+        # G3-02: the legacy generic update endpoint must never be usable to
+        # set status/reviewed_by/reviewed_at/rejection_reason directly,
+        # bypassing user_can_approve_transfer(), the room-availability
+        # check, or the BedAssignment creation that approve()/reject()
+        # perform. All transitions must go through those dedicated actions.
+        # (TransferSerializer also marks those fields read_only as a second
+        # layer of defense - this blocks the endpoint outright.)
+        return Response(
+            {'error': 'לא ניתן לערוך בקשת העברה ישירות - יש להשתמש בפעולות אישור/דחייה.'},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+
     def perform_create(self, serializer):
         student = serializer.validated_data['student']
         from_room = serializer.validated_data.get('from_room') or student.assigned_room
@@ -1833,6 +2139,23 @@ class TransferViewSet(viewsets.ModelViewSet):
 
         if not from_room:
             raise DRFValidationError('הסטודנט אינו משויך כרגע לחדר מקור')
+
+        # G3-07: a non-central-admin may only create a (same-region) legacy
+        # Transfer wholly inside their own region - never for a student/room
+        # belonging to another region. Cross-region movement has its own,
+        # explicitly-authorized path (StudentRequestViewSet's
+        # region_transfer workflow); this endpoint was never meant to cross
+        # regions and must not silently allow it.
+        user = self.request.user
+        if not user.is_central_admin:
+            if not user.region_id:
+                raise DRFPermissionDenied('אין לך אזור מוגדר - לא ניתן ליצור בקשת העברה')
+            from_region = getattr(getattr(getattr(from_room, 'apartment', None), 'building', None), 'dorm_type', None)
+            from_region_id = from_region.region_id if from_region else None
+            to_region = getattr(getattr(getattr(to_room, 'apartment', None), 'building', None), 'dorm_type', None)
+            to_region_id = to_region.region_id if to_region else None
+            if from_region_id != user.region_id or to_region_id != user.region_id:
+                raise DRFPermissionDenied('אינך מורשה ליצור בקשת העברה עבור אזור זה')
 
         validate_apartment_assignment(student, to_room)
         movement_type = infer_movement_type(from_room, to_room)
@@ -1994,12 +2317,14 @@ class TransferViewSet(viewsets.ModelViewSet):
                 'error': 'הבקשה כבר טופלה'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        if not request.user.is_central_admin:
-            transfer_region = transfer.to_room.apartment.building.dorm_type.region
-            if transfer_region != request.user.region:
-                return Response({
-                    'error': 'אין הרשאה לדחות בקשה זו'
-                }, status=status.HTTP_403_FORBIDDEN)
+        # G3-22: reject() must use the exact same authorization rule as
+        # approve() - previously this checked only to_room's region while
+        # approve() required both from_room and to_room to match the boss's
+        # region, two inconsistent ad-hoc policies for the same decision.
+        if not user_can_approve_transfer(request.user, transfer):
+            return Response({
+                'error': 'אין הרשאה לדחות בקשה זו'
+            }, status=status.HTTP_403_FORBIDDEN)
 
         with transaction.atomic():
             # Same lock-and-recheck pattern as approve() above - also
@@ -3230,6 +3555,11 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
     serializer_class = StudentRequestSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsPagination
+    # G3-24: StudentRequest rows are workflow/audit history - the
+    # legitimate way for a requester to withdraw their own still-pending
+    # request is the cancel() action below (role/ownership/status
+    # checked there), never a generic DELETE that erases the record.
+    http_method_names = ['get', 'post', 'put', 'patch', 'head', 'options']
 
     def get_queryset(self):
         queryset = StudentRequest.objects.select_related(
@@ -5380,30 +5710,21 @@ def get_active_allocation_run(request):
     Return an active allocation run, or the latest completed run
     only when its active assignments still exist.
     """
+    # G3-08: centralized region resolution - a region_boss/employee can
+    # never read another region's active run by supplying ?region=, they
+    # get a clean 403 instead (previously this endpoint had NO role check
+    # at all on the query param, the widest-open instance of this bug).
     region_value = request.query_params.get('region')
+    region, error = resolve_scoped_region(request.user, region_value)
+    if error:
+        return error
 
-    if region_value:
-        region = _resolve_region(region_value)
-
-        if not region:
-            return Response(
-                {'error': 'אזור לא נמצא'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-    elif request.user.is_central_admin:
+    if region is None:
+        # central_admin with no region selected - "active run" has no
+        # single-region meaning to aggregate, matching prior behavior.
         return Response(
             {'run': None},
             status=status.HTTP_200_OK,
-        )
-
-    elif request.user.region:
-        region = request.user.region
-
-    else:
-        return Response(
-            {'error': 'המשתמש אינו משויך לאזור'},
-            status=status.HTTP_400_BAD_REQUEST,
         )
 
     active_statuses = [
@@ -5647,40 +5968,14 @@ def allocation_results(request):
     user = request.user
 
     # ============================================================
-    # Resolve region according to the user's permissions
+    # Resolve region according to the user's permissions (G3-03:
+    # centralized helper - region_boss/employee alike are hard-locked to
+    # their own region, a mismatched ?region= is a clean 403, never a
+    # silent cross-region peek).
     # ============================================================
-    if user.is_central_admin or user.is_boss:
-        if region_value:
-            region = _resolve_region(region_value)
-
-            if not region:
-                return Response(
-                    {'error': 'אזור לא נמצא'},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-
-        elif user.is_central_admin:
-            # Central admin without an explicit region sees all regions.
-            region = None
-
-        elif user.region:
-            region = user.region
-
-        else:
-            return Response(
-                {'error': 'המשתמש אינו משויך לאזור'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-    else:
-        if not user.region:
-            return Response(
-                {'error': 'המשתמש אינו משויך לאזור'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # An ordinary regional employee is always restricted to their region.
-        region = user.region
+    region, error = resolve_scoped_region(user, region_value)
+    if error:
+        return error
 
     # ============================================================
     # Assigned students
@@ -6153,21 +6448,12 @@ def assisted_allocation_queue(request):
     user = request.user
     region_value = request.query_params.get('region')
 
-    if user.is_central_admin or user.is_boss:
-        if region_value:
-            region = _resolve_region(region_value)
-            if not region:
-                return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
-        elif user.is_central_admin:
-            region = None
-        elif user.region:
-            region = user.region
-        else:
-            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
-    else:
-        if not user.region:
-            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
-        region = user.region
+    # G3-03: centralized region resolution (see resolve_scoped_region) -
+    # region_boss/employee can never pull another region's assisted
+    # allocation queue via ?region=.
+    region, error = resolve_scoped_region(user, region_value)
+    if error:
+        return error
 
     # Computed first (not after, as before) so it can be used to keep a
     # pending-transfer student OUT of accessibility_students/
@@ -6614,6 +6900,15 @@ def assisted_allocation_assign(request, pk):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def assisted_allocation_override(request, pk):
+    # G3-11: overriding deliberately waives a hard placement/business rule -
+    # unlike the normal assign() action (open to any in-region employee),
+    # this is an elevated administrative action and requires region_boss or
+    # central_admin. This does not change what the override actually does
+    # (evaluate_manual_override's violation checks below are untouched),
+    # only who may invoke it.
+    if not request.user.is_boss:
+        return Response({'error': 'רק מנהל אזור או מנהל מרכזי יכול לבצע שיבוץ בחריגה'}, status=status.HTTP_403_FORBIDDEN)
+
     try:
         student = Student.objects.get(pk=pk)
     except Student.DoesNotExist:
@@ -6707,21 +7002,21 @@ def assisted_allocation_override(request, pk):
 def allocation_summary(request):
     user = request.user
 
-    if user.is_central_admin or user.is_boss:
-        region_value = (
-            request.query_params.get('region')
-            or request.query_params.get('region_id')
-            or request.query_params.get('region_name')
-        )
+    # G3-03: centralized region resolution - region_boss/employee can never
+    # pull another region's summary via ?region=/?region_id=/?region_name=.
+    region_value = (
+        request.query_params.get('region')
+        or request.query_params.get('region_id')
+        or request.query_params.get('region_name')
+    )
+    region, error = resolve_scoped_region(user, region_value)
+    if error:
+        return error
 
-        if region_value:
-            region = _resolve_region(region_value)
-            if not region:
-                return Response({
-                    'error': 'אזור לא נמצא'
-                }, status=status.HTTP_404_NOT_FOUND)
-        elif user.is_central_admin:
-            return Response({
+    if region is None:
+        # central_admin with no region selected - this endpoint has no
+        # single-region-independent meaning, matching prior behavior.
+        return Response({
                 'region': None,
                 'total_students': 0,
                 'unassigned_students': 0,
@@ -6779,18 +7074,6 @@ def allocation_summary(request):
                 'latest_inbox': None,
                 'latest_run': None,
             }, status=status.HTTP_200_OK)
-        elif user.region:
-            region = user.region
-        else:
-            return Response({
-                'error': 'המשתמש אינו משויך לאזור'
-            }, status=status.HTTP_400_BAD_REQUEST)
-    else:
-        if not user.region:
-            return Response({
-                'error': 'המשתמש אינו משויך לאזור'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        region = user.region
 
     all_students_qs = Student.objects.filter(
         accepted_dorm_type__region=region
@@ -8629,21 +8912,11 @@ def statistics(request):
     user = request.user
     region_value = request.query_params.get('region')
 
-    if user.is_central_admin or user.is_boss:
-        if region_value:
-            region = _resolve_region(region_value)
-            if not region:
-                return Response({'error': 'אזור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
-        elif user.is_central_admin:
-            region = None
-        elif user.region:
-            region = user.region
-        else:
-            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
-    else:
-        if not user.region:
-            return Response({'error': 'המשתמש אינו משויך לאזור'}, status=status.HTTP_400_BAD_REQUEST)
-        region = user.region
+    # G3-03: centralized region resolution - region_boss/employee can never
+    # pull another region's statistics via ?region=.
+    region, error = resolve_scoped_region(user, region_value)
+    if error:
+        return error
 
     if region is None:
         students = Student.objects.all()
@@ -10322,6 +10595,70 @@ def delete_import_batch(request, batch_id):
     return Response(ImportBatchSerializer(batch).data, status=status.HTTP_200_OK)
 
 
+# G3-21: explicit upload guards, checked BEFORE the (comparatively
+# expensive) pandas/openpyxl parse and before the ImportBatch is ever
+# marked PROCESSING - a rejected file here never touches batch state at
+# all (it stays PENDING, so the frontend can just let the operator pick a
+# different file and retry with the same batch_id; no FAILED/stuck-
+# PROCESSING cleanup is ever needed for this class of rejection).
+MAX_UPLOAD_FILE_SIZE_BYTES = int(os.getenv('MAX_UPLOAD_FILE_SIZE_MB', '25')) * 1024 * 1024
+
+
+def _validate_upload_file_or_error(uploaded_file):
+    """
+    Shared main/additions upload validation (G3-21):
+    1. extension allow-list (unchanged - kept as the fast first check)
+    2. explicit byte-size ceiling, checked from Django's UploadedFile.size
+       without reading the file into memory
+    3. actual content validation - attempts to open the workbook with
+       pandas/openpyxl; a corrupt file, a renamed non-Excel file, or any
+       other structurally invalid upload fails HERE with a clean 400,
+       never as an unhandled exception deeper in the row-by-row import
+       loop (and never leaking a pandas/openpyxl stack trace to the
+       client - that detail stays server-side via traceback.print_exc()).
+
+    Returns (excel_file, error_response). On success error_response is
+    None and excel_file is the already-opened pd.ExcelFile, reused by the
+    caller instead of re-opening the upload a second time.
+    """
+    if not uploaded_file.name.lower().endswith(('.xlsx', '.xls')):
+        return None, Response({
+            'error': 'סוג קובץ לא נתמך. נא להעלות קובץ Excel (.xlsx או .xls)',
+            'errorEn': 'Unsupported file type. Please upload an Excel file (.xlsx or .xls)'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    if uploaded_file.size is not None and uploaded_file.size > MAX_UPLOAD_FILE_SIZE_BYTES:
+        max_mb = MAX_UPLOAD_FILE_SIZE_BYTES // (1024 * 1024)
+        return None, Response({
+            'error': f'הקובץ גדול מדי. הגודל המרבי המותר הוא {max_mb}MB.',
+            'errorEn': f'File is too large. Maximum allowed size is {max_mb}MB.',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    if uploaded_file.size == 0:
+        return None, Response({
+            'error': 'הקובץ ריק',
+            'errorEn': 'The uploaded file is empty',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        excel_file = pd.ExcelFile(uploaded_file)
+        # Touch sheet_names now (cheap - it's already parsed the workbook's
+        # central directory/structure to open it) so a workbook that
+        # "opens" but has no readable sheet structure also fails here
+        # rather than later.
+        _ = excel_file.sheet_names
+    except Exception:
+        # Server-side only - never returned to the client (no stack trace
+        # leak; see docstring above).
+        traceback.print_exc()
+        return None, Response({
+            'error': 'לא ניתן לקרוא את הקובץ - ודאו שמדובר בקובץ Excel תקין (.xlsx/.xls) ולא פגום.',
+            'errorEn': 'Could not read the file - please make sure it is a valid, non-corrupted Excel file (.xlsx/.xls).',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    return excel_file, None
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def upload_excel(request):
@@ -10357,11 +10694,11 @@ def upload_excel(request):
 
     uploaded_file = request.FILES['file']
 
-    if not uploaded_file.name.lower().endswith(('.xlsx', '.xls')):
-        return Response({
-            'error': 'סוג קובץ לא נתמך. נא להעלות קובץ Excel (.xlsx או .xls)',
-            'errorEn': 'Unsupported file type. Please upload an Excel file (.xlsx or .xls)'
-        }, status=status.HTTP_400_BAD_REQUEST)
+    # G3-21: size/content validation, before anything else touches this
+    # upload or the ImportBatch's state - see _validate_upload_file_or_error.
+    excel_file, upload_error = _validate_upload_file_or_error(uploaded_file)
+    if upload_error:
+        return upload_error
 
     validate_gender_model_for_housing_import()
 
@@ -10397,7 +10734,6 @@ def upload_excel(request):
     total_rows = 0
 
     try:
-        excel_file = pd.ExcelFile(uploaded_file)
 
         created_count = 0
         updated_count = 0
@@ -10801,11 +11137,12 @@ def upload_excel(request):
         except Exception:
             traceback.print_exc()
 
+        # G3-21: the stack trace stays server-side (traceback.print_exc()
+        # above) - never echoed back to the client.
         return Response({
             'success': False,
             'error': f'שגיאה בעיבוד דוח השיבוץ: {str(e)}',
             'errorEn': f'Error processing status report: {str(e)}',
-            'traceback': traceback.format_exc(),
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -10878,11 +11215,11 @@ def upload_additions_excel(request):
 
     uploaded_file = request.FILES['file']
 
-    if not uploaded_file.name.lower().endswith(('.xlsx', '.xls')):
-        return Response({
-            'error': 'סוג קובץ לא נתמך. נא להעלות קובץ Excel (.xlsx או .xls)',
-            'errorEn': 'Unsupported file type. Please upload an Excel file (.xlsx or .xls)'
-        }, status=status.HTTP_400_BAD_REQUEST)
+    # G3-21: size/content validation, before anything else touches this
+    # upload or the ImportBatch's state - see _validate_upload_file_or_error.
+    excel_file, upload_error = _validate_upload_file_or_error(uploaded_file)
+    if upload_error:
+        return upload_error
 
     validate_gender_model_for_housing_import()
 
@@ -10918,7 +11255,6 @@ def upload_additions_excel(request):
     total_rows = 0
 
     try:
-        excel_file = pd.ExcelFile(uploaded_file)
 
         created_count = 0
         updated_count = 0
@@ -11349,11 +11685,12 @@ def upload_additions_excel(request):
         except Exception:
             traceback.print_exc()
 
+        # G3-21: the stack trace stays server-side (traceback.print_exc()
+        # above) - never echoed back to the client.
         return Response({
             'success': False,
             'error': f'שגיאה בעיבוד קובץ המתווספים: {str(e)}',
             'errorEn': f'Error processing additions file: {str(e)}',
-            'traceback': traceback.format_exc(),
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])

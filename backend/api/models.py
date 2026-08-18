@@ -41,6 +41,29 @@ class User(AbstractUser):
     class Meta:
         verbose_name = _('משתמש')
         verbose_name_plural = _('משתמשים')
+        constraints = [
+            # G3-19: DB-level backstop for "at most one region_boss per
+            # region" - the application-level check lives in
+            # accounts.serializers.StaffUserSerializer.create() (which also
+            # closes the concurrent-duplicate race via select_for_update()
+            # on the Region row; this constraint alone only catches the
+            # duplicate case, not a region left with zero managers - see
+            # that create() method's comment for the full picture).
+            #
+            # IMPORTANT: this migration must NOT be applied to the real
+            # Azure database as-is - known current data (see
+            # project-quality/security/GROUP3_SECURITY_IMPLEMENTATION_REPORT.md,
+            # G3-19) has three region_boss users for one region, which
+            # violates this constraint. It has been created and tested
+            # against the isolated local test database only. Applying it to
+            # Azure requires an approved, manual cleanup of the existing
+            # duplicate regional-manager records first.
+            models.UniqueConstraint(
+                fields=['region'],
+                condition=models.Q(role='region_boss'),
+                name='unique_region_boss_per_region',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.get_full_name() or self.email} ({self.get_role_display()})"

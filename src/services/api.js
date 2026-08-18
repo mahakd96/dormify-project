@@ -10,15 +10,32 @@ const API_BASE =
   process.env.REACT_APP_API_BASE ||
   `${window.location.protocol}//${window.location.hostname}:8000`;
 
+// G3-17: withCredentials is now required - the refresh token travels as an
+// HttpOnly cookie (set by /api/auth/login/ and /api/auth/refresh/, read
+// only by the backend), never as a value JS can see or persist. The access
+// token below is kept in memory only.
 export const api = axios.create({
   baseURL: API_BASE,
-  withCredentials: false,
+  withCredentials: true,
 });
 
-const STORAGE_KEYS = {
-  access: "dormify_access_token",
-  refresh: "dormify_refresh_token",
-  user: "dormify_user",
+// G3-17: JWTs are no longer written to localStorage at all - the access
+// token lives ONLY in this module-level variable (cleared on full page
+// reload by design; restoreSession() below re-derives it from the
+// HttpOnly refresh cookie on app start) and the refresh token never
+// reaches JS in the first place. `dormify_user` / `dormify_language` are
+// not tokens - a cached display-only profile and a UI preference,
+// deliberately out of scope for this change.
+let inMemoryAccessToken = null;
+
+const setAccessToken = (token) => {
+  inMemoryAccessToken = token || null;
+};
+
+const getAccessToken = () => inMemoryAccessToken;
+
+const clearStoredAuth = () => {
+  setAccessToken(null);
 };
 
 const pickAccessToken = (data) =>
@@ -29,22 +46,6 @@ const pickAccessToken = (data) =>
   data?.tokens?.access ||
   data?.tokens?.access_token ||
   null;
-
-const pickRefreshToken = (data) =>
-  data?.refresh ||
-  data?.refresh_token ||
-  data?.tokens?.refresh ||
-  data?.tokens?.refresh_token ||
-  null;
-
-const getAccessToken = () => localStorage.getItem(STORAGE_KEYS.access);
-const getRefreshToken = () => localStorage.getItem(STORAGE_KEYS.refresh);
-
-const clearStoredAuth = () => {
-  localStorage.removeItem(STORAGE_KEYS.access);
-  localStorage.removeItem(STORAGE_KEYS.refresh);
-  localStorage.removeItem(STORAGE_KEYS.user);
-};
 
 // DRF error bodies come in several shapes: a plain string, {detail: "..."},
 // {error: "..."}, {non_field_errors: [...]}, a plain array (raised via
@@ -147,9 +148,68 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
+// G3-16: a working refresh flow - a request that 401s because the
+// short-lived access token expired mid-session is retried ONCE after a
+// silent refresh (via the HttpOnly cookie, never a token this code can
+// see). Concurrent 401s share a single in-flight refresh call instead of
+// each firing their own (a burst of parallel requests failing together at
+// token expiry is the common case, not the exception). The refresh and
+// login endpoints themselves are excluded to avoid ever looping.
+const NO_REFRESH_RETRY_PATHS = ["/api/auth/login/", "/api/auth/refresh/"];
+let refreshInFlight = null;
+
+const isNoRefreshPath = (url = "") =>
+  NO_REFRESH_RETRY_PATHS.some((path) => url.includes(path));
+
+const performRefresh = () => {
+  if (!refreshInFlight) {
+    refreshInFlight = api
+      .post("/api/auth/refresh/")
+      .then(({ data }) => {
+        const access = pickAccessToken(data);
+        setAccessToken(access);
+        return access;
+      })
+      .catch((err) => {
+        setAccessToken(null);
+        throw err;
+      })
+      .finally(() => {
+        refreshInFlight = null;
+      });
+  }
+  return refreshInFlight;
+};
+
 api.interceptors.response.use(
   (response) => response,
-  async (error) => Promise.reject(error)
+  async (error) => {
+    const original = error?.config;
+    const status = error?.response?.status;
+
+    if (
+      status === 401 &&
+      original &&
+      !original._retriedAfterRefresh &&
+      !isNoRefreshPath(original.url || "")
+    ) {
+      original._retriedAfterRefresh = true;
+      try {
+        const access = await performRefresh();
+        if (access) {
+          original.headers = original.headers || {};
+          original.headers.Authorization = `Bearer ${access}`;
+          return api(original);
+        }
+      } catch {
+        // Refresh itself failed (no valid cookie / expired) - fall through
+        // and reject with the original 401 so the caller (AuthContext)
+        // treats this as a real logged-out state.
+      }
+    }
+
+    return Promise.reject(error);
+  }
 );
 
 export const authAPI = {
@@ -161,25 +221,33 @@ export const authAPI = {
       });
 
       const access = pickAccessToken(data);
-      const refresh = pickRefreshToken(data);
 
       if (!access) {
         throw new Error("Login succeeded but no access token was returned.");
       }
 
-      localStorage.setItem(STORAGE_KEYS.access, access);
-
-      if (refresh) {
-        localStorage.setItem(STORAGE_KEYS.refresh, refresh);
-      }
-
-      if (data?.user) {
-        localStorage.setItem(STORAGE_KEYS.user, JSON.stringify(data.user));
-      }
+      setAccessToken(access);
 
       return data;
     } catch (err) {
       throwApiError(err, "Login failed");
+    }
+  },
+
+  // G3-14/G3-16/G3-17: called on app start to restore a session purely
+  // from the HttpOnly refresh cookie - no token is ever read from
+  // localStorage. Returns { access, user } on success, or null if there is
+  // no valid session (first visit, expired/blacklisted refresh token,
+  // logged out elsewhere).
+  restoreSession: async () => {
+    try {
+      const { data } = await api.post("/api/auth/refresh/");
+      const access = pickAccessToken(data);
+      setAccessToken(access);
+      return { access, user: data?.user || null };
+    } catch (err) {
+      setAccessToken(null);
+      return null;
     }
   },
 
@@ -196,8 +264,19 @@ export const authAPI = {
     }
   },
 
+  // G3-14: actually revokes the refresh token server-side (blacklists it)
+  // instead of only clearing client-side state. Best-effort: even if the
+  // network call fails, the in-memory access token is cleared regardless,
+  // so the frontend always ends up logged out.
   logout: async () => {
-    clearStoredAuth();
+    try {
+      await api.post("/api/auth/logout/");
+    } catch {
+      // Already logged out / no valid session server-side - not fatal,
+      // the client-side state is cleared below either way.
+    } finally {
+      clearStoredAuth();
+    }
   },
 };
 
@@ -229,6 +308,8 @@ export const settingsAPI = {
           payload.new_email ?? payload.newEmail,
         confirm_email:
           payload.confirm_email ?? payload.confirmEmail,
+        // G3-18: current-password re-authentication, required server-side.
+        password: payload.password,
       };
 
       const { data } = await api.put("/api/auth/change-email/", body);
@@ -1282,8 +1363,12 @@ export const reportsAPI = {
   },
 };
 
+// getAccessToken is also consumed directly by src/services/usersApi.js
+// (a separate fetch-based client), so the in-memory access token has a
+// single source of truth instead of a second copy in localStorage.
+export { getAccessToken };
+
 export const debugAuthAPI = {
   getAccessToken,
-  getRefreshToken,
   clearStoredAuth,
 };

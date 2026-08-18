@@ -145,8 +145,9 @@ function ConfigOpportunityCard({ opportunity, canApply, onApply, applying, helps
 // override_required pick it expands to show every violated rule and its
 // consequence, and requires a documented reason before the (visually
 // distinct, cautionary) override button is enabled.
-function SelectionPanel({ student, selection, onClear, onConfirm, confirming, error, note, onNoteChange, T, isHe }) {
+function SelectionPanel({ student, selection, onClear, onConfirm, confirming, error, note, onNoteChange, T, isHe, canOverride }) {
   const isOverride = selection.assisted_status === 'override_required';
+  const overrideBlocked = isOverride && !canOverride;
   const statusLabels = isHe ? STATUS_LABEL_HE : STATUS_LABEL_EN;
   return (
     <div className={`aa-selection-panel${isOverride ? ' aa-selection-panel-override' : ''}`}>
@@ -194,7 +195,18 @@ function SelectionPanel({ student, selection, onClear, onConfirm, confirming, er
             value={note}
             onChange={(e) => onNoteChange(e.target.value)}
             placeholder={T.overrideReasonPlaceholder}
+            disabled={overrideBlocked}
           />
+          {/* G3-11: override waives a hard placement rule - it's an
+              elevated action restricted to region_boss/central_admin (the
+              backend, assisted_allocation_override, is authoritative and
+              returns 403 for anyone else; this is a UI convenience so an
+              employee sees why, instead of a submit that fails). */}
+          {overrideBlocked && (
+            <div className="aa-override-permission-note">
+              <ShieldAlert size={12} /> {T.overridePermissionDenied}
+            </div>
+          )}
         </div>
       )}
 
@@ -203,7 +215,7 @@ function SelectionPanel({ student, selection, onClear, onConfirm, confirming, er
       <button
         type="button"
         className={`aa-btn ${isOverride ? 'aa-btn-danger' : 'aa-btn-primary'} aa-confirm-btn`}
-        disabled={confirming || (isOverride && !note.trim())}
+        disabled={confirming || overrideBlocked || (isOverride && !note.trim())}
         onClick={onConfirm}
       >
         {confirming ? <Spinner size={13} /> : (isOverride ? T.confirmOverrideBtn : T.confirmAssignBtn)}
@@ -280,6 +292,10 @@ function buildT(isHe) {
     overrideRulesTitle: p('חריגה מכללי השיבוץ', 'Override of assignment rules'),
     overrideReasonLabel: p('סיבת החריגה', 'Override reason'),
     overrideReasonPlaceholder: p('לדוגמה: אין מקום אחר תואם באזור', 'e.g. no other matching place in the region'),
+    overridePermissionDenied: p(
+      'שיבוץ בחריגה דורש הרשאת מנהל אזור או מנהל מרכזי.',
+      'Overriding a placement rule requires a regional manager or central admin.'
+    ),
     confirmOverrideBtn: p('אישור שיבוץ בחריגה', 'Confirm assignment with override'),
     confirmAssignBtn: p('אישור שיבוץ', 'Confirm assignment'),
     cancel: p('ביטול', 'Cancel'),
@@ -385,7 +401,7 @@ export default function AssistedAllocationPage({ language = 'he' }) {
   const isHe = language === 'he';
   const dir = isHe ? 'rtl' : 'ltr';
   const T = buildT(isHe);
-  const { user, isCentralAdmin, isRegionBoss, canAssistAllocation } = useAuth();
+  const { user, isCentralAdmin, isRegionBoss, canAssistAllocation, canOverrideAllocation } = useAuth();
   const isBoss = isCentralAdmin() || isRegionBoss();
 
   const [regions, setRegions] = useState([]);
@@ -836,6 +852,7 @@ export default function AssistedAllocationPage({ language = 'he' }) {
                           note={overrideNote}
                           onNoteChange={setOverrideNote}
                           T={T} isHe={isHe}
+                          canOverride={canOverrideAllocation()}
                         />
                       )}
                     </>
@@ -1143,6 +1160,7 @@ export default function AssistedAllocationPage({ language = 'he' }) {
         .aa-field-label { font-size: 12.5px; font-weight: 600; color: #5e6c84; margin-top: 2px; }
         .aa-req { color: #ae2e24; margin-inline-start: 2px; }
         .aa-override-box textarea, .aa-modal-body textarea, .aa-modal-body select { width: 100%; border: 1px solid #dfe1e6; border-radius: 8px; padding: 8px 10px; font-family: inherit; font-size: 13px; resize: vertical; background: #fff; }
+        .aa-override-permission-note { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: #7a271a; background: #fff0f0; border: 1px solid #f4c7c3; border-radius: 6px; padding: 6px 8px; }
         .aa-transfer-student-summary { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; background: #f4f5f7; border-radius: 8px; padding: 8px 10px; font-size: 12.5px; color: #5e6c84; }
         .aa-transfer-student-summary strong { font-size: 13.5px; color: #172b4d; }
         .aa-transfer-region-status { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: #5e6c84; padding: 8px 10px; background: #f4f5f7; border-radius: 8px; }

@@ -1,24 +1,59 @@
 """
 DORMIFY - Seed Database
 Run with: python seed.py
+
+G3-09: this script must never contain a fixed, reusable, tracked password
+(the previous 'admin123'/'test123' were the same for every clone of this
+repo, forever, unless someone remembered to change them by hand). Dev
+credentials now come from SEED_ADMIN_PASSWORD/SEED_STAFF_PASSWORD env vars
+when the operator wants known values (e.g. for a shared local demo), or are
+randomly generated per run and printed once to the console - never written
+back into source. The script also refuses to run at all unless DEBUG is
+explicitly true, so it cannot be pointed at a production database by
+accident (see dormify.settings - DEBUG defaults to False everywhere except
+local development, where .env explicitly sets it true).
 """
 
 import os
+import random
+import secrets
 import sys
 import django
-import random
 
 # Setup Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dormify.settings')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 django.setup()
 
+from django.conf import settings
+
 from api.models import User, Region, Building, Apartment, Room, Student
 
 
+def _dev_password(env_var):
+    """
+    Returns the operator-supplied password for `env_var` if set, otherwise
+    a freshly generated random one. Never a fixed literal - see the G3-09
+    note above.
+    """
+    return os.getenv(env_var) or secrets.token_urlsafe(12)
+
+
 def seed():
+    if not settings.DEBUG:
+        print(
+            '❌ Refusing to seed: DEBUG is not enabled. This script creates '
+            'known/placeholder accounts and must only run against a local '
+            'development database (ENV_FILE=.env with DEBUG=True, or '
+            'ENV_FILE=.env.test). Aborting.'
+        )
+        sys.exit(1)
+
     print('🌱 Starting database seed...\n')
-    
+
+    admin_password = _dev_password('SEED_ADMIN_PASSWORD')
+    staff_password = _dev_password('SEED_STAFF_PASSWORD')
+
     # ===========================================
     # 1. CREATE REGIONS (matching Excel data)
     # ===========================================
@@ -48,11 +83,11 @@ def seed():
     # ===========================================
     print('👥 Creating users...')
     users_data = [
-        {'email': 'admin@technion.ac.il', 'username': 'admin', 'first_name': 'אברהם', 'last_name': 'כהן', 'role': 'central_admin', 'region': None, 'password': 'admin123'},
-        {'email': 'canada@technion.ac.il', 'username': 'canada_boss', 'first_name': 'שרה', 'last_name': 'לוי', 'role': 'region_boss', 'region': 'canada', 'password': 'test123'},
-        {'email': 'canada.emp@technion.ac.il', 'username': 'canada_emp', 'first_name': 'דוד', 'last_name': 'ישראלי', 'role': 'employee', 'region': 'canada', 'password': 'test123'},
-        {'email': 'hasmaha@technion.ac.il', 'username': 'hasmaha_boss', 'first_name': 'יוסף', 'last_name': 'חדד', 'role': 'region_boss', 'region': 'hasmaha', 'password': 'test123'},
-        {'email': 'mizrah@technion.ac.il', 'username': 'mizrah_boss', 'first_name': 'משה', 'last_name': 'פרץ', 'role': 'region_boss', 'region': 'mizrah', 'password': 'test123'},
+        {'email': 'admin@technion.ac.il', 'username': 'admin', 'first_name': 'אברהם', 'last_name': 'כהן', 'role': 'central_admin', 'region': None, 'password': admin_password},
+        {'email': 'canada@technion.ac.il', 'username': 'canada_boss', 'first_name': 'שרה', 'last_name': 'לוי', 'role': 'region_boss', 'region': 'canada', 'password': staff_password},
+        {'email': 'canada.emp@technion.ac.il', 'username': 'canada_emp', 'first_name': 'דוד', 'last_name': 'ישראלי', 'role': 'employee', 'region': 'canada', 'password': staff_password},
+        {'email': 'hasmaha@technion.ac.il', 'username': 'hasmaha_boss', 'first_name': 'יוסף', 'last_name': 'חדד', 'role': 'region_boss', 'region': 'hasmaha', 'password': staff_password},
+        {'email': 'mizrah@technion.ac.il', 'username': 'mizrah_boss', 'first_name': 'משה', 'last_name': 'פרץ', 'role': 'region_boss', 'region': 'mizrah', 'password': staff_password},
     ]
 
     for data in users_data:
@@ -147,10 +182,14 @@ def seed():
     print(f'   - {Apartment.objects.count()} apartments')
     print(f'   - {Room.objects.count()} rooms')
     print(f'   - {Student.objects.count()} students')
-    print('\n🔐 Login credentials:')
-    print('   Central Admin: admin@technion.ac.il / admin123')
-    print('   Canada Boss: canada@technion.ac.il / test123')
-    print('   Hasmaha Boss: hasmaha@technion.ac.il / test123\n')
+    print('\n🔐 Login credentials (generated this run - not stored anywhere):')
+    print(f'   Central Admin: admin@technion.ac.il / {admin_password}')
+    print(f'   Canada Boss: canada@technion.ac.il / {staff_password}')
+    print(f'   Hasmaha Boss: hasmaha@technion.ac.il / {staff_password}')
+    print(
+        '   (set SEED_ADMIN_PASSWORD / SEED_STAFF_PASSWORD before running '
+        'to choose known values instead of random ones)\n'
+    )
 
 
 if __name__ == '__main__':
