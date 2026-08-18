@@ -3384,6 +3384,32 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
             if changed:
                 instance.save(update_fields=changed)
 
+    def destroy(self, request, *args, **kwargs):
+        if not request.user.is_boss:
+            return Response(
+                {'error': 'רק מנהל יכול למחוק בקשות'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        req = self.get_object()
+
+        if req.status not in (
+                StudentRequest.Status.PENDING,
+                StudentRequest.Status.REJECTED,
+                StudentRequest.Status.CANCELLED,
+        ):
+            return Response(
+                {'error': 'ניתן למחוק רק בקשה ממתינה, שנדחתה או שבוטלה'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        req.delete()
+
+        return Response(
+            {'message': 'הבקשה נמחקה בהצלחה'},
+            status=status.HTTP_200_OK,
+        )
+
     @staticmethod
     def _pagination_params(source):
         # limit/offset count BUILDINGS (the pagination unit of

@@ -871,6 +871,15 @@ export const requestsAPI = {
     }
   },
 
+  delete: async (id) => {
+  try {
+    const { data } = await api.delete(`/api/requests/${id}/`);
+    return data;
+  } catch (err) {
+    throw new Error(getErrorMessage(err, "Failed to delete request"));
+  }
+},
+
   // Withdraw the caller's own still-pending request (distinct from reject:
   // that's a reviewer's decision, this is the requesting side changing its
   // mind before any reviewer acted).
