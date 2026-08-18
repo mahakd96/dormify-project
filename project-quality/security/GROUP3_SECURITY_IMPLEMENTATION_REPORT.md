@@ -3,6 +3,13 @@
 **Baseline commit:** `23bb2c8` (the only change since the revalidation baseline `c486f89` was `README.md` — no security-relevant source changed).
 **Branch:** `donia-group3-security`. Not committed; left on the working tree for review.
 
+> **Status: MERGED AND CLOSED OUT.** This Group 3 work was merged into `main` in **PR #71** and
+> has since completed its full production closeout, including the Azure database migration that
+> §4 below originally left blocked. See **§14 "Production Closeout"** at the end of this report for
+> what happened after the merge. Everything above that section is preserved as the historical
+> record of the implementation and review pass that led up to the merge — read it as "at the time
+> this was written," not as the current state of Azure.
+
 > **Post-review correction (G3-13):** the version of this report reviewed earlier stated that
 > `DEBUG` was left defaulting to `"True"` in `dormify/settings.py`, and separately claimed
 > `.env.test` already set `DEBUG=True` explicitly. The second claim turned out to be **inaccurate**
@@ -33,7 +40,8 @@ backend/api/serializers.py               - G3-01, G3-02, G3-06 (RegisterSerializ
 backend/api/urls.py                      - G3-01 (route removed), G3-14/16 (refresh/logout routes)
 backend/api/views.py                     - nearly every finding; see table
 backend/api/throttling.py (new)          - G3-10
-backend/api/migrations/0019_...py (new)  - G3-19 (NOT applied to Azure)
+backend/api/migrations/0019_...py (new)  - G3-19 (not applied to Azure at the time this was
+                                            written - since applied after cleanup, see §14)
 backend/api/security_tests/ (new)        - dedicated Group 3 regression package
 backend/api/tests_assisted_allocation.py - one test updated for the new G3-03 API contract
 backend/dormify/settings.py              - G3-10, G3-13 (incl. post-review correction, see §4a),
@@ -60,21 +68,30 @@ this pass are documented in §10 below instead.
 **One:** `backend/api/migrations/0019_user_unique_region_boss_per_region.py` — adds a partial
 `UniqueConstraint` on `User(region)` where `role='region_boss'` (G3-19 DB backstop).
 
+> **Update:** the paragraphs immediately below describe the state **at the time this section was
+> originally written** (i.e., before PR #71 merged) and are kept as the historical record of why
+> the migration wasn't applied yet at that point. That blocker has since been resolved — see
+> **§14 "Production Closeout"** for the actual cleanup and migration application that happened
+> afterward. Do not read the "NOT applied to Azure" statement below as the current state.
+
 - Created and verified against the **isolated local test database only** (`ENV_FILE=.env.test`,
   applied automatically by `manage.py test`, and directly tested in
   `api/security_tests/test_manager_uniqueness.py::RegionBossPartialUniqueConstraintTests`).
-- **NOT applied to Azure.** Azure currently has **3** `region_boss` users for one region
-  (Gush-Elyon) and **0** for another (Technion, temporarily covered by its `central_admin` per
-  team decision) — applying this migration to Azure as-is would fail outright (a UNIQUE
-  constraint cannot be created over existing violating rows).
-- **Exact blocker, verbatim:** *"Production migration requires approved cleanup of the existing
-  duplicate Gush-Elyon region_boss records before this constraint can be applied."* The known
-  real manager is `regional.manager@example.edu`; the two suspected unused/test accounts
-  (`legacy.manager1@example.edu`, `legacy.manager2@example.edu`) were **not modified** — no email
-  addresses are hardcoded anywhere in the migration or application code, per instruction.
+- **NOT applied to Azure at the time of writing.** Azure at that point had **3** `region_boss`
+  users for one region (Gush-Elyon) and **0** for another (Technion, temporarily covered by its
+  `central_admin` per team decision) — applying this migration to Azure as-is would have failed
+  outright (a UNIQUE constraint cannot be created over existing violating rows).
+- **Exact blocker as originally stated, verbatim:** *"Production migration requires approved
+  cleanup of the existing duplicate Gush-Elyon region_boss records before this constraint can be
+  applied."* The known real manager was `regional.manager@example.edu`; the two suspected
+  unused/test accounts (`legacy.manager1@example.edu`, `legacy.manager2@example.edu`) were **not
+  modified** as part of this implementation pass — no email addresses were hardcoded anywhere in
+  the migration or application code, per instruction. (This cleanup was subsequently carried out
+  manually by the team, outside application code — see §14.)
 - The **application-level** guard (`accounts/serializers.py`, race-safe via
-  `select_for_update()` on the `Region` row) is fully active and enforced today, independent of
-  this migration, and does not require any Azure cleanup to work.
+  `select_for_update()` on the `Region` row) was fully active and enforced independently of this
+  migration from the moment this pass was implemented, and never required any Azure cleanup to
+  work. It remains active today alongside the now-applied database constraint.
 
 ## 4a. G3-13 correction: DEBUG now defaults to False
 
@@ -256,14 +273,14 @@ production-facing deployment:
 | `SEED_ADMIN_PASSWORD` / `SEED_STAFF_PASSWORD` | dev seed only | `backend/seed.py` refuses to run at all unless `DEBUG=True` |
 | `TEST_DB_USER` / `TEST_DB_PASSWORD` | local Docker test DB | defaults preserve current `docker-compose.yml` behavior |
 
-**Also required, operationally, before enabling the G3-19 DB constraint on Azure:** an approved
-manual cleanup reducing Gush-Elyon to exactly one `region_boss` (see §4). This is a data decision
-for the team, deliberately not automated here.
+**Previously required, operationally, before enabling the G3-19 DB constraint on Azure:** an
+approved manual cleanup reducing Gush-Elyon to exactly one `region_boss` (see §4). This was a data
+decision for the team, deliberately not automated by this implementation pass — **it has since
+been completed and the constraint is now live on Azure; see §14.**
 
-**Recreate the test-DB container** for the G3-20 binding change to take effect
-(`docker-compose down test_db && docker-compose up -d test_db` or equivalent) — editing the
-compose file does not live-migrate an already-running container's port binding, and this pass did
-not restart it.
+**Recreating the test-DB container** was previously listed here as still required for the G3-20
+binding change to take effect (editing the compose file alone does not live-migrate an
+already-running container's port binding). **This has since been done — see §14.**
 
 ## 11. Known residual risks
 
@@ -272,7 +289,9 @@ not restart it.
   is now limited to a live, in-memory access token with a ≤20-minute blast radius, not a
   long-lived token an attacker can exfiltrate and reuse later — this is the realistic mitigation
   achievable without a full cookie-authenticated architecture (out of scope per the brief).
-- **G3-20:** binding fix is in the compose file but not yet live on the running container (§10).
+- **G3-20:** ~~binding fix is in the compose file but not yet live on the running container~~ —
+  **resolved**, the `test_db` container was recreated and its localhost-only binding verified
+  live; see §14.
 - **G3-13/G3-23:** now secure by default (§4a) — hardening activates automatically for any
   environment that omits `DEBUG`, no operator action required. The one remaining gap is
   operational, not code: the local (non-Docker) `.env` file has no `DEBUG`/`SECRET_KEY` of its own
@@ -280,7 +299,11 @@ not restart it.
   direct `python manage.py runserver`/`check` against it will fail closed until someone adds
   `DEBUG=True` (or a real `SECRET_KEY`) to that file by hand. Docker-based local dev is unaffected
   (fixed in §4a) and is the primary way this project is run locally per `docker-compose.yml`.
-- **G3-19 DB constraint:** not live on Azure pending the manual cleanup in §4.
+- **G3-19 DB constraint:** ~~not live on Azure pending the manual cleanup in §4~~ — **resolved**,
+  the cleanup was completed and the constraint applied to Azure after PR #71 merged; see §14. The
+  constraint guarantees *at most one* `region_boss` per region, not "exactly one" — the no-zero-
+  managers side of that guarantee remains the application-level guard's responsibility (§4), not
+  something a database constraint alone can express.
 
 ## 12. What could not be fully completed
 
@@ -291,12 +314,17 @@ not restart it.
 - The real local `.env` (Azure-connected) — permission-blocked from this pass (confirmed: even a
   read attempt is denied). It now needs `DEBUG=True` or a real `SECRET_KEY` added by hand for any
   direct, non-Docker use of that file to keep working (§4a, §11).
-- The G3-19 database constraint could not be applied anywhere except the local test database, by
-  design (Azure has existing violating data — see §4).
-- The docker-compose port-binding fix (G3-20) is written but not yet live on the running
+- ~~The G3-19 database constraint could not be applied anywhere except the local test database, by
+  design (Azure has existing violating data — see §4).~~ **Resolved after PR #71 merged** — the
+  violating data was cleaned up manually by the team and the constraint is now applied to Azure;
+  see §14. This bullet is kept struck through, rather than deleted, as part of the historical
+  record of what this implementation pass itself could and couldn't do.
+- ~~The docker-compose port-binding fix (G3-20) is written but not yet live on the running
   container — recreating a running container for that specific binding change was judged out of
   scope for a code-only pass (unlike the `backend` service, which had to be recreated as a direct,
-  disclosed consequence of the G3-13 correction itself — see §4a).
+  disclosed consequence of the G3-13 correction itself).~~ **Resolved** — the `test_db` container
+  was subsequently recreated and its binding verified; see §14. Kept struck through as part of the
+  historical record of what this implementation pass itself did and didn't cover.
 
 ## 13. Confirmation: allocation optimization logic untouched
 
@@ -309,3 +337,77 @@ Zero changes anywhere under `backend/allocation/` throughout this entire pass. E
 report targets authorization wrappers, serializers, view-layer permission/region checks, JWT
 lifecycle, settings, and their frontend callers — never solver scoring, matching, or CP-SAT
 weights/logic.
+
+## 14. Production Closeout
+
+Everything above this section documents the implementation and review pass that led up to the
+merge. This section documents what happened **after** that merge, closing out the two items
+(G3-19 in §4/§10/§11/§12, and G3-20 in §10/§11/§12) that were explicitly left as operational
+follow-ups rather than something this pass could resolve itself.
+
+**1. Merge.** Group 3's code was merged into `main` in **PR #71**.
+
+**2. `token_blacklist` migrations applied to Azure.** The `rest_framework_simplejwt.token_blacklist`
+app's own migrations (enabling G3-14's server-side refresh-token revocation) were applied
+successfully to the Azure database.
+
+**3. Gush-Elyon duplicate-manager cleanup, completed manually and safely, before touching
+`0019`.** With the migration order deliberately cleanup-first:
+   - `legacy.manager1@example.edu` was removed.
+   - `legacy.manager2@example.edu` was removed.
+   - `regional.manager@example.edu` remains — the sole Gush-Elyon regional manager.
+
+**4. Read-only verification, after cleanup.** Confirmed on Azure:
+   - No remaining accounts with either removed email address.
+   - Gush-Elyon has exactly one active `region_boss`.
+   - No region, anywhere, has duplicate `region_boss` users.
+
+**5. Migration plan checked before applying.** `showmigrations`/plan output for
+`api.0019_user_unique_region_boss_per_region` showed only that one migration pending — nothing
+else queued alongside it.
+
+**6. `api.0019_user_unique_region_boss_per_region` applied to Azure.** Applied successfully, now
+that no row violated the constraint.
+
+**7. Confirmed via `showmigrations api`:**
+
+```
+[X] 0019_user_unique_region_boss_per_region
+```
+
+**8. Therefore: the previous production blocker for G3-19 is RESOLVED.** The condition documented
+in §4/§10/§11/§12 above ("cannot apply `0019` to Azure until the Gush-Elyon duplicates are cleaned
+up") no longer holds — the cleanup happened first, verified, and the migration was applied after.
+
+**9. Database-level uniqueness protection is now active in Azure.** A partial `UNIQUE` constraint
+on `User(region)` where `role='region_boss'` now enforces, at the database layer, that no region
+can ever have more than one `region_boss` row — independent of, and in addition to, the
+application-level `select_for_update()` guard in `accounts/serializers.py` (§4).
+
+**10. What the constraint does and does not guarantee.** The database constraint guarantees **at
+most one** `region_boss` per region — it does **not** by itself guarantee **exactly one**. A
+region with zero `region_boss` users (the Technion case, temporarily covered by its
+`central_admin` per team decision, §4) does not violate this constraint and is not something a
+uniqueness constraint can express. Preventing a region from being left at zero managers (via
+deletion, demotion, or reassignment) remains the responsibility of the application-level rules,
+not the database constraint.
+
+**11. Allocation optimization logic.** No changes were made to `backend/allocation/solver.py`,
+`backend/allocation/live_registry.py`, or any allocation scoring/matching/CP-SAT logic as part of
+this closeout — this was a data-cleanup and migration-application step only.
+
+**12. G3-20 (local Docker test-DB binding) closed out.** §10/§11/§12 above previously noted that
+the `docker-compose.yml` binding fix (`127.0.0.1:5433:5432` instead of `0.0.0.0:5433:5432`) was
+written but not yet live on the running container. Since then:
+   - The `test_db` container was recreated.
+   - Its active port binding was verified live as `127.0.0.1:5433->5432/tcp`.
+   - **G3-20 is now operationally complete** — the fix is both written and live, with no further
+     action pending. (This is a disposable local test database, never real data — see §4a/§10 for
+     why this was always a low-severity, hygiene-only finding.)
+
+**13. No secrets recorded.** No passwords, tokens, hashes, or credentials are included anywhere in
+this section or this report — only account email addresses (already public/known staff identifiers
+referenced elsewhere in this same document, §4) and migration/verification/binding outcomes.
+
+This closeout update is documentation-only and changes no application code, migrations, tests,
+Docker/config, or frontend/backend source.
