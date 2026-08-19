@@ -1341,7 +1341,7 @@ class StudentRequestSerializer(serializers.ModelSerializer):
         # student.prefetched_placement_history_all holds this student's 10
         # most-recent bed_assignments (any status, DB-bounded via
         # _top10_bed_assignment_history_qs() - see
-        # project-quality/performance/GROUP1_PLACEMENT_HISTORY_VERIFICATION.md),
+        # project-quality/performance/PERFORMANCE_FINAL_REPORT.md),
         # already ordered '-assigned_at' and select_related, fetched once
         # regardless of how many StudentRequest rows are on this page. The
         # [:10] slice below is now a defensive no-op (the DB query already

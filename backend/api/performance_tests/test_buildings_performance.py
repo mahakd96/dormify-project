@@ -4,12 +4,9 @@ Buildings list endpoint (GET /api/buildings/) performance regression tests.
 History:
 - Phase 2 (baseline measurement, code unchanged): this module captured the
   N+1 pattern in BuildingSerializer (finding BLD-01) - query count scaled
-  as `2 + 6*N` with building count N. That evidence is frozen at
-  project-quality/performance/evidence/BUILDINGS_BASELINE_QUERY_COUNTS.txt
-  and project-quality/performance/evidence/BUILDINGS_BASELINE_TEST_RUN_LOG_run1.txt
-  and is NOT reproduced or overwritten by this module going forward - see
-  project-quality/performance/BUILDINGS_BASELINE_SUMMARY.md for the full
-  Phase 2 write-up.
+  as `2 + 6*N` with building count N. That baseline evidence is
+  summarized in project-quality/performance/PERFORMANCE_FINAL_REPORT.md
+  and is not reproduced or overwritten by this module going forward.
 - Phase 3 (this version, current code): BuildingViewSet.get_queryset() now
   annotates apartment_count/room_count/bed_count/occupied_beds via
   correlated Subquery expressions
@@ -38,13 +35,13 @@ via a local-only .env.test:
     ENV_FILE=.env.test python manage.py test api.performance_tests.test_buildings_performance -v 2
 
 Modeled directly on the CaptureQueriesContext approach already used in
-api/tests_students_performance.py for the earlier Students-page N+1
-investigation.
+api/performance_tests/test_students_performance.py for the earlier
+Students-page N+1 investigation.
 
 Lives in api/performance_tests/ - the dedicated home for performance /
 query-efficiency regression tests (see performance_tests/__init__.py);
 business-logic/permission tests for buildings stay in
-api/tests_inventory.py.
+api/tests/test_inventory.py.
 """
 
 import re

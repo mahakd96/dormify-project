@@ -28,7 +28,7 @@ import { localizeRegionName, localizeById, localizeBuildingLabel } from '../util
 //     rollup for Occupancy, a "most room" list for Available Beds, a
 //     demand-share donut for Demand) - never added just to fill space.
 //
-// See DATA_ANALYSIS_REDESIGN_V3_FINAL_REPORT.md, "Visual Analytics
+// See DATA_ANALYSIS_REDESIGN_DESIGN_HISTORY.md, "Visual Analytics
 // Redesign" section, for the full design rationale.
 // ---------------------------------------------------------------------
 

@@ -123,7 +123,7 @@ class RegionalIsolationTests(TestCase):
         # instead, same as this endpoint already did for a directly
         # cross-region student (see test_student_detail_cross_region_403
         # below). See
-        # project-quality/security/GROUP3_SECURITY_IMPLEMENTATION_REPORT.md.
+        # project-quality/security/SECURITY_AND_AUTHORIZATION_REPORT.md.
         resp = self.client.get('/api/assisted-allocation/queue/', {'region': self.region_b.id})
         self.assertEqual(resp.status_code, 403)
 

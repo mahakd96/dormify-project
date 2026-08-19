@@ -22,8 +22,8 @@ ROW_NUMBER()-windowed raw-SQL subquery referenced via
 `pk__in=RawSQL(...)`), which this module now confirms loads exactly 10
 rows/student (not 100) at the same stress scale, with identical query count
 and identical (correct) API output. See
-project-quality/performance/GROUP1_PLACEMENT_HISTORY_VERIFICATION.md for the
-full writeup (before/after measurements and the decision rationale).
+project-quality/performance/PERFORMANCE_FINAL_REPORT.md for the
+before/after measurements and the decision rationale.
 
 Run against Django's disposable TEST database (never touches the real
 database):

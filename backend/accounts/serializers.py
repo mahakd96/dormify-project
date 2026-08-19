@@ -206,7 +206,7 @@ class StaffUserSerializer(
         # the application level (a DB partial-unique-constraint migration
         # also exists as a backstop, see api.models.User.Meta.constraints
         # and its migration - NOT applied to the real Azure database yet,
-        # see project-quality/security/GROUP3_SECURITY_IMPLEMENTATION_REPORT.md
+        # see project-quality/security/SECURITY_AND_AUTHORIZATION_REPORT.md
         # for why). select_for_update() locks the REGION row itself as the
         # serialization point: two concurrent "create a region_boss for
         # region X" requests can never both pass the exists() check below -

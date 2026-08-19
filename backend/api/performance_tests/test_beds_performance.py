@@ -4,12 +4,9 @@ Beds list endpoint (GET /api/beds/) performance regression tests.
 History:
 - BLD-04 baseline measurement (code unchanged): this module captured the
   N+1 pattern in BedSerializer.is_occupied / Bed.is_occupied - query count
-  scaled as `1 + 1*N` with bed count N. That evidence is frozen at
-  project-quality/performance/evidence/BEDS_BASELINE_QUERY_COUNTS.txt and
-  project-quality/performance/evidence/BEDS_BASELINE_TEST_RUN_LOG.txt and
-  is NOT reproduced or overwritten by this module going forward - see
-  project-quality/performance/BEDS_BASELINE_SUMMARY.md for the full
-  baseline write-up.
+  scaled as `1 + 1*N` with bed count N. That baseline evidence is
+  summarized in project-quality/performance/PERFORMANCE_FINAL_REPORT.md
+  and is not reproduced or overwritten by this module going forward.
 - BLD-04 fix (this version, current code): BedViewSet.get_queryset() now
   annotates is_occupied via an Exists(...) correlated subquery
   (views._annotate_bed_occupancy) instead of BedSerializer/Bed.is_occupied
@@ -43,7 +40,7 @@ test_<DB_NAME> - never touches the real database), via a local-only
 
 Lives in api/performance_tests/ - the dedicated home for performance /
 query-efficiency regression tests (see performance_tests/__init__.py);
-business-logic/permission tests for beds stay in api/tests_inventory.py.
+business-logic/permission tests for beds stay in api/tests/test_inventory.py.
 """
 
 import re
@@ -107,7 +104,7 @@ def _build_beds(dorm_type, n_beds, admin, occupied_count=None, start_number=1):
     Creates one Building -> one active Apartment -> one active Room
     (capacity=n_beds, purely so the room record itself is internally
     consistent - not meant to represent a realistic room size, see the
-    original module docstring/BEDS_BASELINE_SUMMARY.md) -> n_beds Beds.
+    original module docstring/PERFORMANCE_FINAL_REPORT.md) -> n_beds Beds.
     Half (rounded down) of the beds get an ACTIVE BedAssignment by
     default, so is_occupied is genuinely exercised both ways.
     """

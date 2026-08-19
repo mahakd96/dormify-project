@@ -5,12 +5,9 @@ tests.
 History:
 - BLD-02 baseline measurement (code unchanged): this module captured the
   N+1 pattern in ApartmentSerializer - query count scaled as `1 + 5*N`
-  with apartment count N. That evidence is frozen at
-  project-quality/performance/evidence/APARTMENTS_BASELINE_QUERY_COUNTS.txt
-  and project-quality/performance/evidence/APARTMENTS_BASELINE_TEST_RUN_LOG.txt
-  and is NOT reproduced or overwritten by this module going forward - see
-  project-quality/performance/APARTMENTS_BASELINE_SUMMARY.md for the full
-  baseline write-up.
+  with apartment count N. That baseline evidence is
+  summarized in project-quality/performance/PERFORMANCE_FINAL_REPORT.md
+  and is not reproduced or overwritten by this module going forward.
 - BLD-02 fix (this version, current code): ApartmentViewSet.get_queryset()
   now annotates actual_room_count/bed_count/occupied_beds via correlated
   Subquery expressions (views._annotate_apartment_inventory_counts)
@@ -22,7 +19,7 @@ History:
 
 Methodology and structure mirror the BLD-01 (Buildings) fix exactly - see
 backend/api/performance_tests/test_buildings_performance.py and
-project-quality/performance/BUILDINGS_OPTIMIZATION_SUMMARY.md - down to
+project-quality/performance/PERFORMANCE_FINAL_REPORT.md - down to
 using django.test.utils.CaptureQueriesContext, the "query shape" duplicate-
 detection technique, and the annotation-fallback correctness-cross-check
 pattern. This module is intentionally self-contained (does not import from
@@ -50,7 +47,7 @@ via a local-only .env.test:
 Lives in api/performance_tests/ - the dedicated home for performance /
 query-efficiency regression tests (see performance_tests/__init__.py);
 business-logic/permission tests for apartments stay in
-api/tests_inventory.py.
+api/tests/test_inventory.py.
 """
 
 import re
