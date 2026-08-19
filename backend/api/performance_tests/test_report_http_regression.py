@@ -16,9 +16,9 @@ This module closes that gap: it calls each report endpoint through DRF's
 APIClient (a real HTTP request through Django's URL routing, view,
 permission classes, and response machinery), never `_excel_response()`,
 the workbook-generation helpers, or the report generator functions
-directly. See project-quality/performance/GROUP1_REPORT_HTTP_REGRESSION.md
-for the full writeup, including proof that these tests would have failed
-before the HttpResponse import fix.
+directly. See project-quality/performance/PERFORMANCE_FINAL_REPORT.md for
+the before/after proof that these tests would have failed before the
+HttpResponse import fix.
 
 Endpoints covered (all 5 users of _excel_response(), determined by
 grepping backend/api/views.py and cross-referencing backend/api/urls.py -

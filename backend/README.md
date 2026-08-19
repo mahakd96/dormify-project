@@ -11,7 +11,7 @@ Backend API for Dormify - Technion Dormitory Management System.
 - **Django REST Framework** - API
 - **PostgreSQL** - Database
 - **JWT** - Authentication
-- **MiniZinc** - Allocation algorithm (optional)
+- **Google OR-Tools (CP-SAT)** - Allocation algorithm
 
 ---
 
@@ -32,13 +32,14 @@ dormify-django/
 │   └── admin.py          # Admin panel
 │
 ├── allocation/           # Allocation algorithm
-│   └── solver.py         # MiniZinc integration
+│   └── solver.py         # OR-Tools CP-SAT allocation engine
 │
 ├── manage.py             # Django commands
 ├── seed.py               # Populate test data
-├── requirements.txt      # Python dependencies
-└── .env                  # Environment variables
+└── requirements.txt      # Python dependencies
 ```
+
+Note: the `.env` file lives in the **project root** (one level above `backend/`), not inside `backend/` itself — `dormify/settings.py` loads it from there.
 
 ---
 
@@ -66,12 +67,15 @@ Extract to: `C:\dormify\backend\`
 
 ### 4. Configure Environment
 
-Edit `.env` file:
+Edit `.env` in the **project root** (not inside `backend/` — see the note above):
 ```
 DB_NAME=dormify
 DB_USER=postgres
 DB_PASSWORD=YOUR_PASSWORD_HERE
+DB_HOST=localhost
 ```
+
+`DB_HOST=localhost` assumes PostgreSQL is running locally on your machine — use a different value (e.g. a Docker service name) if your database runs elsewhere. `DEBUG` defaults to `False` (see `dormify/settings.py`); it is not part of the general environment example above, but note that `python seed.py` specifically requires `DEBUG=True` to run — see Test Credentials below.
 
 ### 5. Create Virtual Environment (Recommended)
 
@@ -121,8 +125,9 @@ Server runs at: `http://localhost:8000`
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/auth/login/` | Login |
-| POST | `/api/auth/register/` | Register |
 | GET | `/api/auth/me/` | Get current user |
+
+Public self-registration has been removed. Staff accounts are created by an admin via `POST /api/staff-users/`.
 
 ### Students
 | Method | Endpoint | Description |
@@ -166,27 +171,23 @@ Server runs at: `http://localhost:8000`
 Django includes a FREE admin panel!
 
 1. Go to: `http://localhost:8000/admin/`
-2. Login with: `admin@technion.ac.il` / `123456`
+2. Login with the admin account created by `seed.py` (see Test Credentials below)
 
 ---
 
 ## 🧪 Test Credentials
 
-| Email | Password | Role |
-|-------|----------|------|
-| admin@technion.ac.il | 123456 | Central Admin |
-| canada.boss@technion.ac.il | 123456 | Region Boss |
-| canada.emp1@technion.ac.il | 123456 | Employee |
+`seed.py` no longer uses a fixed, reusable password (see the script's docstring). As an intentional safety measure, it refuses to run unless `DEBUG=True` is set (in your local `.env`), so it can't be pointed at a production database by accident. Once that's set, it creates:
 
----
+| Email | Role |
+|-------|------|
+| admin@technion.ac.il | Central Admin |
+| canada@technion.ac.il | Region Boss (Canada) |
+| canada.emp@technion.ac.il | Employee (Canada) |
+| hasmaha@technion.ac.il | Region Boss (Hasmaha) |
+| mizrah@technion.ac.il | Region Boss (Mizrah) |
 
-## 🔧 MiniZinc Setup (Optional)
-
-For advanced allocation algorithm:
-
-1. Download MiniZinc: https://www.minizinc.org/software.html
-2. Install and add to PATH
-3. Install Python library: `pip install minizinc`
+The password for each account is taken from the `SEED_ADMIN_PASSWORD` / `SEED_STAFF_PASSWORD` environment variables if set, otherwise a random password is generated per run and printed once to the console (never written back into source).
 
 ---
 

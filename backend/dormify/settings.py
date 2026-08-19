@@ -36,7 +36,7 @@ load_dotenv(BASE_DIR.parent / ENV_FILE)
 #     ENV_FILE (.env / .env.test) via load_dotenv() above - add
 #     `DEBUG=True` to your local .env for that flow, the same way
 #     .env.test already does for the test suite.
-# See project-quality/security/GROUP3_SECURITY_IMPLEMENTATION_REPORT.md
+# See project-quality/security/SECURITY_AND_AUTHORIZATION_REPORT.md
 # (G3-13) for the full rationale and the one remaining manual step for a
 # real production deployment: DEBUG=False (now the default, but still
 # fine to set explicitly for clarity) + a real SECRET_KEY.
