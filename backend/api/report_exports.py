@@ -209,7 +209,7 @@ def _load_data(region_id=None, include_students=True):
     with zero effect on any other report (dormify_report,
     student_actions_report, manual_review_report all keep the
     include_students=True default, unchanged).
-    (project-quality/performance/GROUP1_BACKEND_PERFORMANCE_AUDIT.md, G1-20.)
+    (project-quality/performance/PERFORMANCE_FINAL_REPORT.md, G1-20.)
     """
     active_assignments  = []
     assignment_map      = {}
@@ -672,7 +672,7 @@ def _compute_student_issues(all_students):
     'תעודת זהות כפולה') was always identical across all three calls to
     begin with; this just computes that one identical result once and
     reuses it, instead of recomputing it 3 times.
-    (project-quality/performance/GROUP1_BACKEND_PERFORMANCE_AUDIT.md, G1-19.)
+    (project-quality/performance/PERFORMANCE_FINAL_REPORT.md, G1-19.)
 
     Returns a list of (student, issues) pairs, same order as all_students.
     """

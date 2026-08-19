@@ -946,7 +946,7 @@ def _annotate_building_inventory_counts(queryset):
     apartment_count/room_count/bed_count/occupied_beds SerializerMethodFields
     used to run once per building (see performance baseline finding BLD-01:
     ~6 extra SQL queries per building row, confirmed in
-    project-quality/performance/BUILDINGS_BASELINE_SUMMARY.md).
+    project-quality/performance/PERFORMANCE_FINAL_REPORT.md).
 
     Each count is computed as an independent correlated subquery (Subquery +
     OuterRef grouped by the target FK), not a plain Count() annotation on a
@@ -1355,7 +1355,7 @@ def _annotate_apartment_inventory_counts(queryset):
     actual_room_count/bed_count/occupied_beds SerializerMethodFields used to
     run once per apartment (see performance baseline finding BLD-02: ~5
     extra SQL queries per apartment row, confirmed in
-    project-quality/performance/APARTMENTS_BASELINE_SUMMARY.md).
+    project-quality/performance/PERFORMANCE_FINAL_REPORT.md).
 
     Same technique as _annotate_building_inventory_counts (BLD-01, already
     fixed): each count is an independent correlated subquery (Subquery +
@@ -1543,7 +1543,7 @@ def _annotate_room_inventory_counts(queryset):
     current_occupancy/available_beds/is_full/bed_count/
     has_missing_bed_records fields used to run per room (see performance
     baseline finding BLD-03: ~7 extra SQL queries per active room row,
-    confirmed in project-quality/performance/ROOMS_BASELINE_SUMMARY.md).
+    confirmed in project-quality/performance/PERFORMANCE_FINAL_REPORT.md).
 
     Same technique as _annotate_building_inventory_counts (BLD-01) /
     _annotate_apartment_inventory_counts (BLD-02): the raw counts are
@@ -1741,7 +1741,7 @@ def _annotate_bed_occupancy(queryset):
     Queryset-level replacement for the per-row query BedSerializer's
     is_occupied field used to run once per bed (see performance baseline
     finding BLD-04: ~1 extra SQL query per bed row, confirmed in
-    project-quality/performance/BEDS_BASELINE_SUMMARY.md).
+    project-quality/performance/PERFORMANCE_FINAL_REPORT.md).
 
     Unlike Buildings/Apartments/Rooms (BLD-01/02/03), this is a single
     boolean check, not a count - Exists(...) is the natural fit rather
@@ -1929,7 +1929,7 @@ class StudentViewSet(viewsets.ModelViewSet):
             # field) - added here only, so the list query's JOIN shape is
             # completely unchanged. Previously a lazy per-response query
             # on every detail/create/update.
-            # (project-quality/performance/GROUP1_BACKEND_PERFORMANCE_AUDIT.md, G1-16.)
+            # (project-quality/performance/PERFORMANCE_FINAL_REPORT.md, G1-16.)
             queryset = queryset.select_related('batch')
 
         user = self.request.user
@@ -2262,9 +2262,9 @@ class TransferViewSet(viewsets.ModelViewSet):
             # creation unconditionally (confirmed via direct
             # reproduction: Transfer(movement_type='room') raises
             # TypeError). See
-            # project-quality/concurrency/GROUP2_CONCURRENCY_LOAD_AUDIT.md
+            # project-quality/concurrency/CONCURRENCY_AND_LOAD_AUDIT.md
             # (INCIDENTAL-1) and
-            # GROUP2_CONCURRENCY_LOAD_IMPLEMENTATION_REPORT.md.
+            # CONCURRENCY_AND_LOAD_TESTING_REPORT.md.
             transfer = serializer.save(
                 requested_by=self.request.user,
                 from_room=from_room,
@@ -3466,7 +3466,7 @@ def _create_student_from_request_data(data):
     resulting IntegrityError from student.save() below is caught by the
     caller (StudentRequestViewSet.approve()'s except IntegrityError
     clause) and converted into a clean 4xx - see
-    project-quality/concurrency/GROUP2_CONCURRENCY_LOAD_IMPLEMENTATION_REPORT.md.
+    project-quality/concurrency/CONCURRENCY_AND_LOAD_TESTING_REPORT.md.
     """
     if not data:
         raise ValueError('לא סופקו פרטי סטודנט חדש עבור בקשה זו.')
@@ -3601,7 +3601,7 @@ def _top10_bed_assignment_history_qs():
     (by assigned_at desc, id desc as a deterministic tiebreak), used as the
     queryset for the placement_history Prefetch below.
 
-    Verified (project-quality/performance/GROUP1_PLACEMENT_HISTORY_VERIFICATION.md):
+    Verified (project-quality/performance/PERFORMANCE_FINAL_REPORT.md):
     prefetching this relation with an ordinary (unbounded) queryset and
     slicing to [:10] in Python - the original Group 1 fix - stays flat at 5
     queries per page, but loads ALL of every relevant student's historical
@@ -3663,7 +3663,7 @@ class StudentRequestViewSet(viewsets.ModelViewSet):
             'destination_regions',
             # current_bed and placement_history each used to run their own
             # BedAssignment query per row (see
-            # project-quality/performance/GROUP1_BACKEND_PERFORMANCE_AUDIT.md,
+            # project-quality/performance/PERFORMANCE_FINAL_REPORT.md,
             # G1-09). They need DIFFERENT slices of the same
             # student.bed_assignments relation (current_bed: at most the
             # one ACTIVE assignment; placement_history: the most recent 10
@@ -7404,7 +7404,7 @@ def _annotate_analysis_building_occupancy(buildings_qs, rooms_qs, assignments_qs
     analysis_data()'s occupancy_data loop used to run once per building row
     (confirmed baseline finding: 3 extra SQL queries per building,
     `total_queries = 31 + 3*N`, see
-    project-quality/performance/ANALYSIS_BASELINE_SUMMARY.md):
+    project-quality/performance/PERFORMANCE_FINAL_REPORT.md):
 
       - building_capacity: sum(building_rooms_qs.values_list('capacity', flat=True))
       - building_assigned_beds: assignments_qs.filter(...).values('bed_id').distinct().count()
@@ -7572,7 +7572,7 @@ def analysis_data(request):
     # the students-by-region loop), so adding bed_id to that same fetch
     # replaces 2 redundant COUNT queries with zero additional data
     # transfer - not a "fetch more to save queries" trade-off.
-    # (project-quality/performance/ANALYSIS_FIXED_QUERY_INSPECTION.md,
+    # (project-quality/performance/PERFORMANCE_FINAL_REPORT.md,
     # "Assignments" consolidation candidate; validated at N=2,000
     # assignments in api/performance_tests/test_analysis_performance.py.)
     assignment_student_bed_pairs = list(
@@ -7670,7 +7670,7 @@ def analysis_data(request):
     # ("Requests" consolidation candidate; requests_qs's region-scoping
     # joins are all forward FK (many-to-one), so .distinct() cannot
     # affect these per-request_type group counts - see
-    # ANALYSIS_FIXED_QUERY_INSPECTION.md for the join-structure proof.)
+    # PERFORMANCE_FINAL_REPORT.md for the join-structure summary.)
     pending_requests_by_type = list(
         requests_qs
         .values('request_type')
@@ -8067,7 +8067,7 @@ def _what_if_format_student_from_assignment(assignment):
         # What-If "Affected Students" table can show the same human-
         # readable labels used everywhere else in the app instead of the
         # raw enum codes above (project-quality/ui/
-        # UI_FIXES_DASHBOARD_WHATIF_REPORT.md).
+        # DASHBOARD_AND_WHATIF_REPORT.md).
         'gender_display': student.get_gender_display() if student.gender else '',
         'requested_religion_display': student.get_requested_religion_display(),
         'religious_display': student.get_religious_display(),
@@ -9286,7 +9286,7 @@ def home_dashboard(request):
         # 'region' added to select_related: RegionInboxSerializer.region_name
         # (source='region.name') was previously issuing a lazy per-request
         # fetch here whenever latest_inbox was not None - now covered.
-        # (project-quality/performance/GROUP1_BACKEND_PERFORMANCE_AUDIT.md, G1-08.)
+        # (project-quality/performance/PERFORMANCE_FINAL_REPORT.md, G1-08.)
         latest_inbox = RegionInbox.objects.select_related('batch', 'region').filter(
             region=region
         ).order_by('-created_at').first()
@@ -9315,7 +9315,7 @@ def home_dashboard(request):
     # window would silently return a wrong answer if more than N
     # non-completed runs exist before the most recent completed one
     # (explicitly the technique this fix must NOT use, per
-    # GROUP1_BACKEND_PERFORMANCE_AUDIT.md's implementation instructions).
+    # PERFORMANCE_FINAL_REPORT.md's implementation instructions).
     # Each of these 4 queries is already a single, simple,
     # appropriately-scoped lookup (an indexed .first()/.exists()/sliced
     # query, not a table scan) - the measured benefit of forcing them into
@@ -9524,7 +9524,7 @@ def home_dashboard(request):
         # dashboard anymore (see HomePage.js) - the Central Admin "regions
         # with unviewed new data" card was replaced by the clickable
         # 'regions-high-occupancy' card below (project-quality/ui/
-        # UI_FIXES_DASHBOARD_WHATIF_REPORT.md). It is kept here, unchanged,
+        # DASHBOARD_AND_WHATIF_REPORT.md). It is kept here, unchanged,
         # purely so this endpoint keeps returning pending_inbox_count for
         # backend regression coverage (see the G1-06 consolidated-groupby
         # correctness test in performance_tests/test_home_dashboard_performance.py,

@@ -52,7 +52,7 @@ class User(AbstractUser):
             #
             # IMPORTANT: this migration must NOT be applied to the real
             # Azure database as-is - known current data (see
-            # project-quality/security/GROUP3_SECURITY_IMPLEMENTATION_REPORT.md,
+            # project-quality/security/SECURITY_AND_AUTHORIZATION_REPORT.md,
             # G3-19) has three region_boss users for one region, which
             # violates this constraint. It has been created and tested
             # against the isolated local test database only. Applying it to

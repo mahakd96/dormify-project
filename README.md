@@ -27,7 +27,7 @@ The main system areas include:
 * role- and region-based access control;
 * operational dashboards and analysis;
 * Excel report generation;
-* allocation, regression, performance, and concurrency testing.
+* allocation, regression, performance, concurrency, and security testing.
 
 The backend is the authoritative layer for permissions, placement validation, assignment integrity, and allocation rules.
 
@@ -96,7 +96,8 @@ dormify-project/
 │   │   ├── migrations/
 │   │   ├── management/
 │   │   ├── performance_tests/
-│   │   └── concurrency_tests/
+│   │   ├── concurrency_tests/
+│   │   └── security_tests/
 │   │
 │   ├── accounts/
 │   ├── canada_algorithm_tests/
@@ -491,7 +492,8 @@ backend/
 ├── api/
 │   ├── tests_*.py
 │   ├── performance_tests/
-│   └── concurrency_tests/
+│   ├── concurrency_tests/
+│   └── security_tests/
 │
 └── canada_algorithm_tests/
 ```
@@ -557,6 +559,28 @@ backend/api/concurrency_tests/
 Contains tests for operations where multiple requests may interact with the same database state.
 
 These tests complement transactional backend safeguards and database constraints used by assignment and inventory workflows.
+
+---
+
+## Security Tests
+
+```text
+backend/api/security_tests/
+```
+
+Contains tests that verify security-relevant backend behavior directly, including:
+
+* region scoping, so a region identifier supplied by the client cannot expose or modify another region's data;
+* administrative authorization for Region/DormType writes and for Assisted Allocation assign/override actions;
+* the JWT login/refresh/logout lifecycle, including HttpOnly refresh cookies and server-side revocation on logout;
+* rate limiting on authentication endpoints;
+* removal of public self-registration;
+* current-password re-authentication before an account email change;
+* uniqueness of a single region_boss per region;
+* lockdown of the legacy Transfer API against generic PATCH/PUT and unauthorized deletion;
+* protection of `Student.assigned_room` and student/request records against direct or unauthorized modification;
+* upload validation ahead of expensive file parsing;
+* production-safe default settings (SECRET_KEY, DEBUG-gated HTTPS/cookie hardening) and the absence of hardcoded reusable seed passwords.
 
 ---
 
@@ -731,6 +755,7 @@ For developers joining the project, the following files are useful starting poin
 | Controlled solver tests    | `backend/canada_algorithm_tests/`        |
 | Performance tests          | `backend/api/performance_tests/`         |
 | Concurrency tests          | `backend/api/concurrency_tests/`         |
+| Security tests             | `backend/api/security_tests/`            |
 | Engineering records        | `project-quality/`                       |
 
 ---
