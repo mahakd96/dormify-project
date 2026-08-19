@@ -4,13 +4,9 @@ Rooms list endpoint (GET /api/rooms/) performance regression tests.
 History:
 - BLD-03 baseline measurement (code unchanged): this module captured the
   N+1 pattern in RoomSerializer/Room model properties - query count scaled
-  as `1 + 7*N` for active rooms (3 for an inactive room). That evidence is
-  frozen at
-  project-quality/performance/evidence/ROOMS_BASELINE_QUERY_COUNTS.txt and
-  project-quality/performance/evidence/ROOMS_BASELINE_TEST_RUN_LOG.txt and
-  is NOT reproduced or overwritten by this module going forward - see
-  project-quality/performance/ROOMS_BASELINE_SUMMARY.md for the full
-  baseline write-up.
+  as `1 + 7*N` for active rooms (3 for an inactive room). That baseline
+  evidence is summarized in project-quality/performance/PERFORMANCE_FINAL_REPORT.md
+  and is not reproduced or overwritten by this module going forward.
 - BLD-03 fix (this version, current code): RoomViewSet.get_queryset() now
   annotates current_occupancy/available_beds/is_full/bed_count/
   has_missing_bed_records via correlated Subquery + Case/When/F
@@ -25,8 +21,7 @@ Methodology and structure mirror the BLD-01 (Buildings)/BLD-02
 (Apartments) fixes exactly - see
 backend/api/performance_tests/test_buildings_performance.py,
 test_apartments_performance.py, and
-project-quality/performance/BUILDINGS_OPTIMIZATION_SUMMARY.md /
-APARTMENTS_OPTIMIZATION_SUMMARY.md - down to using
+project-quality/performance/PERFORMANCE_FINAL_REPORT.md - down to using
 django.test.utils.CaptureQueriesContext, the "query shape" duplicate-
 detection technique, and the annotation-fallback correctness-cross-check
 pattern. Self-contained (does not import from the other performance_tests
@@ -50,7 +45,7 @@ test_<DB_NAME> - never touches the real database), via a local-only
 
 Lives in api/performance_tests/ - the dedicated home for performance /
 query-efficiency regression tests (see performance_tests/__init__.py);
-business-logic/permission tests for rooms stay in api/tests_inventory.py.
+business-logic/permission tests for rooms stay in api/tests/test_inventory.py.
 """
 
 import re

@@ -50,7 +50,7 @@
 
 // Region.id -> English display name. Keyed by the actual primary keys
 // seeded in the system today (verified directly against the running
-// database - see DATA_ANALYSIS_REDESIGN_V3_FINAL_REPORT.md, the
+// database - see DATA_ANALYSIS_REDESIGN_DESIGN_HISTORY.md, the
 // "System-Wide Location Name Localization" section, for how these were
 // confirmed).
 //
@@ -141,7 +141,7 @@ const NAME_EN_BY_HEBREW_TEXT = {
   // the "מעונות" prefix). These are NOT part of the user-supplied
   // six-region list above; they were not found published anywhere in
   // English, so consistent English names were hand-picked and documented
-  // per DATA_ANALYSIS_REDESIGN_V3_FINAL_REPORT.md's "any names for
+  // per DATA_ANALYSIS_REDESIGN_DESIGN_HISTORY.md's "any names for
   // which no reliable translation could be found" note - reusing
   // MapPage.js's pre-existing terminology where it already covered one
   // (Rifkin, Canada, Neve America, Senate, Broshim, Kfar Hasmaha,

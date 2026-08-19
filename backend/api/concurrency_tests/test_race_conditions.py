@@ -2,7 +2,7 @@
 Group 2 — Concurrency & Load: race-condition REGRESSION tests.
 
 History: this module started as the Group 2 AUDIT's race-condition
-reproduction tests (see project-quality/concurrency/GROUP2_CONCURRENCY_LOAD_AUDIT.md,
+reproduction tests (see project-quality/concurrency/CONCURRENCY_AND_LOAD_AUDIT.md,
 G2-01/G2-02, and evidence/GROUP2_RACE_CONDITION_EVIDENCE.txt - preserved
 unmodified as the "before" record). This module has since been upgraded,
 in the Group 2 IMPLEMENTATION phase, into true regression tests for the
@@ -58,7 +58,7 @@ from api.models import (
 EVIDENCE_DIR = Path(settings.BASE_DIR).parent / 'project-quality' / 'concurrency' / 'evidence'
 # AFTER-FIX evidence file - deliberately distinct from the audit's own
 # evidence/GROUP2_RACE_CONDITION_EVIDENCE.txt, which is preserved
-# unmodified as the "before" record (see GROUP2_CONCURRENCY_LOAD_IMPLEMENTATION_REPORT.md).
+# unmodified as the "before" record (see CONCURRENCY_AND_LOAD_TESTING_REPORT.md).
 EVIDENCE_FILE = EVIDENCE_DIR / 'GROUP2_RACE_CONDITION_EVIDENCE_AFTER_FIX.txt'
 _evidence_lines = []
 

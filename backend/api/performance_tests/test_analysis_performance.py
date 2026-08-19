@@ -7,25 +7,21 @@ History:
   per-building N+1 pattern in analysis_data()'s occupancy_data loop -
   query count scaled as `31 + 3*N` with building count N (3 extra queries
   per building: capacity sum, distinct assigned-bed count, room count -
-  views.py, formerly lines ~6657-6689). That evidence is frozen at
-  project-quality/performance/evidence/ANALYSIS_BASELINE_QUERY_COUNTS.txt
-  and project-quality/performance/evidence/ANALYSIS_BASELINE_TEST_RUN_LOG.txt
-  and is NOT reproduced or overwritten by this module going forward - see
-  project-quality/performance/ANALYSIS_BASELINE_SUMMARY.md for the full
-  Phase 1 write-up.
+  views.py, formerly lines ~6657-6689). That baseline evidence is
+  summarized in project-quality/performance/PERFORMANCE_FINAL_REPORT.md
+  and is not reproduced or overwritten by this module going forward.
 - Phase 2 (per-building fix): `analysis_data()`'s occupancy_data loop got
   `_capacity`/`_rooms_count`/`_assigned_beds` from
   `views._annotate_analysis_building_occupancy(buildings_qs, rooms_qs,
   assignments_qs)` - three correlated Subquery annotations computed inside
   the single `buildings_qs` query - instead of running 3 extra queries per
   building row. Query count dropped from `31 + 3*N` to a flat `31`. That
-  evidence is frozen at
-  project-quality/performance/evidence/ANALYSIS_AFTER_QUERY_COUNTS.txt and
-  is NOT reproduced or overwritten by this module going forward.
+  result is summarized in project-quality/performance/PERFORMANCE_FINAL_REPORT.md
+  and is not reproduced or overwritten by this module going forward.
 - Phase 3 / Group 1 implementation (this version, current code): the
   remaining flat 31 queries were inspected
-  (ANALYSIS_FIXED_QUERY_INSPECTION.md) and 4 safe consolidations
-  implemented - the 2 unconditionally-wasted Building counts eliminated
+  (see project-quality/performance/PERFORMANCE_FINAL_REPORT.md) and 4 safe
+  consolidations implemented - the 2 unconditionally-wasted Building counts eliminated
   entirely; the assignments/rooms/transfers/requests query groups each
   consolidated from 2-3 queries down to 1. Query count is now flat `23`
   (31 - 8), reproduced identically across repeated runs, with response
@@ -76,7 +72,7 @@ test_<DB_NAME> - never touches the real database):
 
 Lives in api/performance_tests/ alongside the Buildings/Apartments/Rooms/
 Beds baselines. Business-logic/permission/scoping tests for Analysis stay
-in api/tests_analysis.py, untouched by this module.
+in api/tests/test_analysis.py, untouched by this module.
 """
 
 import re
@@ -310,7 +306,7 @@ class AnalysisPerformanceTests(TestCase):
         test_analysis_query_count_scaling_with_building_count, then a
         measurement-only test) measured `total_queries = 31 + 3*N`
         (marginal cost 3.00 queries/building, see
-        ANALYSIS_BASELINE_SUMMARY.md); it must now be ~0.
+        project-quality/performance/PERFORMANCE_FINAL_REPORT.md); it must now be ~0.
         """
         results = {}
         for n in (1, 5, 25):
@@ -596,7 +592,7 @@ class Group1FixedQueryConsolidationTests(TestCase):
     Group 1 implementation phase: correctness + stress-scale validation
     for the 4 consolidations made to analysis_data()'s previously-flat-31
     fixed query base
-    (project-quality/performance/ANALYSIS_FIXED_QUERY_INSPECTION.md).
+    (project-quality/performance/PERFORMANCE_FINAL_REPORT.md).
     Query count is now flat 23 - see AnalysisPerformanceTests above for
     the scaling proof; this class proves the CONSOLIDATED VALUES are
     still correct, including at a synthetic scale (2,000 active

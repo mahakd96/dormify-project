@@ -1,6 +1,5 @@
 # Data Analysis Page Redesign — Implementation Report
 
-**Branch:** `donia-data-analysis-redesign-v3` (based on `donia-performance-optimization`)
 **Scope:** `/analysis` page only. No changes to allocation, requests, buildings CRUD, or auth logic.
 
 ---
@@ -17,7 +16,7 @@ The `/analysis` route (`src/pages/AnalysisPage.js`) was a dense, dashboard-style
 - A full sortable/searchable data table of every building.
 - A "Recent Data Sources" card (latest upload, latest allocation run).
 
-Everything rendered at once, all the time. There was no way to ask one question and get one answer — every visit showed the same seven sections regardless of what the manager actually wanted to know, and the page read as a generic analytics dashboard rather than a Dormify-specific tool. Earlier redesign attempts on this branch (`donia-data-analysis-redesign-v1`/`v2`, visible in git history) went in the direction of *more* panels (data freshness, data quality, pressure charts), which this redesign deliberately reverses.
+Everything rendered at once, all the time. There was no way to ask one question and get one answer — every visit showed the same seven sections regardless of what the manager actually wanted to know, and the page read as a generic analytics dashboard rather than a Dormify-specific tool. Earlier redesign attempts went in the direction of *more* panels (data freshness, data quality, pressure charts), which this redesign deliberately reverses.
 
 ## 2. New product direction — "one analysis at a time"
 
@@ -92,13 +91,12 @@ Region scoping, and the central-admin-only ability to pick a region, are entirel
 
 ## 8. Verification
 
-**Environment constraints (be specific about what could and couldn't be run):**
-- This sandbox has no Docker daemon running, and the project's real database (`dormify-postgres.postgres.database.azure.com`) is not reachable from this network — so the app could not be exercised end-to-end in a browser against real production-shaped data, and `manage.py migrate`/interactive git-branch commands are blocked by this environment's permission policy, which also ruled out spinning up a seeded local server for a live click-through.
+**Verification constraints at this stage:** no reachable database or running application server was available yet, so the app could not be exercised end-to-end in a live browser against real data during this phase — that live verification was completed in the next revision (§10).
 
 **What was actually run:**
 1. `python -c "import ast; ast.parse(...)"` and `python manage.py check` (Django system check) against `backend/api/views.py` — clean, no syntax/import errors.
 2. Existing `api/tests_analysis.py` suite (12 tests: unauthenticated access, empty-DB zero state, region-boss/employee/central-admin scoping, query-param spoofing rejected, pending-requests scoping, latest-batch scoping) — run against a throwaway local SQLite DB (Postgres unreachable) — **12/12 passed**, confirming the edits didn't change any existing behavior.
-3. A temporary, purpose-built test (deleted after use, not part of this diff) seeding two regions with a mix of assigned/unassigned students and three `StudentRequest`s of two types — verified `unassigned_by_region` and `pending_requests_by_type` return exactly the expected per-region and per-type counts, and that the pre-existing `summary` numbers are unaffected — **passed**.
+3. A temporary, purpose-built test (deleted after use) seeding two regions with a mix of assigned/unassigned students and three `StudentRequest`s of two types — verified `unassigned_by_region` and `pending_requests_by_type` return exactly the expected per-region and per-type counts, and that the pre-existing `summary` numbers are unaffected — **passed**.
 4. Full `python manage.py test api` (361 tests) — **340 passed**; the 21 failures/errors are all in `api/tests_allocation.py` (the allocation-solver test suite, unrelated to `analysis_data`) and are pre-existing environment issues: 20 are `UnicodeEncodeError` from the tests' own `print()` debug output hitting Hebrew text on this Windows sandbox's `cp1252` console (nothing to do with any code change), and 1 (`test_existing_occupant_affects_second_bed_choice`) is a solver-assignment assertion that has no code path anywhere near `analysis_data`. None of the analysis tests are in this list.
 5. `npx react-scripts build` — **compiled successfully, zero ESLint warnings/errors** across the whole app (this project's build treats its lint config as part of the compile step, so a clean build is a meaningful signal — it also confirms `BuildingsPage.js` and `Sidebar.js` still compile correctly).
 6. Manual code trace against the task's 20-point checklist (permissions logic diffed line-by-line against the untouched original `analysis_data` scoping code; every `useMemo`/handler reset path traced by hand for each Analyze/Region/Group-by/Sort combination; every string interpolation checked for `undefined`/`NaN` exposure).
@@ -118,7 +116,7 @@ Region scoping, and the central-admin-only ability to pick a region, are entirel
 
 ## 10. Second revision (v3.1) — visual/UX polish pass
 
-The first redesign (§1–9 above) fixed the *product direction* — one analysis at a time instead of a seven-section dashboard. It did **not** fix the *visual execution*: once it could actually be looked at in a browser (this session had a running `docker compose` stack, unlike the session that wrote §1–9), it was clear the page still read as unfinished. This section documents the second pass, done on the same branch, same backend, same four analyses.
+The first redesign (§1–9 above) fixed the *product direction* — one analysis at a time instead of a seven-section dashboard. It did **not** fix the *visual execution*: once it could actually be looked at in a running browser, it was clear the page still read as unfinished. This section documents the second pass, on the same backend, same four analyses.
 
 ### 10.1 What was wrong with the first redesign, visually
 
@@ -133,7 +131,7 @@ Looking at the live page instead of just the code:
 
 ### 10.2 What changed in this revision
 
-Same branch (`donia-data-analysis-redesign-v3`), same `analysis_data` endpoint (**zero backend changes this round** — every field the new UI needed, including the four snapshot-strip numbers, was already in the existing `summary` object), same four analyses, same permission/grouping/sorting logic, same deterministic-insights approach. Only `src/pages/AnalysisPage.js` changed:
+Same `analysis_data` endpoint (**zero backend changes this round** — every field the new UI needed, including the four snapshot-strip numbers, was already in the existing `summary` object), same four analyses, same permission/grouping/sorting logic, same deterministic-insights approach. Only `src/pages/AnalysisPage.js` changed:
 
 - The Recharts bar chart was **removed entirely** and replaced with a custom-built ranked row list (plain HTML/CSS, no charting library) — see §10.3.
 - A slim **snapshot strip** was added under the header: four always-visible global numbers (Occupancy, Available Beds, Waiting Students, Pending Requests), sourced directly from the same `summary` object every analysis already reads — no new request, no new field.
@@ -185,7 +183,7 @@ While reviewing the live Hebrew page, `assigned / total` style fact values (e.g.
 
 - `CI=true npx react-scripts build` — **compiled successfully, zero ESLint warnings/errors** (twice: once before the bidi fix, once after).
 - `python manage.py check` — clean (no backend changes were made, so this just re-confirms nothing regressed).
-- `python manage.py test api.tests_analysis` — **12/12 passed**, run against the real project database via the running `dormify_backend`/Postgres containers (this session had Docker running, unlike the session that produced §1–9).
+- `python manage.py test api.tests_analysis` — **12/12 passed**, run against the real project database via the running `dormify_backend`/Postgres containers.
 - **Live browser click-through** (`dormify_frontend` at `localhost:3000`, logged in as the seeded central-admin user), covering:
   - Default load in Hebrew/RTL: snapshot strip, controls, ranked list, auto-selected top row's detail panel, Key Findings, Status Breakdown all rendered with real data.
   - Switching **Analyze** through all four analyses (Occupancy, Available Beds, Demand/Waiting, Special Requests) — list, detail panel, findings, and status chips all updated correctly each time; Special Requests correctly showed the empty state (this seeded dataset has 0 pending requests) without any layout breakage.
@@ -208,7 +206,7 @@ While reviewing the live Hebrew page, `assigned / total` style fact values (e.g.
 
 ## 11. Visual Analytics Redesign (v4)
 
-**Current state of the page**, superseding §1–10. This round was commissioned explicitly as a product-design task ("not just a CSS cleanup") because v3.1's ranked-row list, while no longer empty or chart-generic, still made every analysis look like the same component with different numbers — the exact failure mode this round exists to fix. Full narrative, screenshots-in-prose, and design rationale live in `DATA_ANALYSIS_REDESIGN_V3_FINAL_REPORT.md` §26 ("Visual Analytics Redesign (v4)"); this section is the technical-implementation summary.
+**Current state of the page**, superseding §1–10. This round was commissioned explicitly as a product-design task ("not just a CSS cleanup") because v3.1's ranked-row list, while no longer empty or chart-generic, still made every analysis look like the same component with different numbers — the exact failure mode this round exists to fix. Full narrative, screenshots-in-prose, and design rationale live in the supporting design-history document, `DATA_ANALYSIS_REDESIGN_DESIGN_HISTORY.md` §26 ("Visual Analytics Redesign (v4)"); this section is the technical-implementation summary.
 
 ### 11.1 What changed, technically
 
@@ -242,14 +240,14 @@ Every chart is built from ordinary CSS flexbox rows (`display:flex; flex-directi
 1. `CI=true npx react-scripts build` — compiled successfully, zero ESLint warnings, run twice (before and after the live browser session).
 2. `docker exec dormify_backend python manage.py test api.tests_analysis --keepdb` — **12/12 passed** against the real project database (no backend changes this round, so this is a regression check, not new coverage).
 3. `node scripts/validate_palette.js` (dataviz skill) — the categorical palette check described in §11.3.
-4. **Live browser verification** via `claude-in-chrome` against the actual running `docker compose` stack (`dormify_frontend`/`dormify_backend`/`dormify_test_db` containers), logged in as the seeded central-admin user:
+4. **Live browser verification**, via automated browser testing against the actual running `docker compose` stack (`dormify_frontend`/`dormify_backend`/`dormify_test_db` containers), logged in as the seeded central-admin user:
    - All 4 analyses switched and rendered with real data, in both Hebrew/RTL and English/LTR.
    - `Group by` Region ↔ Building on Occupancy, including the 96-building "View all" scrollable state.
    - Row/bar selection updating the detail panel live (clicked a different Demand region bar, confirmed the ring, headline number, and facts all updated together).
    - The Special Requests **empty state** (0 pending requests in this seeded DB) — clean messaging, no layout break, secondary column correctly collapsed to 1 column.
    - Console checked for runtime errors at each step — none found (only 2 pre-existing React Router future-flag warnings, unrelated).
    - Cross-check: the detail panel's "View buildings in this region" action still deep-links to `/buildings?region=…` correctly (unchanged navigation logic from the first redesign pass).
-5. **Environment note**: this sandbox exhibited intermittent `ERR_NETWORK` failures from the browser to `localhost:8000`/`3000` during testing. Confirmed via direct `curl` from the host machine, during the same failures, that both Django and the CRA dev server were responding instantly — the flakiness is in the browser-automation network path for this session, not the app. The identical flakiness was reproduced on the unrelated, untouched Homepage and Buildings pages, confirming it is environmental. Every failure recovered on retry.
+5. **Environment note**: intermittent `ERR_NETWORK` failures occurred from the browser-automation tool to `localhost:8000`/`3000` during testing. Confirmed via direct `curl` from the host machine, during the same failures, that both Django and the CRA dev server were responding instantly — the flakiness was in the browser-automation network path, not the app. The identical flakiness was reproduced on the unrelated, untouched Homepage and Buildings pages, confirming it was environmental. Every failure recovered on retry.
 6. **Not verified live**: narrow-viewport responsiveness — the `resize_window` tool call did not visibly reflow this sandbox's rendered page (a repeat of the same tooling limitation documented in §10.7/§25.7 for prior rounds). The CSS breakpoints are unchanged in structure from the already-shipped prior rounds' pattern.
 
 ### 11.6 Remaining limitations
@@ -260,7 +258,7 @@ Same as §10.8, plus: the donut's individual wedges are legend-driven (click/hov
 
 ## 12. Final Visual/Product Polish (v4.1)
 
-**Current state of the page**, superseding §1–11. Requested as one final comprehensive pass, targeting three specific, named gaps in v4 rather than a general re-polish: the top-of-page header still read as pale/flat/empty, hover states used the native browser tooltip, and zero-value bars were near-invisible slivers. Full narrative and rationale in `DATA_ANALYSIS_REDESIGN_V3_FINAL_REPORT.md` §27; this section is the technical summary. **Zero backend changes.** Chart types chosen per analysis in §11 are unchanged.
+**Current state of the page**, superseding §1–11. Requested as one final comprehensive pass, targeting three specific, named gaps in v4 rather than a general re-polish: the top-of-page header still read as pale/flat/empty, hover states used the native browser tooltip, and zero-value bars were near-invisible slivers. Full narrative and rationale in the supporting design-history document, `DATA_ANALYSIS_REDESIGN_DESIGN_HISTORY.md` §27; this section is the technical summary. **Zero backend changes.** Chart types chosen per analysis in §11 are unchanged.
 
 ### 12.1 What changed, technically
 
@@ -270,7 +268,7 @@ Same as §10.8, plus: the donut's individual wedges are legend-driven (click/hov
 2. **Tooltips.** A new shared `BarTooltip({ label, children })` component renders a `.an-tooltip` div (dark rounded panel, pointer-arrow via `::after`, `opacity`/`transform` CSS transition) as the last child of each chart item (`.an-col-item`, `.an-group-item`, both now `position: relative`), revealed via `:hover`/`:focus-within` on the parent — no JS mouse-position tracking. Content is the existing `rowContext(analysis, row, t, language)` function (already used for each chart's on-screen context text), so the tooltip text is guaranteed to match what the ranked context line elsewhere already says. Native `title` attributes were kept on every bar button as a redundant accessibility/touch fallback.
 3. **Zero-value markers.** Each of the three column-based chart components (`OccupancyColumnChart`, `AvailableStackedChart`, `DemandGroupedChart`) now computes an `isZero` boolean per bar (`pct <= 0` / `totalPct <= 0` / `waitPct <= 0` and `availIsZero` independently for the Demand chart's second bar) and, when true, renders the bar with a fixed small height (`7px`/`6px`), `background: transparent`, and an added `is-zero` class that applies a `1.5px dashed #cbd5e1` border via CSS — replacing what was previously a `min-height: 3px` sliver of the bar's normal fill colour. The value label above the bar (`0%`/`0`) is unaffected and still renders. Selected zero bars get `border-style: solid; border-color: var(--accent)` so "selected" reads distinctly from "zero, unselected."
 
-### 12.2 Design rationale (condensed — see final report §27 for full detail)
+### 12.2 Design rationale (condensed — see design history §27 for full detail)
 
 The header change specifically avoids two things the brief called out: it does not copy the Homepage's greeting hero (no username, no "good afternoon," no workflow-stage pill — an uppercase "ANALYTICS" kicker instead names the page as a workspace), and it does not reintroduce a KPI-card row (the dark panel's only numeric content is the existing per-analysis stat pills in the hero chart card below, unchanged from v4). It does reuse Dormify's own established dark-surface + translucent-pill vocabulary (the Homepage hero's `rgba(255,255,255,0.08)` action-panel treatment), which is the intended kind of "still looks like Dormify" continuity, applied to different content and a different, more restrained gradient with no radial glow.
 
@@ -278,7 +276,7 @@ The header change specifically avoids two things the brief called out: it does n
 
 1. `CI=true npx react-scripts build` — compiled successfully, zero ESLint warnings.
 2. `docker exec dormify_backend python manage.py test api.tests_analysis --keepdb` — **12/12 passed** (regression check only; no backend changes).
-3. **Live browser verification** via `claude-in-chrome` against the running `docker compose` stack (frontend container was restarted so its webpack watcher picked up the file change, as in prior rounds), logged in as the seeded central-admin user:
+3. **Live browser verification**, via automated browser testing against the running `docker compose` stack (frontend container was restarted so its webpack watcher picked up the file change, as in prior rounds), logged in as the seeded central-admin user:
    - New dark/light workspace-intro panel confirmed rendering correctly in both Hebrew/RTL and English/LTR — screenshotted at each step.
    - Custom hover tooltip confirmed on the Occupancy chart (dark panel with arrow, correct `rowContext` text including the `<bdi>`-wrapped ratio) and on the Demand grouped chart (one tooltip per region group).
    - Zero-value dashed markers confirmed visually distinct from solid bars on the Occupancy chart (five 0% buildings next to one 89% building in the seeded dataset), value labels still shown, no layout break.

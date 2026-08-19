@@ -7,7 +7,7 @@ Run against Django's disposable TEST database only:
     ENV_FILE=.env.test python manage.py test api.security_tests
 
 Never against Azure - see
-project-quality/security/GROUP3_SECURITY_IMPLEMENTATION_REPORT.md for the
+project-quality/security/SECURITY_AND_AUTHORIZATION_REPORT.md for the
 full verification method.
 """
 
@@ -15,7 +15,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from api.models import User, Region, DormType, Building, Apartment, Room, Student
-from api.matching_test_utils import create_beds_for_room
+from api.tests.matching_test_utils import create_beds_for_room
 
 TEST_PASSWORD = 'TestPass123!'
 

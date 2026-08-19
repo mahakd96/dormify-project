@@ -94,7 +94,7 @@ class RegionBossPartialUniqueConstraintTests(SecurityTestCase):
     """
     Verifies migration 0019 (unique_region_boss_per_region) against the
     LOCAL TEST DATABASE. This is the DB-level backstop referenced in
-    project-quality/security/GROUP3_SECURITY_IMPLEMENTATION_REPORT.md -
+    project-quality/security/SECURITY_AND_AUTHORIZATION_REPORT.md -
     confirmed here to actually reject a duplicate at the database layer,
     independent of the application-level check above. Never run against
     Azure - see that report for why the real database cannot take this

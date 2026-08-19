@@ -42,7 +42,7 @@ from api.models import (
 EVIDENCE_DIR = Path(settings.BASE_DIR).parent / 'project-quality' / 'concurrency' / 'evidence'
 # AFTER-FIX evidence file - the audit's own evidence/GROUP2_LOAD_MEASUREMENTS.txt
 # is preserved unmodified as the "before" record (see
-# GROUP2_CONCURRENCY_LOAD_IMPLEMENTATION_REPORT.md §9 for the comparison).
+# CONCURRENCY_AND_LOAD_TESTING_REPORT.md §9 for the comparison).
 EVIDENCE_FILE = EVIDENCE_DIR / 'GROUP2_LOAD_MEASUREMENTS_AFTER_FIX.txt'
 _evidence_lines = []
 
