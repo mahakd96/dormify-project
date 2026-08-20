@@ -1,6 +1,6 @@
 # UI Fix: Gender Terminology Standardization
 
-Branch: `donia-ui-fixes`. Continuation of the earlier reports
+Continuation of the earlier reports
 (`DASHBOARD_AND_WHATIF_REPORT.md`, `TRANSFER_AND_MANUAL_ALLOCATION_REPORT.md`), all of
 which remain untouched by this pass.
 
@@ -64,10 +64,9 @@ uses `localizeGender` directly.
 Several `male`/`female`/`מעורב`(`mixed`) label maps exist in the codebase for a **different**
 concept - an apartment's occupant-gender **category** or a building's gender **restriction**
 (e.g. "this building only houses male students") - which reuses the same two backend enum values
-but describes a physical space's policy, not a specific student's own gender identity. The task's
-instructions scope this pass to **student** gender display ("we do NOT want ... for student gender
-anywhere in the application"; the enumerated surfaces are all student-facing views). These were
-therefore intentionally left unchanged:
+but describes a physical space's policy, not a specific student's own gender identity. This pass is
+scoped to **student** gender display only; the enumerated surfaces are all student-facing views.
+These were therefore intentionally left unchanged:
 
 - `src/pages/BuildingsPage.js` - building "Gender restriction" / apartment "Category (gender)" labels.
 - `src/components/BuildingSetupWizard.js` - same building-setup gender-restriction labels.
@@ -110,12 +109,11 @@ was changed. Verified by inspection of every edited call site:
    shared helper now.
 4. Raw backend/API values confirmed unchanged (see section above).
 5. `npm run build` (production build, `CI=true`): **Compiled successfully**, no ESLint warnings.
-6. No backend production code was changed in this session, so the backend test suite was
-   intentionally **not** run, per the task's own instruction.
+6. No backend production code was changed, so the backend test suite was
+   intentionally **not** run.
 7. `git diff --stat` reviewed: only `src/utils/genderLabels.js` (new) and the six page/component
    files listed above (plus this report) are part of this change; `backend/api/concurrency_tests/`,
    `project-quality/concurrency/`, and all allocation-algorithm/solver/test code do not appear.
-8. Nothing was committed, pushed, or merged.
 
 ## Still requiring manual browser verification
 

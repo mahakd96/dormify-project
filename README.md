@@ -95,6 +95,9 @@ dormify-project/
 │   │   ├── report_exports.py
 │   │   ├── migrations/
 │   │   ├── management/
+│   │   ├── tests/
+│   │   ├── tests_allocation.py
+│   │   ├── tests_assisted_allocation.py
 │   │   ├── performance_tests/
 │   │   ├── concurrency_tests/
 │   │   └── security_tests/
@@ -490,7 +493,9 @@ Testing is divided according to the type of behavior being verified.
 backend/
 │
 ├── api/
-│   ├── tests_*.py
+│   ├── tests/                        (general functional/regression tests)
+│   ├── tests_allocation.py           (allocation solver tests, kept separate)
+│   ├── tests_assisted_allocation.py  (assisted-allocation tests, kept separate)
 │   ├── performance_tests/
 │   ├── concurrency_tests/
 │   └── security_tests/
@@ -503,12 +508,19 @@ backend/
 ## Functional and Regression Tests
 
 ```text
-backend/api/tests_*.py
+backend/api/tests/
 ```
 
 These tests verify application behavior and protect previously corrected functionality from regression.
 
-They cover multiple backend areas, including allocation, assignments, imports, inventory, Assisted Allocation, requests, transfers, reports, and system workflows.
+They cover multiple backend areas, including assignments, imports, inventory, requests, transfers, analysis, and system workflows.
+
+Allocation-specific and assisted-allocation-specific regression suites are kept separately, as flat files rather than inside `backend/api/tests/`:
+
+```text
+backend/api/tests_allocation.py
+backend/api/tests_assisted_allocation.py
+```
 
 ---
 
@@ -604,6 +616,25 @@ Tests should be configured to use the isolated test environment rather than the 
 
 This is particularly important for allocation scenarios and tests that intentionally create, modify, assign, or delete records.
 
+### Running Tests
+
+Run backend tests directly from the host, inside `backend/`, with `ENV_FILE` pointing at `.env.test` — not via `docker exec` into the running `backend` container. That container only mounts `./backend`, so it cannot see the repository-root `.env.test` (or `docker-compose.yml`), and tests that depend on either will silently misconfigure themselves or fail outright if invoked that way.
+
+PowerShell:
+
+```powershell
+cd backend
+$env:ENV_FILE=".env.test"
+python manage.py test api.tests
+```
+
+bash:
+
+```bash
+cd backend
+ENV_FILE=.env.test python manage.py test api.tests
+```
+
 ---
 
 # Project Quality
@@ -633,6 +664,8 @@ These documents provide additional engineering context for significant system ch
 
 They are separate from the application source code and are intended to preserve technical traceability.
 
+See [`project-quality/README.md`](project-quality/README.md) for the current engineering-quality reports and verification documentation.
+
 ---
 
 # Technology Stack
@@ -647,7 +680,7 @@ They are separate from the application source code and are intended to preserve 
 | Authentication              | JWT                    |
 | Data Processing             | pandas, openpyxl       |
 | Frontend API Client         | Axios                  |
-| Mapping                     | ArcGIS                 |
+| Mapping                     | Static dormitory map image with React-positioned interactive overlays |
 | Reporting / File Processing | XLSX, openpyxl         |
 | Infrastructure              | Docker, Docker Compose |
 
@@ -684,13 +717,25 @@ cd dormify-project
 
 ## Environment Configuration
 
-The backend reads database and application configuration from environment variables.
+The backend reads database and application configuration from environment variables. `.env.example` (repository root) is the committed template describing every variable the application reads — it is never read by the application directly.
 
-Configure the required environment before starting the application.
+Copy it to `.env` and fill in real local values before starting the application:
+
+```bash
+cp .env.example .env
+```
+
+`.env` itself is git-ignored and must never be committed — only `.env.example`, with placeholder values, is tracked.
 
 Database credentials, application secrets, and deployment-specific configuration should not be committed to the repository.
 
 Environment values depend on the target development or deployment environment.
+
+### Database
+
+Dormify requires a reachable PostgreSQL database to run — this is configured through the `DB_*` variables in `.env` (`DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`). This can be a locally installed PostgreSQL server or another instance you have credentials for.
+
+The `test_db` service defined under the `local-db` Docker Compose profile (see [Test Environment](#test-environment) below) is a separate, disposable database intended only for isolated automated test runs — it is **not** the normal operational application database. `docker compose up --build` does not, by itself, provide a database for the running application; `DB_HOST` (and the other `DB_*` variables) must point at a reachable PostgreSQL instance for the backend to actually serve data.
 
 ---
 
@@ -751,7 +796,8 @@ For developers joining the project, the following files are useful starting poin
 | Automatic allocation       | `backend/allocation/solver.py`           |
 | Assisted placement rules   | `backend/allocation/manual_placement.py` |
 | Live allocation state      | `backend/allocation/live_registry.py`    |
-| Functional tests           | `backend/api/tests_*.py`                 |
+| Functional/regression tests | `backend/api/tests/`                     |
+| Allocation & assisted-allocation tests | `backend/api/tests_allocation.py`, `backend/api/tests_assisted_allocation.py` |
 | Controlled solver tests    | `backend/canada_algorithm_tests/`        |
 | Performance tests          | `backend/api/performance_tests/`         |
 | Concurrency tests          | `backend/api/concurrency_tests/`         |
