@@ -1,9 +1,7 @@
 # UI Fixes: Central Admin Dashboard Card + What-If Page Localization
 
-Branch: `donia-ui-fixes` (created fresh from `main`). Scope: two UI-only fixes.
-No allocation-algorithm code or allocation-specific tests were touched, no
-Group 2 concurrency files were touched, and nothing was committed, pushed, or
-merged as part of this work.
+**Scope:** two UI-only fixes. No allocation-algorithm code or allocation-specific
+tests were touched, and no concurrency-work files were touched.
 
 ## Files changed
 
@@ -13,7 +11,7 @@ merged as part of this work.
 | `src/pages/HomePage.js` | Added a `percent` icon mapping; the Central Admin "Attention" list now hides the old `regions-pending-review` card and (since it's backend-computed already) the new high-occupancy card renders in its place, clickable, routing to `/analysis`. |
 | `src/pages/WhatIfPage.js` | Full localization pass: accepts the existing `language` prop, adds a `t` translation dictionary (Hebrew/English) covering every user-visible string, routes dynamic region/dorm-type names through the project's existing `src/utils/locationNames.js` helpers, and fixes the handful of hardcoded-LTR CSS rules (`text-align: left` → `start`, `right: 16px` → `inset-inline-end`, `padding-right` → `padding-inline-end`) so the page mirrors correctly in RTL. |
 
-No files under Group 2's concurrency work, and no allocation algorithm/test
+No files under the concurrency work, and no allocation algorithm/test
 files, appear in this diff (verified via `git diff --stat` at the end of this
 report).
 
@@ -37,12 +35,12 @@ regions", with supporting text "{count} אזורים נמצאים בתפוסה �
 ### Why the old backend item wasn't deleted
 
 The old `regions-pending-review` computation (`pending_inbox_count`) is
-still relied on by an existing, unrelated Group 1 regression test
+still relied on by an existing, unrelated performance regression test
 (`api/performance_tests/test_home_dashboard_performance.py::test_g1_06_...`),
 which asserts the exact consolidated-groupby count via that attention item's
 `count` field — there is no other field in the `/api/home/` response that
-exposes this number. Rather than touch that Group 1 test (out of scope for
-this branch) or silently weaken its coverage, `home_dashboard` still computes
+exposes this number. Rather than touch that existing test (out of scope for
+this change) or silently weaken its coverage, `home_dashboard` still computes
 and returns `regions-pending-review` unchanged; `HomePage.js`'s
 `AttentionSection` simply excludes that one `id` from what it renders
 (`ATTENTION_IDS_HIDDEN_FROM_UI`), so the useless card never reaches the user
@@ -70,7 +68,7 @@ in a comment at both the Python and JS call sites.
   in `analysis_data()`. The region-scoped (boss/employee) path is completely
   unchanged.
 - **Why this mattered:** an initial version added 2 genuinely new queries
-  and broke the existing Group 1 performance budget test
+  and broke the existing performance budget test
   (`test_query_count_after_fix_central_admin`, `assertLessEqual(total, 16)`
   — went to 18/16). The reshaped version above keeps the central-admin path
   at exactly 16 queries (verified — see Verification below) and the
@@ -84,9 +82,9 @@ in a comment at both the Python and JS call sites.
 
 Clicking the card calls `navigate('/analysis')`. `AnalysisPage.js` has no
 existing URL/query-param-driven filter state (confirmed — no
-`useSearchParams`/`useLocation` reads on mount), so per the task's
-instruction ("otherwise simply navigate to the Analysis page — do not
-redesign Analysis just for this task"), this is a plain navigation. Its
+`useSearchParams`/`useLocation` reads on mount), so this is a plain
+navigation, deliberately not a redesign of the Analysis page for this
+purpose. Its
 default state already opens on the Occupancy analysis sorted by `high`,
 which is the most relevant view for this card without any Analysis-page
 changes.
@@ -218,10 +216,10 @@ altered except to route text through `t`.
   identified no issues (0 silenced)` (run after each backend edit).
 - **Backend — targeted tests:** `python manage.py test
   api.tests_home_dashboard api.performance_tests.test_home_dashboard_performance
-  --keepdb` → **16/16 passed**, including the Group 1 `G1-06`/`G1-08`
+  --keepdb` → **16/16 passed**, including the `G1-06`/`G1-08`
   correctness tests and both query-count budget tests
   (`central_admin: 16 ≤ 16`, `region_boss: 14 ≤ 15` — both **unchanged**
-  from before this branch's edits).
+  from before these edits).
 - **Backend — What-If tests:** `python manage.py test api.tests_inventory
   --keepdb` (covers `/api/what-if/availability/simulate/` and `/confirm/`)
   → **41/41 passed**.
@@ -234,7 +232,7 @@ altered except to route text through `t`.
   `title_he`/`title_en`/`description_he`/`description_en` text — all
   passed.
 - **Frontend — production build:** `npm run build` → `Compiled
-  successfully`, no warnings, for every edit in this branch (verified after
+  successfully`, no warnings, for every edit in this change (verified after
   the dashboard change, after the What-If rewrite, and again after the
   final cleanup pass).
 - **git diff scope:** `git diff --stat` shows only `backend/api/views.py`,
@@ -250,9 +248,9 @@ altered except to route text through `t`.
 - **No allocation code/tests touched:** confirmed via `git diff --stat`
   (no files under `allocation/`, `canada_algorithm_tests/`, or any
   `*allocation*test*` path appear in the diff).
-- **No Group 2 files touched:** Group 2's concurrency work lives entirely
-  on a separate local branch that was never checked out or merged in this
-  session; `git status`/`git diff` at every step showed only the files
+- **No concurrency-work files touched:** that work lives entirely
+  on a separate branch that was never checked out or merged as part of
+  this change; `git status`/`git diff` at every step showed only the files
   listed above.
 
 ### Manual reasoning through both language states
@@ -267,7 +265,7 @@ altered except to route text through `t`.
   stay in Hebrew (their native language, correctly *not* re-translated);
   the `APPLY` keyword and reason `value`s stay literal English as designed.
 - **English (`language="en"`):** Dashboard card and all What-If text render
-  in English exactly as before this branch for wording, with the newly
+  in English exactly as before this change for wording, with the newly
   translated pieces (e.g. `gender_display`, region/dorm-type names) now
   using the project's existing curated English names via
   `locationNames.js`. Layout is LTR as before (unaffected by the RTL-only
@@ -277,7 +275,7 @@ altered except to route text through `t`.
 
 This was reasoned through statically (component logic, backend response
 shapes, and a build check) but **was not clicked through in an actual
-running browser session** in this pass:
+running browser** as part of this pass:
 
 1. Visual check of the new dashboard card's spacing/wrap at narrow widths
    next to the other attention cards, in both languages.

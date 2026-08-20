@@ -73,9 +73,12 @@ DB_NAME=dormify
 DB_USER=postgres
 DB_PASSWORD=YOUR_PASSWORD_HERE
 DB_HOST=localhost
+DEBUG=True
 ```
 
-`DB_HOST=localhost` assumes PostgreSQL is running locally on your machine — use a different value (e.g. a Docker service name) if your database runs elsewhere. `DEBUG` defaults to `False` (see `dormify/settings.py`); it is not part of the general environment example above, but note that `python seed.py` specifically requires `DEBUG=True` to run — see Test Credentials below.
+`DB_HOST=localhost` assumes PostgreSQL is running locally on your machine — use a different value (e.g. a Docker service name) if your database runs elsewhere.
+
+`DEBUG=True` is required here for local development: `dormify/settings.py` defaults `DEBUG` to `False` (secure by default), and the application refuses to start at all without a real `SECRET_KEY` once `DEBUG` is `False`. A production deployment should instead set `DEBUG=False` explicitly and provide a real, unique `SECRET_KEY` via the environment — never `DEBUG=True` and never the placeholder development key. `python seed.py` additionally refuses to run at all unless `DEBUG=True` — see Test Credentials below.
 
 ### 5. Create Virtual Environment (Recommended)
 
@@ -208,6 +211,25 @@ python manage.py createsuperuser
 
 # Shell (for testing)
 python manage.py shell
+```
+
+---
+
+## 🧪 Running Tests
+
+Run tests directly from the host, inside `backend/`, with `ENV_FILE` pointing at `.env.test` — not via `docker exec` into the running `backend` container. That container only mounts `./backend`, so it cannot see the repository-root `.env.test` (or `docker-compose.yml`), and tests that depend on either will silently misconfigure themselves or fail outright if invoked that way.
+
+PowerShell:
+```powershell
+cd backend
+$env:ENV_FILE=".env.test"
+python manage.py test api.tests
+```
+
+bash:
+```bash
+cd backend
+ENV_FILE=.env.test python manage.py test api.tests
 ```
 
 ---

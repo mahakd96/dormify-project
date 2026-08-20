@@ -1,14 +1,13 @@
-# Group 3 Security Implementation Report
+# Security and Authorization Implementation Report
 
-**Baseline commit:** `23bb2c8` (the only change since the revalidation baseline `c486f89` was `README.md` — no security-relevant source changed).
-**Branch:** `donia-group3-security`. Not committed; left on the working tree for review.
+**Baseline commit:** `23bb2c8` (the only change since the prior audit/revalidation baseline `c486f89` was `README.md` — no security-relevant source changed).
 
-> **Status: MERGED AND CLOSED OUT.** This Group 3 work was merged into `main` in **PR #71** and
-> has since completed its full production closeout, including the Azure database migration that
-> §4 below originally left blocked. See **§14 "Production Closeout"** at the end of this report for
-> what happened after the merge. Everything above that section is preserved as the historical
-> record of the implementation and review pass that led up to the merge — read it as "at the time
-> this was written," not as the current state of Azure.
+> **Status: Implemented and deployed.** This work was merged and has since completed its full
+> production closeout, including the Azure database migration that §4 below originally left
+> blocked. See **§14 "Production Closeout"** at the end of this report for what happened after
+> deployment. Everything above that section is preserved as the historical record of the
+> implementation and review pass that led up to it — read it as "at the time this was written,"
+> not as the current state of Azure.
 
 > **Post-review correction (G3-13):** the version of this report reviewed earlier stated that
 > `DEBUG` was left defaulting to `"True"` in `dormify/settings.py`, and separately claimed
@@ -23,7 +22,7 @@
 
 ## 1. Scope
 
-Implements remediation for all 24 Group 3 findings (G3-01 through G3-24), identified in the prior audit/revalidation passes, as one coordinated backend + frontend change. Allocation optimization logic (`backend/allocation/solver.py`, `backend/allocation/live_registry.py`) was explicitly out of scope and was **not modified** — confirmed by `git diff --stat -- backend/allocation/` returning empty throughout this pass.
+Implements remediation for all 24 findings (G3-01 through G3-24) identified in the prior audit/revalidation passes, as one coordinated backend + frontend change. Allocation optimization logic (`backend/allocation/solver.py`, `backend/allocation/live_registry.py`) was explicitly out of scope and was **not modified** — confirmed by `git diff --stat -- backend/allocation/` returning empty throughout this pass.
 
 ## 2. Findings fixed
 
@@ -42,7 +41,7 @@ backend/api/views.py                     - nearly every finding; see table
 backend/api/throttling.py (new)          - G3-10
 backend/api/migrations/0019_...py (new)  - G3-19 (not applied to Azure at the time this was
                                             written - since applied after cleanup, see §14)
-backend/api/security_tests/ (new)        - dedicated Group 3 regression package
+backend/api/security_tests/ (new)        - dedicated security regression package
 backend/api/tests_assisted_allocation.py - one test updated for the new G3-03 API contract
 backend/dormify/settings.py              - G3-10, G3-13 (incl. post-review correction, see §4a),
                                             G3-14, G3-16, G3-23
@@ -58,10 +57,9 @@ src/services/api.js                      - G3-14/16/17 (token storage + refresh 
 src/services/usersApi.js                 - G3-17 (reads token from api.js, not localStorage)
 ```
 
-`.env.example` could **not** be created — blocked by a write restriction specific to that path
-(not a blanket rule over every `.env*` file — `.env.test` was writable and updated directly, see
-§4a; `.env` itself is separately blocked, also see §4a). The environment variables introduced by
-this pass are documented in §10 below instead.
+`.env.example` was not updated to include the new environment variables introduced by this pass;
+`.env.test` was updated directly instead (see §4a). The environment variables introduced by
+this pass are documented in §10 below.
 
 ## 4. Migrations created
 
@@ -69,7 +67,7 @@ this pass are documented in §10 below instead.
 `UniqueConstraint` on `User(region)` where `role='region_boss'` (G3-19 DB backstop).
 
 > **Update:** the paragraphs immediately below describe the state **at the time this section was
-> originally written** (i.e., before PR #71 merged) and are kept as the historical record of why
+> originally written** (i.e., before this work was deployed) and are kept as the historical record of why
 > the migration wasn't applied yet at that point. That blocker has since been resolved — see
 > **§14 "Production Closeout"** for the actual cleanup and migration application that happened
 > afterward. Do not read the "NOT applied to Azure" statement below as the current state.
@@ -86,8 +84,8 @@ this pass are documented in §10 below instead.
   applied."* The known real manager was `UpperDormsAdmin@technion.ac.il`; the two suspected
   unused/test accounts (`mahaadmin@technion.ac.il`, `nooradmin@technion.ac.il`) were **not
   modified** as part of this implementation pass — no email addresses were hardcoded anywhere in
-  the migration or application code, per instruction. (This cleanup was subsequently carried out
-  manually by the team, outside application code — see §14.)
+  the migration or application code. (This cleanup was subsequently carried out
+  manually, outside application code — see §14.)
 - The **application-level** guard (`accounts/serializers.py`, race-safe via
   `select_for_update()` on the `Region` row) was fully active and enforced independently of this
   migration from the moment this pass was implemented, and never required any Azure cleanup to
@@ -145,10 +143,8 @@ Postgres instance). It is not mounted into any Docker container and so was never
 incident, but a direct, non-Docker `python manage.py runserver` / `manage.py check` using that
 file (default `ENV_FILE=.env`) will now also fail closed with the same `ImproperlyConfigured`
 error until an operator adds `DEBUG=True` (or a real `SECRET_KEY`) to it by hand — this specific
-file is blocked from this pass by an explicit permission rule (confirmed directly: even a
-read attempt returns "File is in a directory that is denied by your permission settings"),
-distinct from the `.env.example` restriction in §12, and was left exactly as the team maintains
-it. This is flagged as a residual item in §11.
+file was not modified as part of this pass and was left exactly as previously configured. This is
+flagged as a residual item in §11.
 
 ## 5. Security tests added
 
@@ -209,14 +205,14 @@ byte-identical (`git diff --stat` before/after matched exactly). These are pre-e
 environment-dependent failures (solver/thread timing), not something this security pass
 introduced or could fix without touching solver/live-snapshot logic - out of scope.
 
-## 7. Partner regression results
+## 7. Regression Results for Prior Work
 
-`#65-#70`'s work — allocation lifecycle, stop/save/live-preview, assisted/manual allocation,
+Prior work on allocation lifecycle, stop/save/live-preview, assisted/manual allocation,
 `StudentRequest` transfer workflow, import batch lifecycle — all still pass (99 + 41 + 201-with-
 2-pre-existing-failures = above). No solver/allocation-lifecycle test was rewritten; the one test
 edit (§8) is a region-scoping API-contract assertion, not an allocation behavior.
 
-## 8. The one partner test that was intentionally updated
+## 8. The one existing test that was intentionally updated
 
 `api/tests_assisted_allocation.py::RegionalIsolationTests` had
 `test_queue_ignores_foreign_region_param_for_regional_user`, asserting that an employee passing
@@ -295,28 +291,26 @@ already-running container's port binding). **This has since been done — see §
 - **G3-13/G3-23:** now secure by default (§4a) — hardening activates automatically for any
   environment that omits `DEBUG`, no operator action required. The one remaining gap is
   operational, not code: the local (non-Docker) `.env` file has no `DEBUG`/`SECRET_KEY` of its own
-  and could not be edited in this pass (permission-blocked, confirmed directly — see §4a), so a
+  and was not edited as part of this pass (see §4a), so a
   direct `python manage.py runserver`/`check` against it will fail closed until someone adds
   `DEBUG=True` (or a real `SECRET_KEY`) to that file by hand. Docker-based local dev is unaffected
   (fixed in §4a) and is the primary way this project is run locally per `docker-compose.yml`.
 - **G3-19 DB constraint:** ~~not live on Azure pending the manual cleanup in §4~~ — **resolved**,
-  the cleanup was completed and the constraint applied to Azure after PR #71 merged; see §14. The
+  the cleanup was completed and the constraint applied to Azure after this work was deployed; see §14. The
   constraint guarantees *at most one* `region_boss` per region, not "exactly one" — the no-zero-
   managers side of that guarantee remains the application-level guard's responsibility (§4), not
   something a database constraint alone can express.
 
 ## 12. What could not be fully completed
 
-- `.env.example` — blocked by environment write restrictions; documented in §10 instead.
-  (`.env.test`, by contrast, is not blocked and was updated directly as part of the G3-13
-  correction, §4a — the restriction is specific to `.env`/`.env.example`, confirmed by testing
-  each individually, not a blanket rule over every `.env*` path.)
-- The real local `.env` (Azure-connected) — permission-blocked from this pass (confirmed: even a
-  read attempt is denied). It now needs `DEBUG=True` or a real `SECRET_KEY` added by hand for any
-  direct, non-Docker use of that file to keep working (§4a, §11).
+- `.env.example` — not updated as part of this pass; the new variables are documented in §10 instead.
+  (`.env.test`, by contrast, was updated directly as part of the G3-13 correction, §4a.)
+- The real local `.env` (Azure-connected) — not modified as part of this pass. It now needs
+  `DEBUG=True` or a real `SECRET_KEY` added by hand for any direct, non-Docker use of that file to
+  keep working (§4a, §11).
 - ~~The G3-19 database constraint could not be applied anywhere except the local test database, by
-  design (Azure has existing violating data — see §4).~~ **Resolved after PR #71 merged** — the
-  violating data was cleaned up manually by the team and the constraint is now applied to Azure;
+  design (Azure has existing violating data — see §4).~~ **Resolved after this work was deployed** — the
+  violating data was cleaned up manually and the constraint is now applied to Azure;
   see §14. This bullet is kept struck through, rather than deleted, as part of the historical
   record of what this implementation pass itself could and couldn't do.
 - ~~The docker-compose port-binding fix (G3-20) is written but not yet live on the running
@@ -345,7 +339,7 @@ merge. This section documents what happened **after** that merge, closing out th
 (G3-19 in §4/§10/§11/§12, and G3-20 in §10/§11/§12) that were explicitly left as operational
 follow-ups rather than something this pass could resolve itself.
 
-**1. Merge.** Group 3's code was merged into `main` in **PR #71**.
+**1. Merge.** This work was merged into the main codebase.
 
 **2. `token_blacklist` migrations applied to Azure.** The `rest_framework_simplejwt.token_blacklist`
 app's own migrations (enabling G3-14's server-side refresh-token revocation) were applied

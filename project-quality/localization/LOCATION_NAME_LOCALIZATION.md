@@ -1,7 +1,5 @@
 # System-Defined Location Name Localization
 
-**Branch:** `donia-data-analysis-redesign-v3`. Not committed. Not pushed. Not merged.
-
 ## The bug
 
 When the app language was set to English, region/dorm-type/building names (e.g. `"מעונות קנדה"`) kept displaying in Hebrew everywhere, including the just-redesigned Data Analysis page (chart labels, tooltips, findings, the selected-item panel), the Buildings and Rooms page, the Dormitory Map, and several other screens.
@@ -49,10 +47,10 @@ Two more region-level names exist purely for edge cases and are **not** part of 
 
 ## Dorm-type-level names (no official source found)
 
-`DormType.name` values (Rifkin, Canada, Kassel, Couples, Mizrah (Old/New), Neve America, Senate, Families, Single Room, Elyon Amim, Segel Zutar, Kfar Mishtalmim, Kfar Hasmaha, Ruth Cohen, Broshim, New Senate — the full canonical list from `EXCEL_DORM_NAME_TO_OFFICIAL_CODE` in `backend/api/views.py`) were **not found published in English anywhere** (not on the Dean of Students site excerpt available to this task, not in any prior code or document in this repository). Per instruction, these were **not guessed freely** — instead:
+`DormType.name` values (Rifkin, Canada, Kassel, Couples, Mizrah (Old/New), Neve America, Senate, Families, Single Room, Elyon Amim, Segel Zutar, Kfar Mishtalmim, Kfar Hasmaha, Ruth Cohen, Broshim, New Senate — the full canonical list from `EXCEL_DORM_NAME_TO_OFFICIAL_CODE` in `backend/api/views.py`) were **not found published in English anywhere** (not on the available Dean of Students site excerpt, not in any prior code or document in this repository). These were **not guessed freely** — instead:
 
 - Where `MapPage.js`'s pre-existing local dictionary already had an English name for one (Rifkin, Canada, Neve America, Senate, Broshim, Kfar Hasmaha, Kfar Mishtalmim, Segel Zutar), that **exact existing spelling was reused**, so this refactor changes zero visible text on the Map page.
-- For the remainder (Kassel, Couples, Families, Single Room, Elyon Amim, Ruth Cohen, New Senate, Mizrah (Old)/(New)) — which have no prior art anywhere in the codebase — a consistent, literal-or-transliterated English name was chosen and documented in `locationNames.js`'s comments, per the original task's "if no English version exists, choose a clear consistent name and document the mapping" instruction.
+- For the remainder (Kassel, Couples, Families, Single Room, Elyon Amim, Ruth Cohen, New Senate, Mizrah (Old)/(New)) — which have no prior art anywhere in the codebase — a consistent, literal-or-transliterated English name was chosen and documented in `locationNames.js`'s comments, following the same clear, consistent, documented-mapping convention used for every other name in this module.
 
 **If any of these dorm-type-level names should instead use the Dean of Students site's official terminology, please supply it the same way the six region names were supplied**, and it's a one-line change per name in `DORM_TYPE_EN_BY_CODE` / `NAME_EN_BY_HEBREW_TEXT` — every screen that shows dorm-type names will pick it up automatically.
 
@@ -81,7 +79,7 @@ Every function in `locationNames.js` returns a string for **rendering only**. No
 
 ### Pages found with the same underlying bug, deliberately **not** touched
 
-`TransfersPage.js`, `AssistedAllocationPage.js`, `WhatIfPage.js`, and the shared components `FiltersDrawer.js`, `BuildingSetupWizard.js`, `AssistedCandidateBrowser.js`, and `BedMatchPicker.js` also render raw region/dorm-type/building names without translation — but on inspection, **none of these files branch on the `language` prop for *any* of their UI text** (every label, heading, and button in them is hardcoded Hebrew regardless of the app's language setting; verified by grepping each file for `language ===`/`isHebrew` conditionals). Localizing only the entity *names* in a screen that is otherwise 100% Hebrew text would look inconsistent (a correct English region name surrounded by Hebrew labels) and doesn't fix the actual gap in those screens, which is that they were never given English translations at all — a materially larger task (a full per-page translation pass) than this one. These are flagged here rather than partially patched, per the instruction to report findings instead of guessing scope.
+`TransfersPage.js`, `AssistedAllocationPage.js`, `WhatIfPage.js`, and the shared components `FiltersDrawer.js`, `BuildingSetupWizard.js`, `AssistedCandidateBrowser.js`, and `BedMatchPicker.js` also render raw region/dorm-type/building names without translation — but on inspection, **none of these files branch on the `language` prop for *any* of their UI text** (every label, heading, and button in them is hardcoded Hebrew regardless of the app's language setting; verified by grepping each file for `language ===`/`isHebrew` conditionals). Localizing only the entity *names* in a screen that is otherwise 100% Hebrew text would look inconsistent (a correct English region name surrounded by Hebrew labels) and doesn't fix the actual gap in those screens, which is that they were never given English translations at all — a materially larger task (a full per-page translation pass) than this one. These are flagged here rather than partially patched, since scope like this is best reported rather than guessed at.
 
 ## How to display one of these names in new code
 
