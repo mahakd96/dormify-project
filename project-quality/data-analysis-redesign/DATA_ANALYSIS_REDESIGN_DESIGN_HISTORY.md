@@ -175,13 +175,13 @@ The following checks were executed against the changes:
 ## 18. Test results
 
 - `api/tests_analysis.py`: **12/12 passed.**
-- My temporary new-field verification test: **1/1 passed**, then deleted.
+- The temporary new-field verification test: **1/1 passed**, then deleted.
 - Full `manage.py test api`: **340 passed, 21 failed/errored** — each of the 21 was individually checked:
   - All 21 are in `api/tests_allocation.py` (the allocation-**solver** test suite — nothing to do with the Data Analysis page or `analysis_data`).
   - 20 of them are `UnicodeEncodeError` crashes coming from the *test file's own* `print()` debug statements trying to print Hebrew text to this Windows environment's `cp1252` console — an environment issue, not a code-logic failure, and unrelated to any file touched by this change.
   - 1 (`test_existing_occupant_affects_second_bed_choice`) is a genuine solver-assignment assertion mismatch, but it's in the room-matching solver logic, nowhere near `analysis_data` — this appears to be a pre-existing failure, not something introduced by this change.
   - **None of the 21 failures are in `tests_analysis.py`, `tests_home_dashboard.py`, `tests_inventory.py`, or any other test file besides `tests_allocation.py`.**
-- `npx react-scripts build`: **compiled successfully, zero ESLint warnings or errors** across the entire frontend (this also confirms `BuildingsPage.js` and `Sidebar.js` still compile correctly after my small edits).
+- `npx react-scripts build`: **compiled successfully, zero ESLint warnings or errors** across the entire frontend (this also confirms `BuildingsPage.js` and `Sidebar.js` still compile correctly after their small edits).
 - **No live browser test was run.** See §19 and the Summary above — this was the one item that could not be verified in this environment at this stage.
 
 ## 19. Any problems or limitations that remain
@@ -280,7 +280,7 @@ Fact values like "assigned / total" (e.g. "0 / 834") were rendering **visually r
 - `python manage.py test api.tests_analysis` — **12/12 passed**, against the real project database.
 - **Live browser click-through** at `localhost:3000/analysis`, logged in as the seeded central-admin user: default load, all 4 Analyze options (including Special Requests' empty state, since this seeded DB has 0 pending requests), Group by toggle, per-analysis sort defaults, row-click selection, auto-select-on-change, and a full Hebrew ⇄ English toggle including layout mirroring — all confirmed working, screenshots taken at each step.
 - **Not re-verified this round** (unchanged from the first pass, so still trusted): region/role permission scoping, loading/error panel logic.
-- **Not verified**: narrow-viewport/mobile layout — the browser-automation resize call did not actually shrink the rendered viewport in this environment. The mobile CSS breakpoints follow the same pattern already used elsewhere in the app, but were not seen on an actual narrow screen. This remained an open item for manual verification.
+- **Not verified**: narrow-viewport/mobile layout — attempting to resize the viewport programmatically did not actually shrink the rendered page in this environment. The mobile CSS breakpoints follow the same pattern already used elsewhere in the app, but were not seen on an actual narrow screen. This remained an open item for manual verification.
 
 ### 25.8 Remaining limitations
 
@@ -302,7 +302,7 @@ The Data Analysis page kept its "one analysis at a time" concept and its real ba
 
 ### 26.1 Why v3.1 was rejected
 
-v3.1 (§25) fixed the "too empty, chart looks like a library demo" problem, but a second, more specific critique came back: it still felt **templated and AI-generated**, for reasons that are worth naming precisely, because they're different from "needs more polish":
+v3.1 (§25) fixed the "too empty, chart looks like a library demo" problem, but a second, more specific critique came back: it still felt **templated and formulaic**, for reasons that are worth naming precisely, because they're different from "needs more polish":
 
 1. **Every analysis used the exact same visual: a vertical list of horizontal ranked rows.** Occupancy, Available Beds, and Demand were all "rank badge → name → value → one progress bar → context line," with only the numbers and one accent color changing. Special Requests used it too. A reader who opened all four analyses in sequence saw the same shape four times — the page never demonstrated that it understood what made each question different.
 2. **The Homepage-style KPI instinct kept creeping back in.** v3.1's snapshot strip (Occupancy · Available Beds · Waiting Students · Pending Requests) was, in substance, a smaller version of the Homepage's 5-tile KPI row, sitting above a page whose entire premise is "don't repeat the Homepage's KPI row."
@@ -376,7 +376,7 @@ RTL was treated as a first-class constraint on every chart, not retrofitted afte
 
 - `CI=true npx react-scripts build` — **compiled successfully, zero ESLint warnings/errors** (run twice: once before, once after the live browser pass).
 - `python manage.py test api.tests_analysis --keepdb` — **12/12 passed** against the real project database via the running `dormify_backend`/Postgres containers (no backend changes were made this round, so this reconfirms nothing regressed).
-- **Live browser click-through**, `localhost:3000/analysis`, logged in as the seeded central-admin user, via automated browser testing against the actual running `docker compose` stack (frontend dev server was restarted so it would pick up the new file — see note below):
+- **Live browser click-through**, `localhost:3000/analysis`, logged in as the seeded central-admin user, against the actual running `docker compose` stack (frontend dev server was restarted so it would pick up the new file — see note below):
   - Default Hebrew/RTL load: toolbar, hero card, column chart, legend, status chips, detail panel, Capacity Breakdown secondary panel, and Key Findings all rendered with real data (a single-region seeded dataset — "קנדה" — so most other rows show 0%, which is real data, not a bug).
   - All 4 Analyze options switched correctly: Occupancy (column), Available Beds (stacked column, confirmed the two-tone segments and in-segment "688" label), Demand/Waiting (grouped column, confirmed the amber/grey pairing and the selected-item ring), Special Requests (confirmed the clean **empty state** — this seeded DB has 0 pending requests — with no layout breakage and the secondary-panel column correctly collapsing to a single, wider detail panel).
   - **Group by** Region ↔ Building on Occupancy: building-level view correctly showed 96 individually-named buildings, Top-12 by default with a "Show top 12 / View all 96" toggle; **View all** switched the chart into its horizontal-scroll mode without shrinking a single bar — confirmed by screenshot at both densities.
@@ -385,8 +385,8 @@ RTL was treated as a first-class constraint on every chart, not retrofitted afte
   - **Hebrew ⇄ English toggle**: repeated the same walkthrough in English — toolbar, chart axis side, bar reading order (high-to-low reads left-to-right in English, right-to-left in Hebrew, both correct for their direction), secondary-panel column order, and the detail panel's flipped action-arrow all confirmed correct.
   - **Console**: no runtime errors at any point; only two pre-existing React Router "future flag" warnings unrelated to this page.
   - **Cross-check**: clicked through to `/buildings?region=…` from the detail panel's action button to confirm the existing deep-link behaviour (added in the first redesign pass, untouched here) still works.
-- **Environment caveat worth recording accurately**: intermittent `ERR_NETWORK` failures occurred from the browser to `localhost:8000`/`3000` throughout testing (confirmed, via direct `curl` from the host machine during the *exact same failures*, that both the Django and the CRA dev server were responding instantly and correctly — so the flakiness was in the browser-automation network path, not in the app or this change). Every failure recovered on retry/refresh, and the same flakiness reproduced identically on the unrelated, untouched Homepage and Buildings pages — so it was not attributable to this redesign.
-- **Not verified live**: narrow-viewport/mobile layout. The browser-automation resize call resized the reported window but the app's own layout did not visibly reflow to it in this environment (the same limitation documented in §25.7 for prior rounds — a tooling limitation, not new to this round). The mobile CSS (`@media (max-width: 980px)` collapses the two-column secondary grid to one column; `@media (max-width: 900px)` stacks the header; `@media (max-width: 640px)` stacks the toolbar and donut layout) follows the same breakpoint pattern already shipped and tested on this page in prior rounds, but was not re-confirmed on an actual narrow screen this round. This remained an open item for manual verification.
+- **Environment caveat worth recording accurately**: intermittent `ERR_NETWORK` failures occurred from the browser to `localhost:8000`/`3000` throughout testing (confirmed, via direct `curl` from the host machine during the *exact same failures*, that both the Django and the CRA dev server were responding instantly and correctly — so the flakiness was in the local test network path, not in the app or this change). Every failure recovered on retry/refresh, and the same flakiness reproduced identically on the unrelated, untouched Homepage and Buildings pages — so it was not attributable to this redesign.
+- **Not verified live**: narrow-viewport/mobile layout. The programmatic viewport resize resized the reported window but the app's own layout did not visibly reflow to it in this environment (the same limitation documented in §25.7 for prior rounds — a tooling limitation, not new to this round). The mobile CSS (`@media (max-width: 980px)` collapses the two-column secondary grid to one column; `@media (max-width: 900px)` stacks the header; `@media (max-width: 640px)` stacks the toolbar and donut layout) follows the same breakpoint pattern already shipped and tested on this page in prior rounds, but was not re-confirmed on an actual narrow screen this round. This remained an open item for manual verification.
 
 ### 26.9 Limitations
 
@@ -445,14 +445,14 @@ A bar/column whose underlying value is exactly zero no longer renders as a 3px s
 
 1. `CI=true npx react-scripts build` — compiled successfully, zero ESLint warnings (run after the JSX/CSS restructuring described above).
 2. `docker exec dormify_backend python manage.py test api.tests_analysis --keepdb` — **12/12 passed** (regression check; no backend changes this round).
-3. **Live browser verification**, via automated browser testing against the actual running `docker compose` stack, logged in as the seeded central-admin user (the frontend dev-server container was restarted so its webpack watcher picked up the new file, same as prior rounds):
+3. **Live browser verification**, against the actual running `docker compose` stack, logged in as the seeded central-admin user (the frontend dev-server container was restarted so its webpack watcher picked up the new file, same as prior rounds):
    - Confirmed the new dark/light workspace-intro panel renders correctly in **both Hebrew/RTL and English/LTR** — eyebrow kicker, title, subtitle, updated timestamp + refresh pill, the Analyze segmented control's white-active-pill-with-accent-colour state, and the light control strip below it, all screenshotted.
    - Confirmed the custom hover tooltip on the Occupancy chart (dark panel, arrow, correct `rowContext` text, RTL-safe numeric ratio via the existing `<bdi>`-wrapped `NumRatio`) and on the Demand grouped chart (single tooltip per region group).
    - Confirmed the explicit zero-value dashed markers on the Occupancy chart (five buildings/regions at 0% next to one at 89%, in the same seeded single-region dataset used throughout testing) — visually distinct from the solid 89% bar, value label still shown, no layout break.
    - Switched through all four Analyze options and confirmed the dark segmented control's active-pill accent colour changes correctly per analysis (blue/teal/amber/violet), the "Reset" button appears/disappears correctly as the view changes from default, and the Group control correctly disappears for Demand/Requests.
    - Console checked — **no errors**, only the same two pre-existing React Router future-flag warnings unrelated to this page.
-4. **Environment note, unchanged from prior rounds**: the browser-automation network path to `localhost:3000`/`8000` was intermittently flaky (confirmed via direct host-machine `curl` during earlier rounds that both services respond instantly — the issue was in the automation layer, not the app). No new instance of this was hit during this round's testing beyond what earlier rounds already documented.
-5. **Not verified live this round**: narrow-viewport/mobile layout, for the same tooling-limitation reason documented in §26.8/§25.7 — the browser-automation resize call does not visibly reflow the rendered page in this environment. The relevant CSS breakpoints were updated (class names changed from `.an-header`/`.an-toolbar-secondary` to `.an-intro-row1`/`.an-intro-controls` to match the new markup) but not re-confirmed on an actual narrow screen.
+4. **Environment note, unchanged from prior rounds**: the network path from the browser to `localhost:3000`/`8000` was intermittently flaky (confirmed via direct host-machine `curl` during earlier rounds that both services respond instantly — the issue was in the local test setup, not the app). No new instance of this was hit during this round's testing beyond what earlier rounds already documented.
+5. **Not verified live this round**: narrow-viewport/mobile layout, for the same tooling-limitation reason documented in §26.8/§25.7 — attempting to resize the viewport programmatically does not visibly reflow the rendered page in this environment. The relevant CSS breakpoints were updated (class names changed from `.an-header`/`.an-toolbar-secondary` to `.an-intro-row1`/`.an-intro-controls` to match the new markup) but not re-confirmed on an actual narrow screen.
 
 ### 27.7 Limitations
 

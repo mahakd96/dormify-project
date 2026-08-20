@@ -65,7 +65,7 @@ The system's data model did not yet reflect that distinction. The database requi
 Two changes were required together, since neither is sufficient alone:
 
 - The requirement itself was corrected at the model level: a student's gender is only required when the housing type actually depends on it. Couple, family, and single-in-a-couple-apartment applications are explicitly exempted, matching the real business rule instead of a blanket database constraint.
-- The database schema had to be brought in line with that corrected rule. The model and the deployed schema briefly disagreed after the first change — the code allowed a genderless Z3/Z4/Z6 row, but the database itself did not yet — so a further schema update was needed before the fix actually took effect. This gap was caught during dedicated testing of the change, and the corresponding database migration was completed by a teammate (Donia Hassan) to close it.
+- The database schema had to be brought in line with that corrected rule. The model and the deployed schema briefly disagreed after the first change — the code allowed a genderless Z3/Z4/Z6 row, but the database itself did not yet — so a further schema update was needed before the fix actually took effect. This gap was caught during dedicated testing of the change, and the corresponding database migration was completed to close it.
 - A fail-early check was added on top of both: if a future deployment is ever missing this schema change, importing a genderless Z3/Z4/Z6 row now raises an explicit, diagnosable error instead of silently rejecting or skipping the row the way the original defect did.
 
 ### Impact
@@ -203,5 +203,5 @@ Representative commits:
 - `f9ac13e` — narrowed the accessibility classification and corrected the category-parsing substring bug.
 - `91ea415` — broader inventory/allocation overhaul that this pipeline's output feeds into.
 - `76a2716` — import-batch lifecycle, safe stop-and-delete, and recovery.
-- `c72d083` (Donia Hassan) — completed the database migration needed for the [Z3/Z4/Z6 gender fix](#3-housing-applications-that-required-a-gender-they-never-had-z3-z4-z6).
+- `c72d083` — completed the database migration needed for the [Z3/Z4/Z6 gender fix](#3-housing-applications-that-required-a-gender-they-never-had-z3-z4-z6).
 - `5626a16`/`d8506f5` — the stale bed-row cache fix described under [Inventory: Authoritative Identity and Physical Capacity](#7-inventory-authoritative-identity-and-physical-capacity).

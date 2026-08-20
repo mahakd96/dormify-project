@@ -20,7 +20,7 @@ Two related work streams make up this effort:
 
 1. **Dorm inventory endpoints (Buildings, Apartments, Rooms, Beds, and a
    pagination analysis)** — referred to as BLD-01 through BLD-05.
-2. **A broader backend audit and implementation phase ("Group 1")**
+2. **A broader backend audit and implementation phase**
    covering the Analysis endpoint's remaining query cost, the
    Transfers/Requests pages, the Home Dashboard, Student detail, Reports/
    exports, and database/runtime configuration.
@@ -91,7 +91,7 @@ branch). The corresponding serializer fields were changed to
 the original per-row computation when the annotation is absent (e.g. for
 objects not built through the viewset's queryset).
 
-### Requests / Transfers (Group 1, Priority 1–2)
+### Requests / Transfers (Priority 1–2)
 
 `StudentRequestViewSet.get_queryset()` gained
 `select_related('source_region')` and `prefetch_related` entries for
@@ -157,7 +157,7 @@ and a workbook that `openpyxl` can actually load. The central-admin-only
 permission check on `dormify_report` is also verified to reject a
 non-admin caller with 403.
 
-### Analysis (Group 1, Priority 3)
+### Analysis (Priority 3)
 
 The `analysis_data()` summary-numbers section was restructured: the
 unconditionally-computed-then-discarded building counts were made
@@ -168,7 +168,7 @@ three separate queries were consolidated into one fetch of
 transfers and requests groups' separate `.count()` queries were replaced
 by deriving totals from already-computed grouped counts.
 
-### Home Dashboard, Student detail, Reports (Group 1, Priority 4–6)
+### Home Dashboard, Student detail, Reports (Priority 4–6)
 
 - Home Dashboard: `latest_inbox`'s `select_related` was extended to
   include `'region'`; the admin-only `pending_inbox_count`/
@@ -358,7 +358,7 @@ the allocation algorithm, API response field names/order/types, and the
 database schema (no migrations were created or needed, since every
 change is a queryset-level `.annotate()`).
 
-For the Group 1 fixes, each change was covered by a dedicated
+For these fixes, each change was covered by a dedicated
 correctness test comparing optimized output against either hand-computed
 expected values or the original pre-optimization query logic run
 directly against the same data. Notably:
