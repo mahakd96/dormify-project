@@ -50,14 +50,12 @@ class User(AbstractUser):
             # duplicate case, not a region left with zero managers - see
             # that create() method's comment for the full picture).
             #
-            # IMPORTANT: this migration must NOT be applied to the real
-            # Azure database as-is - known current data (see
-            # project-quality/security/SECURITY_AND_AUTHORIZATION_REPORT.md,
-            # G3-19) has three region_boss users for one region, which
-            # violates this constraint. It has been created and tested
-            # against the isolated local test database only. Applying it to
-            # Azure requires an approved, manual cleanup of the existing
-            # duplicate regional-manager records first.
+            # Applied to the real Azure database as part of the production
+            # closeout - the previously-existing duplicate region_boss
+            # records were cleaned up manually before this migration was
+            # applied. See
+            # project-quality/security/SECURITY_AND_AUTHORIZATION_REPORT.md
+            # section 14 for the cleanup and migration-application record.
             models.UniqueConstraint(
                 fields=['region'],
                 condition=models.Q(role='region_boss'),

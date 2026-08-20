@@ -65,7 +65,11 @@ Two numeric checkpoints sometimes associated with this work — a "109/109" and 
 
 ## Verification Status
 
-Every test file and test class referenced across this set of reports was confirmed to exist, by name, in the current codebase, through direct inspection. No suite was executed against the local test database in this pass, so no pass/fail count is claimed for the current state of the code — only the structural coverage described above, which is independently verifiable by inspection. The default database configuration points at a live production database and must never be used for test execution.
+The current primary test suites described in this report were confirmed to exist in the current codebase through direct inspection. Some historical engineering reports in `project-quality/` preserve earlier test-file names and repository paths from the codebase state at the time those checks were performed. Several of those tests were later reorganized under `backend/api/tests/`; the historical paths are retained for traceability and should not be interpreted as the current test-file layout.
+
+No test suite was executed during this documentation-verification pass, so no new pass/fail count is claimed for the final code state. The structural coverage described above is based on direct inspection of the current test suites.
+
+Automated tests must be run only against the isolated local test environment configured for testing and must never target the operational Azure database.
 
 ---
 
