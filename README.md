@@ -115,7 +115,6 @@ dormify-project/
 │   ├── context/
 │   ├── services/
 │   ├── utils/
-│   ├── data/
 │   ├── App.js
 │   └── index.js
 │

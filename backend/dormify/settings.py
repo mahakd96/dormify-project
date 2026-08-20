@@ -12,9 +12,12 @@ from django.core.exceptions import ImproperlyConfigured
 # Build paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load environment variables
+# Load environment variables.
 # Default: .env
-# For tests: run with ENV_FILE=.env.test
+# For tests: run with ENV_FILE=.env.test.
+# `.env.test` is intentionally local/untracked and should be created
+# according to the test-environment instructions in the repository README,
+# including DEBUG=True for the isolated local test environment.
 ENV_FILE = os.getenv("ENV_FILE", ".env")
 load_dotenv(BASE_DIR.parent / ENV_FILE)
 

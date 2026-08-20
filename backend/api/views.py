@@ -4702,7 +4702,7 @@ def run_allocation(request):
             'population_summary': population_summary,
         }
 
-        # After a long solver run, reuse a healthy Neon connection and
+        # After a long solver run, reuse a healthy database connection and
         # reconnect only if Django reports that the connection is unusable.
         refresh_db_connection()
         allocation_run.save()
@@ -12416,8 +12416,13 @@ DEFAULT_CONDITIONS = {
 @permission_classes([IsAuthenticated])
 def allocation_conditions(request):
     """
-    GET  /api/allocation/conditions/ — return saved conditions for the region.
-    PUT  /api/allocation/conditions/ — update and persist conditions.
+    Legacy GET/PUT handler for reading and updating per-region allocation
+    conditions in the in-memory conditions store.
+
+    This view is not currently registered in backend/api/urls.py and is
+    therefore not reachable through the operational API. The frontend
+    service still contains getConditions()/updateConditions() helpers that
+    reference /api/allocation/conditions/, but that route is not active.
     """
     user = request.user
 

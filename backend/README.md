@@ -138,8 +138,9 @@ Public self-registration has been removed. Staff accounts are created by an admi
 | GET | `/api/students/` | List students |
 | POST | `/api/students/` | Create student |
 | GET | `/api/students/{id}/` | Get student |
-| PUT | `/api/students/{id}/` | Update student |
-| DELETE | `/api/students/{id}/` | Delete student |
+| PATCH | `/api/students/{id}/` | Update student |
+
+Student records cannot be hard-deleted (no `DELETE`) and cannot be replaced wholesale (no `PUT`, only `PATCH`) — `StudentViewSet.http_method_names` intentionally excludes both. There is no "delete a student" workflow; the `REMOVE_STUDENT` request type (see Transfers/Requests below) ends the student's active bed assignment instead of deleting the row.
 
 ### Buildings
 | Method | Endpoint | Description |
@@ -148,7 +149,7 @@ Public self-registration has been removed. Staff accounts are created by an admi
 | GET | `/api/buildings/{id}/` | Get building |
 | GET | `/api/buildings/{id}/rooms/` | Get rooms |
 
-### Transfers
+### Transfers (legacy, same-region only)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/transfers/` | List transfers |
@@ -156,11 +157,30 @@ Public self-registration has been removed. Staff accounts are created by an admi
 | PUT | `/api/transfers/{id}/approve/` | Approve |
 | PUT | `/api/transfers/{id}/reject/` | Reject |
 
+Direct `PUT`/`PATCH` to `/api/transfers/{id}/` is blocked (always returns 405) — all status transitions must go through `approve()`/`reject()`. `DELETE` is not a supported method on this ViewSet.
+
+### Requests (StudentRequest — cross-region transfers, add/remove student, etc.)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/requests/` | List requests |
+| POST | `/api/requests/` | Create request |
+| PUT | `/api/requests/{id}/cancel/` | Withdraw a pending request (status change, not a delete) |
+| PUT | `/api/requests/{id}/approve/` | Approve |
+| PUT | `/api/requests/{id}/reject/` | Reject |
+
+`DELETE` is not a supported method on this ViewSet — requests are withdrawn via `cancel/`, never hard-deleted through the API.
+
 ### Allocation
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/allocation/run/` | Run allocation |
+| POST | `/api/allocation/run/` | Run allocation (legacy synchronous endpoint, kept for backward compatibility) |
 | GET | `/api/allocation/history/` | Get history |
+| POST | `/api/allocation/start/` | Start an async allocation run (current UI path — see `AllocationPage.js`) |
+| GET | `/api/allocation/runs/active/` | Get the currently running/live-preview run, if any |
+| POST | `/api/allocation/runs/{id}/stop/` | Stop a run without saving |
+| POST | `/api/allocation/runs/{id}/stop-and-save/` | Stop a run and save its current placements |
+
+The full, current endpoint list — including Excel upload/batch lifecycle, region inbox, What-If simulation, manual room-assignment actions, the Assisted Allocation workbench, and reports — is defined in `backend/api/urls.py`; treat that file as authoritative rather than this table.
 
 ### Statistics
 | Method | Endpoint | Description |
