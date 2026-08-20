@@ -26,7 +26,7 @@ This is why, for example, the [accessibility-exclusion fix](../data-integrity/IM
 
 Alongside the unit-level test suites, a set of fixture-based integration scenarios with known expected outcomes is run end-to-end against the real solver rather than mocked constraint logic — covering scenarios such as gender pressure, religious constraints under pressure, roommate-versus-hard-constraint tradeoffs, and mixed active/reserved capacity. This kind of case catches an interaction between multiple constraints that a single-constraint unit test cannot exercise on its own — for example, a case where a soft preference and a hard rule pull in different directions, and the correct outcome depends on the hard rule always winning regardless of preference weight.
 
-This fixture methodology was originated by a teammate, Aya Abu-Raya, and substantially expanded over the course of this work rather than replaced — every fixture-driven correction described in this set of reports extends that shared suite.
+This fixture methodology predates this workstream and was substantially expanded over the course of this work rather than replaced — every fixture-driven correction described in this set of reports extends that shared suite.
 
 ---
 
@@ -51,7 +51,7 @@ Rather than list every test file and class, coverage is summarized here by the e
 
 Deterministic solver test cases construct their own students, inventory, and expected outcomes — running them against a shared or production-like database would risk polluting real data with synthetic fixtures, and would make results depend on whatever state that shared database happened to be in at the time. A dedicated, disposable local PostgreSQL test database exists specifically so these tests run against a known-empty, known-consistent starting state every time, isolated from the live Azure-hosted database entirely. Explicit checks in the deterministic-case test runner refuse to proceed unless the database being used is actually the local test database, rather than trusting that whoever ran the command remembered to point at it.
 
-This infrastructure — the local test-database container, the `.env.test` configuration, and the test-runner's own database-identity check — was originated by teammates (Donia Hassan's Docker setup, Aya Abu-Raya's local test-database configuration and initial safety check) rather than by this workstream. It is recorded here because later solver-test expansion in this history builds directly on it and, in one case, strengthened the safety check itself; it is not claimed as this workstream's own infrastructure.
+This infrastructure — the local test-database container, the `.env.test` configuration, and the test-runner's own database-identity check — predates this workstream rather than originating from it. It is recorded here because later solver-test expansion in this history builds directly on it and, in one case, strengthened the safety check itself; it is not claimed as this workstream's own infrastructure.
 
 ---
 
@@ -69,6 +69,6 @@ Every test file and test class referenced across this set of reports was confirm
 
 ---
 
-## Joint Work
+## Shared Testing Infrastructure
 
-The deterministic fixture suite this report and the allocation report both rely on was originated by a teammate, Aya Abu-Raya, and expanded repeatedly over the course of this work rather than rebuilt. Later solver validation and test-case authoring — in particular the dynamic, expanded solver test cases layered on top of that suite — was carried out jointly with her. This report documents the engineering work associated with this workstream; it does not attribute that jointly-built and jointly-validated testing infrastructure to a single contributor, and unrelated work by other contributors on this repository (such as concurrency and load auditing, and performance optimization) is out of scope for this report entirely.
+The deterministic fixture suite this report and the allocation report both rely on predates this workstream and was expanded repeatedly over the course of this work rather than rebuilt. Later solver validation and test-case authoring — in particular the dynamic, expanded solver test cases layered on top of that suite — was carried out jointly with the suite's original author. This report documents the engineering work associated with this workstream; it does not attribute that jointly-built and jointly-validated testing infrastructure to a single contributor, and unrelated work on this repository (such as concurrency and load auditing, and performance optimization) is out of scope for this report entirely.

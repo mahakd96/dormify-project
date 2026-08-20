@@ -204,7 +204,7 @@ Results shown to staff are read back from the database — active bed assignment
 
 ## 12. Verification Summary
 
-Regression coverage across this report spans hard-constraint legality (gender, religion, exclusive housing types, reserved and restricted inventory), the reserved-building eligibility fix in both its import and solver layers, the group-capacity performance change, run-lifecycle transitions, and the live-preview/stop-and-save mechanism. A deterministic, known-answer fixture suite exercises many of these scenarios end-to-end against the real solver rather than through mocked constraint logic; that suite originates from a teammate, Aya Abu-Raya, and was substantially extended over the course of this work rather than replaced. Full verification methodology and status are in [Verification Status](../testing/TESTING_AND_REGRESSION_REPORT.md#verification-status).
+Regression coverage across this report spans hard-constraint legality (gender, religion, exclusive housing types, reserved and restricted inventory), the reserved-building eligibility fix in both its import and solver layers, the group-capacity performance change, run-lifecycle transitions, and the live-preview/stop-and-save mechanism. A deterministic, known-answer fixture suite exercises many of these scenarios end-to-end against the real solver rather than through mocked constraint logic; that suite predates this work and was substantially extended over its course rather than replaced. Full verification methodology and status are in [Verification Status](../testing/TESTING_AND_REGRESSION_REPORT.md#verification-status).
 
 ---
 
@@ -213,7 +213,7 @@ Regression coverage across this report spans hard-constraint legality (gender, r
 Representative commits:
 - `693d78a` — bed-level schema foundation this solver's persistence layer depends on.
 - `60aed10` — rebuilt the solver against real, database-connected inventory.
-- `9b81598` — introduced the proven-optimal vs. best-effort distinction; substantially expanded the deterministic fixture suite originated by Aya Abu-Raya.
+- `9b81598` — introduced the proven-optimal vs. best-effort distinction; substantially expanded the pre-existing deterministic fixture suite.
 - `4b90437`/`80c3ebf` — major end-to-end refactor separating hard constraints from weighted preferences.
 - `5626a16`/`d8506f5` — exclusive-apartment correctness, room-level shared-facility compatibility, and expanded solver test coverage.
 - `6196376`/`3c4f98c` — introduced the bulk-persistence and stale-connection-refresh pattern for post-solve results, and the dedicated allocation-results page reading persisted, run-scoped state.

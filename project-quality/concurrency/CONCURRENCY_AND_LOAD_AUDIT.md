@@ -1,6 +1,5 @@
-# Group 2 — Backend Concurrency & Load Audit
+# Backend Concurrency and Load Audit
 
-**Branch:** `donia-group2-concurrency-load`
 **Type:** Audit / measurement / documentation only. **No production fixes were implemented.**
 
 ---
@@ -13,12 +12,12 @@ This audit inspected Dormify's backend for concurrency and load readiness: simul
 
 - The codebase already has **real, deliberate concurrency protection** in its most important write path. `assign_student_to_room()` (the single shared function behind every bed assignment — StudentRequest approvals, Transfer approvals, swaps) takes an `Apartment`-level `select_for_update()` lock and re-verifies bed availability *under that lock*. This was **empirically confirmed, not just read in the code**: two students racing for the last free bed in a room always resolve to exactly one winner, with the loser getting a clean `400`, never a `500`, never a double-booked bed (§4, §7, `ConcurrentBedContentionAcrossRequestsTests`).
 - A **real, reproducible race condition was found and dynamically confirmed**: `StudentRequestViewSet.approve()` (and, by identical code shape, `TransferViewSet.approve()`/`reject()`) check `.status != PENDING` *before* entering `transaction.atomic()`, with no row lock. Two concurrent approvals of two different `ADD_STUDENT` requests proposing the same new `student_id` were fired at each other; **one run produced exactly the failure mode predicted by code inspection: the losing request received an unhandled `500`** (an uncaught `IntegrityError` from the `Student.student_id` unique constraint), not a clean `4xx` (§6, G2-01/G2-02).
-- **An unrelated, pre-existing, non-concurrency bug was discovered incidentally** while building test fixtures: `TransferViewSet.perform_create()` and `.approve()` both reference a `Transfer.movement_type` field that **does not exist on the `Transfer` model** (it belongs to the related `MovementRequest` model). This means creating or approving *any* Transfer via the legacy `/api/transfers/` endpoints currently crashes with an unhandled `500` on a **single, non-concurrent** request — confirmed directly (`Transfer(movement_type='room')` raises `TypeError` immediately). This is **out of Group 2's scope** (it is not a concurrency issue — it fails every single time, with zero timing dependency) and was **not fixed**, but is flagged here for immediate, separate attention since it is more severe than anything actually in scope for this audit.
-- Local load measurements (1/5/10/20 concurrent clients) across 5 representative read endpoints (home dashboard, students, requests, analysis, buildings) showed **zero failures, zero exceptions, zero connection errors** at any level, with moderate, expected latency growth (mean latency 3.6×–8.8× from 1→20 concurrent clients) fully explained by this local environment's lack of DB connection pooling (`CONN_MAX_AGE=0`, already flagged in Group 1's audit) and Django's single-process development server — not by any backend-code defect.
+- **An unrelated, pre-existing, non-concurrency bug was discovered incidentally** while building test fixtures: `TransferViewSet.perform_create()` and `.approve()` both reference a `Transfer.movement_type` field that **does not exist on the `Transfer` model** (it belongs to the related `MovementRequest` model). This means creating or approving *any* Transfer via the legacy `/api/transfers/` endpoints currently crashes with an unhandled `500` on a **single, non-concurrent** request — confirmed directly (`Transfer(movement_type='room')` raises `TypeError` immediately). This is **out of this audit's scope** (it is not a concurrency issue — it fails every single time, with zero timing dependency) and was **not fixed**, but is flagged here for immediate, separate attention since it is more severe than anything actually in scope for this audit.
+- Local load measurements (1/5/10/20 concurrent clients) across 5 representative read endpoints (home dashboard, students, requests, analysis, buildings) showed **zero failures, zero exceptions, zero connection errors** at any level, with moderate, expected latency growth (mean latency 3.6×–8.8× from 1→20 concurrent clients) fully explained by this local environment's lack of DB connection pooling (`CONN_MAX_AGE=0`, already flagged in the prior performance audit) and Django's single-process development server — not by any backend-code defect.
 - **Two REGION_BOSS users in different regions working simultaneously do not interfere with or meaningfully block each other**: both requests succeeded, each student ended up correctly assigned in their *own* manager's region, and wall-clock time for both running concurrently was close to the slower individual request alone (not close to the sum) — genuine parallelism, not serialization (§9).
-- The **existing test suite (62+ test classes, 12 files, plus ~150 Group 1 performance tests) had zero concurrency/threading-based tests before this audit** — every prior test runs strictly sequentially. This audit adds 11 new tests (`api/concurrency_tests/`) that are the first in the codebase to genuinely exercise concurrent database access.
+- The **existing test suite (62+ test classes, 12 files, plus ~150 tests from the prior performance work) had zero concurrency/threading-based tests before this audit** — every prior test runs strictly sequentially. This audit adds 11 new tests (`api/concurrency_tests/`) that are the first in the codebase to genuinely exercise concurrent database access.
 
-No allocation algorithm code was read for correctness purposes, evaluated, or modified. No frontend code was changed. No fixes were implemented. Nothing was committed, pushed, or merged.
+No allocation algorithm code was read for correctness purposes, evaluated, or modified. No frontend code was changed. No fixes were implemented.
 
 ---
 
@@ -26,10 +25,10 @@ No allocation algorithm code was read for correctness purposes, evaluated, or mo
 
 **In scope:** backend/system concurrency, load, stability, race conditions, and behavior under simultaneous use — across regional managers (different regions), central admin, and general users; concurrent reads and writes on Students, Requests, Transfers, Analysis, Buildings/Apartments/Rooms/Beds, Region Inbox, Reports; transaction/locking discipline; connection/resource behavior; region isolation during concurrent use (concurrency-specific check only, not a full permissions audit).
 
-**Explicitly out of scope (per instructions), and NOT investigated:**
+**Explicitly out of scope, and NOT investigated:**
 - The allocation algorithm's internal correctness, scoring, or solver logic (`allocation/solver.py` and friends) — only its *duplicate-run concurrency guard* (a generic locking pattern) was noted, not evaluated.
 - Frontend/UI code and design.
-- Full authorization/privacy testing (Group 3's job) — only the concurrency-specific "do two regions' simultaneous actions interfere" check was performed.
+- Full authorization/privacy testing (covered separately by the security work) — only the concurrency-specific "do two regions' simultaneous actions interfere" check was performed.
 - Deployment configuration changes.
 - Any load/testing against the real Azure database — **all measurement in this audit ran exclusively against the local disposable Postgres test database** (`ENV_FILE=.env.test`, `dormify_test` on `localhost:5433`, confirmed via direct settings inspection before any test ran).
 - Destructive/extreme stress testing intended only to crash the local machine.
@@ -59,7 +58,7 @@ Measured via `LoadConcurrencyTests` (§8 has the full numbers). Across `/api/hom
 - **100% success rate at every concurrency level, every endpoint** (100/100 requests across all 5 endpoints × 4 levels succeeded with HTTP 200; zero failures, zero request-level exceptions).
 - No evidence of read/read contention, incorrect data mixing between concurrent requesters, or stale-cache leakage between users. Each concurrent GET independently computed and returned its own correct response.
 - No endpoint tested shows pathologically disproportionate degradation (all mean-latency-at-20 vs mean-latency-at-1 ratios were 1.2×–8.8×, not the 20×+ that would indicate serialized/blocking reads) — see §8 for the full table and the caveat about this local environment's absolute latency floor.
-- Group 1's prior audit/implementation work (N+1 elimination across these exact endpoints) is a direct concurrency enabler: fewer queries per request means less time each request holds a DB connection open, which is precisely what determines how many concurrent requests this environment's connection-per-request model (`CONN_MAX_AGE=0`) can sustain before requests start queueing for a connection. This audit's load numbers are a *downstream confirmation* that Group 1's fixes help concurrent load too, not just single-request latency.
+- The prior performance audit/implementation work (N+1 elimination across these exact endpoints) is a direct concurrency enabler: fewer queries per request means less time each request holds a DB connection open, which is precisely what determines how many concurrent requests this environment's connection-per-request model (`CONN_MAX_AGE=0`) can sustain before requests start queueing for a connection. This audit's load numbers are a *downstream confirmation* that those fixes help concurrent load too, not just single-request latency.
 
 **No confirmed concurrent-read correctness issues.**
 
@@ -156,7 +155,7 @@ No F-expression / atomic-counter patterns were found needing review (Dormify doe
 
 ## 8. Load/Scaling Measurements
 
-Full raw output: `project-quality/concurrency/evidence/GROUP2_LOAD_MEASUREMENTS.txt`. Dataset: 3 buildings × 2 rooms × 4 beds (24 beds), 20 students (12 assigned), 10 pending requests — rebuilt fresh per test method (comparable scale to Group 1's performance fixtures).
+Full raw output: `project-quality/concurrency/evidence/GROUP2_LOAD_MEASUREMENTS.txt`. Dataset: 3 buildings × 2 rooms × 4 beds (24 beds), 20 students (12 assigned), 10 pending requests — rebuilt fresh per test method (comparable scale to the prior performance work's fixtures).
 
 **Important methodology correction made during this audit:** the first measurement pass showed a suspicious, near-identical ≈2.0–2.6 second floor on *every* endpoint regardless of complexity or concurrency level. Investigation (a raw `socket.create_connection()` timing probe) isolated the cause precisely: connecting to the hostname `"localhost"` on this Windows machine takes **~2020ms** per TCP connect, vs **~13ms** connecting to `127.0.0.1` against the exact same listening port — a well-documented Windows IPv6-then-IPv4-fallback DNS/connect quirk, **entirely a local-machine artifact with zero relation to Django or this backend's code** (see below, Category B). All measurements below use `127.0.0.1` directly, removing that artifact.
 
@@ -170,12 +169,12 @@ Full raw output: `project-quality/concurrency/evidence/GROUP2_LOAD_MEASUREMENTS.
 
 (Final confirmation run; a first pass produced similar-shape numbers — e.g. `/api/buildings/` 3.6×, `/api/home/` 6.4× — within the same 3.6×–9.8× band across two independent runs, consistent with ordinary run-to-run variance in this local Docker/Windows environment rather than a flaky measurement.)
 
-Throughput (`requests/sec`, wall-clock-derived) plateaus in the **~15–34 req/s** range across all 5 endpoints regardless of concurrency level — consistent with a single-process Django development server plus `CONN_MAX_AGE=0` (a brand-new Postgres connection is opened and closed on every single request; there is no pooling to amortize that cost across concurrent requests). This matches and empirically reinforces Group 1's prior finding (G1-21/G1-22/G1-23: no connection pooling, dev-server-only locally, WSGI worker-count unknown in production) — this audit does not re-litigate that decision (explicitly marked "needs real-environment validation" in Group 1's report) but does provide fresh, direct local evidence of its concurrent-load impact.
+Throughput (`requests/sec`, wall-clock-derived) plateaus in the **~15–34 req/s** range across all 5 endpoints regardless of concurrency level — consistent with a single-process Django development server plus `CONN_MAX_AGE=0` (a brand-new Postgres connection is opened and closed on every single request; there is no pooling to amortize that cost across concurrent requests). This matches and empirically reinforces the prior performance audit's finding (G1-21/G1-22/G1-23: no connection pooling, dev-server-only locally, WSGI worker-count unknown in production) — this audit does not re-litigate that decision (explicitly marked "needs real-environment validation" in that report) but does provide fresh, direct local evidence of its concurrent-load impact.
 
 **Category classification (per the audit's own required distinction):**
 - **A. Application/backend issue:** none identified in the load numbers themselves — zero failures/exceptions at any level tested; the *relative* latency growth (3.6×–8.8×, not 20×+) indicates ordinary linear-ish cost under contention, not a serialization bug.
 - **B. Local dev-environment limitation:** the `"localhost"` DNS/connect quirk (methodology artifact, fixed by testing against `127.0.0.1`); Django's single-process development server itself (not what production would run).
-- **C. Production/deployment concern, cannot be validated locally:** `CONN_MAX_AGE=0` + no connection pooling + unknown production WSGI worker/thread count — all already flagged in Group 1's audit as requiring real-environment measurement, not something this local test can resolve either way.
+- **C. Production/deployment concern, cannot be validated locally:** `CONN_MAX_AGE=0` + no connection pooling + unknown production WSGI worker/thread count — all already flagged in the prior performance audit as requiring real-environment measurement, not something this local test can resolve either way.
 
 No meaningless extreme stress test was run; 20 concurrent clients against a locally-seeded, modest dataset was judged a sensible upper bound for this environment and this application's realistic simultaneous-user scale (a university dorm system with a handful of regional managers and staff, not a public consumer app).
 
@@ -195,13 +194,13 @@ This is a genuinely positive, confirmed finding: the "one manager per region" ar
 
 ## 10. Existing Test Coverage and Gaps
 
-**Before this audit:** 62+ test classes across 12 dedicated test files (`tests_add_student.py`, `tests_allocation.py`, `tests_analysis.py`, `tests_assisted_allocation.py`, `tests_bed_hierarchy.py`, `tests_edit_student.py`, `tests_home_dashboard.py`, `tests_inventory.py`, `tests_matching_ranking.py`, `tests_requests.py`, `tests_students_performance.py`, `tests_transfer_regions.py`), plus ~150 tests added during Group 1's performance work (`api/performance_tests/`) — **confirmed via grep: zero of them use `Thread`, `ThreadPoolExecutor`, or any other concurrency primitive.** Every single existing automated test in this codebase runs strictly sequentially. This is precisely why G2-01/G2-02 (a real, confirmed race condition) and the `TransferViewSet.movement_type` bug (a real, confirmed *non-concurrency* crash) could both exist undetected: the former needs concurrent execution to surface at all; the latter needs the endpoint to be exercised even once via a real HTTP call (which, it appears, none of the existing Transfer-related tests do — `tests_transfer_regions.py` exercises the newer `StudentRequest`-based region-transfer flow, a different code path entirely, not the legacy `TransferViewSet`).
+**Before this audit:** 62+ test classes across 12 dedicated test files (`tests_add_student.py`, `tests_allocation.py`, `tests_analysis.py`, `tests_assisted_allocation.py`, `tests_bed_hierarchy.py`, `tests_edit_student.py`, `tests_home_dashboard.py`, `tests_inventory.py`, `tests_matching_ranking.py`, `tests_requests.py`, `tests_students_performance.py`, `tests_transfer_regions.py`), plus ~150 tests added during the prior performance work (`api/performance_tests/`) — **confirmed via grep: zero of them use `Thread`, `ThreadPoolExecutor`, or any other concurrency primitive.** Every single existing automated test in this codebase runs strictly sequentially. This is precisely why G2-01/G2-02 (a real, confirmed race condition) and the `TransferViewSet.movement_type` bug (a real, confirmed *non-concurrency* crash) could both exist undetected: the former needs concurrent execution to surface at all; the latter needs the endpoint to be exercised even once via a real HTTP call (which, it appears, none of the existing Transfer-related tests do — `tests_transfer_regions.py` exercises the newer `StudentRequest`-based region-transfer flow, a different code path entirely, not the legacy `TransferViewSet`).
 
 **What this audit adds:** `backend/api/concurrency_tests/` — 2 new files, 11 new tests, all passing:
 - `test_race_conditions.py`: 6 tests (duplicate-student race, bed-contention protection, multi-region isolation, inbox double-mark, the incidental Transfer bug).
 - `test_load_concurrency.py`: 5 tests (load/throughput at 4 concurrency levels × 5 endpoints).
 
-**Recommended for Group 2's implementation phase (not built here, per the audit-only scope of this task):**
+**Recommended for the next implementation phase (not built here, per this audit's scope):**
 - A regression test asserting the fix for G2-01/G2-02 (once implemented) — i.e. a test that currently fails/flags the race and should pass cleanly (no `500`) once `select_for_update()` is added.
 - Equivalent Transfer-approval race tests, once the unrelated `movement_type` bug is fixed and the endpoint is reachable at all.
 - A CI-friendly, faster-running subset of the load tests (the full 4-level × 5-endpoint sweep is useful for audits but may be too slow for routine CI; a 1-and-10-only smoke variant would catch gross regressions cheaply).
@@ -220,8 +219,8 @@ This is a genuinely positive, confirmed finding: the "one manager per region" ar
 | G2-12 | P3 | Race condition (low risk) | `mark_inbox_viewed`/`mark_inbox_processed` unlocked but idempotent | Optional | No |
 | G2-conn-leak | P3 | Connection/resource | Raw background threads that touch the ORM leak DB connections unless `connections.close_all()` is called explicitly (observed while building this audit's own harness; relevant to any current/future background-worker code) | Yes (document as a pattern to follow) | No |
 | G2-localhost-dns | P3 (informational) | Local environment (Category B) | `"localhost"` resolution adds ~2s per TCP connect on this Windows machine; irrelevant to production, initially confounded this audit's own measurements until diagnosed | N/A (test-methodology note only) | No |
-| G2-load-scaling | P2 (informational) | Load/scaling (Category C) | Throughput plateaus ~20–32 req/s locally; latency grows 3.6×–8.8× from 1→20 concurrent clients, consistent with `CONN_MAX_AGE=0` + no pooling + single-process dev server (already flagged in Group 1 as G1-21/22/23) | No — needs real deployment | **Yes** |
-| **INCIDENTAL-1** | **P0 (non-concurrency)** — **out of Group 2 scope** | Correctness bug | `TransferViewSet.perform_create()`/`.approve()` reference `Transfer.movement_type`, a field that does not exist on the model — every Transfer creation/approval currently crashes with an unhandled `500` on a single sequential request, no timing involved | N/A — not fixed here, flagged for a separate ticket | No — reproduces 100% locally already |
+| G2-load-scaling | P2 (informational) | Load/scaling (Category C) | Throughput plateaus ~20–32 req/s locally; latency grows 3.6×–8.8× from 1→20 concurrent clients, consistent with `CONN_MAX_AGE=0` + no pooling + single-process dev server (already flagged in the prior performance audit as G1-21/22/23) | No — needs real deployment | **Yes** |
+| **INCIDENTAL-1** | **P0 (non-concurrency)** — **out of this audit's scope** | Correctness bug | `TransferViewSet.perform_create()`/`.approve()` reference `Transfer.movement_type`, a field that does not exist on the model — every Transfer creation/approval currently crashes with an unhandled `500` on a single sequential request, no timing involved | N/A — not fixed here, flagged for a separate ticket | No — reproduces 100% locally already |
 
 **Positive/confirmed-protected findings (not defects, listed for completeness):**
 - G2-08: `assign_student_to_room()` apartment-level locking correctly prevents bed double-booking under concurrent contention (dynamically confirmed).
@@ -229,7 +228,7 @@ This is a genuinely positive, confirmed finding: the "one manager per region" ar
 - Building/apartment gender-restriction changes and student swaps are both correctly locked (code inspection).
 - AllocationRun creation has a working region-level duplicate-run guard (code inspection; algorithm internals out of scope).
 
-**Severity counts among IN-SCOPE Group 2 findings:** P0: 0 · P1: 3 (G2-01, G2-02, and the static Transfer-race finding) · P2: 3 (G2-04, G2-11, G2-load-scaling) · P3: 3 (G2-12, G2-conn-leak, G2-localhost-dns). The one P0-severity item found (INCIDENTAL-1) is explicitly a non-concurrency correctness bug, outside Group 2's scope, and is reported separately rather than folded into these counts.
+**Severity counts among IN-SCOPE findings:** P0: 0 · P1: 3 (G2-01, G2-02, and the static Transfer-race finding) · P2: 3 (G2-04, G2-11, G2-load-scaling) · P3: 3 (G2-12, G2-conn-leak, G2-localhost-dns). The one P0-severity item found (INCIDENTAL-1) is explicitly a non-concurrency correctness bug, outside this audit's scope, and is reported separately rather than folded into these counts.
 
 ---
 
@@ -243,17 +242,17 @@ This is a genuinely positive, confirmed finding: the "one manager per region" ar
 
 ## 13. What Requires Production/Real-Environment Validation
 
-- G2-load-scaling (and, by extension, Group 1's G1-21/G1-22/G1-23): connection pooling (`CONN_MAX_AGE` or an external pooler like PgBouncer), the real production WSGI/ASGI server and its worker/thread configuration, and Postgres's real `max_connections` under genuine concurrent multi-user production traffic. Local measurement in this audit is a useful *relative* signal (no pathological blocking observed) but the *absolute* numbers are not representative of production and should not be used as an SLA baseline.
+- G2-load-scaling (and, by extension, the prior performance audit's G1-21/G1-22/G1-23): connection pooling (`CONN_MAX_AGE` or an external pooler like PgBouncer), the real production WSGI/ASGI server and its worker/thread configuration, and Postgres's real `max_connections` under genuine concurrent multi-user production traffic. Local measurement in this audit is a useful *relative* signal (no pathological blocking observed) but the *absolute* numbers are not representative of production and should not be used as an SLA baseline.
 - The static Transfer-approval race finding cannot be dynamically re-confirmed until the unrelated `movement_type` bug (INCIDENTAL-1) is fixed in a separate, non-Group-2 change.
 - True production-scale simultaneous-user counts (how many regional managers and staff are realistically active at once) were not available to this audit; the 1/5/10/20 levels chosen are a reasonable local approximation, not a measured production ceiling.
 
-## 14. Recommended Group 2 Implementation Plan
+## 14. Recommended Implementation Plan
 
 1. **P1 fixes first:** add row-level locking to `StudentRequestViewSet.approve()`/`.reject()` and `TransferViewSet.approve()`/`.reject()` (G2-01), plus an `IntegrityError` safety net around student creation (G2-02). Write a regression test that currently fails against the unfixed code and passes once fixed (this audit's `DuplicateStudentCreationRaceTests` is a ready-made starting point).
-2. **Escalate INCIDENTAL-1 immediately, outside Group 2**, given its severity (a core legacy feature is completely non-functional) — even though it is not a concurrency issue, it is more urgent than anything in this audit's own scope.
+2. **Escalate INCIDENTAL-1 immediately**, given its severity (a core legacy feature is completely non-functional) — even though it is not a concurrency issue, it is more urgent than anything in this audit's own scope.
 3. **Adopt the new `api/concurrency_tests/` suite as permanent CI coverage** (G2-11) so future changes cannot silently reintroduce a race in these same write paths.
 4. **P2/P3 cleanup:** clearer error messaging for lost races (G2-04), optional locking for inbox status transitions (G2-12), document the connection-cleanup pattern for any future background/async code (G2-conn-leak).
-5. **Defer to real-environment work:** connection pooling and WSGI/production server configuration (G2-load-scaling) — do not attempt to "fix" this locally; it needs real deployment measurement, consistent with Group 1's existing recommendation.
+5. **Defer to real-environment work:** connection pooling and WSGI/production server configuration (G2-load-scaling) — do not attempt to "fix" this locally; it needs real deployment measurement, consistent with the existing recommendation from the prior performance audit.
 
 ---
 
@@ -266,4 +265,4 @@ This is a genuinely positive, confirmed finding: the "one manager per region" ar
 - `project-quality/concurrency/evidence/GROUP2_LOAD_MEASUREMENTS.txt`
 - `project-quality/concurrency/CONCURRENCY_AND_LOAD_AUDIT.md` (this file)
 
-No other files were modified. No allocation code was touched. No frontend code was touched. Nothing was committed, pushed, or merged.
+No other files were modified. No allocation code was touched. No frontend code was touched.
