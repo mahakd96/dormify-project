@@ -789,14 +789,14 @@ def _should_enforce_accepted_dorm_type(student):
 
     ANY student carrying the אנייר marker MUST always have this
     restriction enforced, regardless of is_priority (confirmed business
-    rule — production validation of run 113 caught a regression here: the
+    rule — production validation of a production validation run caught a regression here: the
     ANIR import pipeline routinely also sets is_priority=True as a side
     effect of populating special_status_*, so an ANIR student is very
     often also a generic-priority student. If the generic-priority bypass
     below were allowed to apply to them too, accepted_dorm_type would be
     silently skipped and the student would receive candidates in ANY dorm
     type, not just their own — exactly the cross-DormType leak observed
-    in production, where 22 of 142 eligible Hasmaha ANIR students were
+    in production, where a subset of eligible Hasmaha ANIR students were
     placed in unrelated dorm types 6, 11, and 18).
 
     Enforcing this unconditionally for every אנייר-marked student is still
@@ -3193,7 +3193,7 @@ def run_improved_ortools_allocation(
     # A destination outside DormType 15 entirely is NEVER valid overflow —
     # it must be counted and warned about separately
     # (assigned_outside_hasmaha_dorm_type), never folded into
-    # assigned_via_overflow_in_dorm_type. Production validation of run 113
+    # assigned_via_overflow_in_dorm_type. Production validation of a production validation run
     # caught exactly this: a pre-fix accepted-dorm-type bug let 22 eligible
     # Hasmaha ANIR students leak into unrelated dorm types 6/11/18, and the
     # diagnostics at the time silently counted all 22 as "overflow"
