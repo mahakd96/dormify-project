@@ -6,7 +6,7 @@
 
 ## Why Assisted Allocation Exists
 
-A physically empty bed is not the same thing as a bed a given student may legally occupy — gender, religion, accepted dorm type, building restrictions, and exclusive-occupancy rules can all make an otherwise-empty bed infeasible for a specific student (see [Hard Constraints](../allocation/ALLOCATION_ENGINE_AND_LIFECYCLE_REPORT.md#3-hard-constraints)). The automatic solver correctly leaves such students unallocated rather than silently violating a hard rule. Assisted Allocation is the staff-facing workbench for resolving those cases through controlled human intervention — either finding a candidate the automatic pass could legally reach but did not prioritize, or explicitly reconfiguring safe, empty inventory to create a new legal candidate. Structural placement constraints (housing type, occupancy, exclusive-apartment status, gender, building-level gender restriction, accepted dorm type) are never bypassed; a smaller set of explicitly designated administrative restrictions — religious compatibility and reserved-inventory status — may be waived, but only through the authorized override workflow described below, which records exactly which rule was waived and why.
+A physically empty bed is not the same thing as a bed a given student may legally occupy — gender, religion, accepted dorm type, building restrictions, and exclusive-occupancy rules can all make an otherwise-empty bed infeasible for a specific student (see [Hard Constraints](../allocation/MAHA_ALLOCATION_ENGINE_AND_LIFECYCLE_FIXES.md#3-hard-constraints)). The automatic solver correctly leaves such students unallocated rather than silently violating a hard rule. Assisted Allocation is the staff-facing workbench for resolving those cases through controlled human intervention — either finding a candidate the automatic pass could legally reach but did not prioritize, or explicitly reconfiguring safe, empty inventory to create a new legal candidate. Structural placement constraints (housing type, occupancy, exclusive-apartment status, gender, building-level gender restriction, accepted dorm type) are never bypassed; a smaller set of explicitly designated administrative restrictions — religious compatibility and reserved-inventory status — may be waived, but only through the authorized override workflow described below, which records exactly which rule was waived and why.
 
 This workflow replaced an earlier priority-handling page that read from static mock data with no connection to real student, assignment, or inventory state. The replacement was a genuine architecture change, not a redesign of the same feature: real candidate evaluation, backend-validated placement, and a persisted audit trail took the place of a page that could not, under any circumstances, have reflected the actual state of the dorms.
 
@@ -70,7 +70,7 @@ An early version of Assisted Allocation's transfer action created that pending r
 
 ### The empty destination-list problem
 
-A regional employee opening the "transfer to another region" dialog saw no destinations to choose from. The general region-listing API was working correctly — scoped to the caller's own region, by design, for every other consumer of that endpoint — but after excluding the student's current region from the result, the dialog was left with nothing. The fix was not to widen the general endpoint's access, which would have weakened a real security boundary for every other caller; a narrow, purpose-specific endpoint was introduced instead, exposing only the minimal region-identity information a destination picker needs. Full detail is in [Region Permissions and the Transfer Dialog](../backend/BACKEND_API_AND_DATABASE_REPORT.md#region-permissions-and-the-transfer-dialog).
+A regional employee opening the "transfer to another region" dialog saw no destinations to choose from. The general region-listing API was working correctly — scoped to the caller's own region, by design, for every other consumer of that endpoint — but after excluding the student's current region from the result, the dialog was left with nothing. The fix was not to widen the general endpoint's access, which would have weakened a real security boundary for every other caller; a narrow, purpose-specific endpoint was introduced instead, exposing only the minimal region-identity information a destination picker needs. Full detail is in [Region Permissions and the Transfer Dialog](../backend/MAHA_BACKEND_API_DATABASE_FIXES.md#region-permissions-and-the-transfer-dialog).
 
 ### Blocking conflicting workflows
 
@@ -98,7 +98,7 @@ A withdrawal by the requesting side and a rejection by a reviewer are recorded a
 
 ## Verification Summary
 
-Regression coverage spans candidate ranking and override protections, safe inventory reconfiguration, the post-assignment state fix, and the full region-transfer lifecycle. Full verification methodology and status are in [Verification Status](../testing/TESTING_AND_REGRESSION_REPORT.md#verification-status).
+Regression coverage spans candidate ranking and override protections, safe inventory reconfiguration, the post-assignment state fix, and the full region-transfer lifecycle. Full verification methodology and status are in [Verification Status](../testing/MAHA_TESTING_AND_REGRESSION_RECORD.md#verification-status).
 
 ---
 
