@@ -1,3 +1,6 @@
+> [!NOTE]
+> This repository is a sanitized portfolio/publication version of Dormify. Operational datasets, production credentials, internal deployment details, and institution-owned assets are intentionally excluded. The project was originally developed as an academic engineering project in collaboration with a university housing office; this public repository is not an official institutional distribution.
+
 # Dormify
 
 **Dormitory allocation and management platform for university housing administration.**
