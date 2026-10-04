@@ -19,7 +19,7 @@ function LoginPage({ language, onLanguageToggle }) {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const TECHNION_LOGO_SRC = '/brand/technion-logo.png';
+  const TECHNION_LOGO_SRC = '/technion-logo.png';
 
   const { login } = useAuth();
   const navigate = useNavigate();
