@@ -19,6 +19,8 @@ function LoginPage({ language, onLanguageToggle }) {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
+  const TECHNION_LOGO_SRC = '/brand/technion-logo.png';
+
   const { login } = useAuth();
   const navigate = useNavigate();
 
@@ -123,9 +125,13 @@ function LoginPage({ language, onLanguageToggle }) {
         <div className="brand-content">
           <div
             className="logo-container"
-            aria-label="Dormify"
+            aria-label="Technion logo"
           >
-            <div className="main-logo" style={{display:'flex',alignItems:'center',justifyContent:'center',fontSize:'42px',fontWeight:800,color:'#004e89'}}>Dormify</div>
+            <img
+              src={TECHNION_LOGO_SRC}
+              alt="Technion"
+              className="main-logo"
+            />
           </div>
 
           <h1 className="brand-title">
