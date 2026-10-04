@@ -7,7 +7,7 @@
 ## 1. The Allocation Pipeline
 
 ```
-imported Student rows (see IMPORT_DATA_AND_INVENTORY_REPORT.md)
+imported Student rows (see MAHA_IMPORT_DATA_AND_INVENTORY_STABILIZATION.md)
         ↓
 eligible population (excludes students who are leaving or accessibility cases)
         ↓
@@ -22,7 +22,7 @@ allocation run record (status, diagnostics, live snapshot)
 API → frontend
 ```
 
-A defect in the solver's own rules and a defect in the population or inventory it receives look identical from the outside — both produce "the wrong students in the wrong beds." Distinguishing them required inspecting what the solver actually received before touching its logic. Several corrections in this report turned out to belong to the population or inventory side of this pipeline, not the constraint logic — see [Why This Report Exists](../data-integrity/IMPORT_DATA_AND_INVENTORY_REPORT.md#1-why-this-report-exists).
+A defect in the solver's own rules and a defect in the population or inventory it receives look identical from the outside — both produce "the wrong students in the wrong beds." Distinguishing them required inspecting what the solver actually received before touching its logic. Several corrections in this report turned out to belong to the population or inventory side of this pipeline, not the constraint logic — see [Why This Report Exists](../data-integrity/MAHA_IMPORT_DATA_AND_INVENTORY_STABILIZATION.md#1-why-this-report-exists).
 
 ---
 
@@ -30,7 +30,7 @@ A defect in the solver's own rules and a defect in the population or inventory i
 
 The solver did not reach its current form through a sequence of independent patches. Early versions were built against a simplified picture of the housing domain; as the real inventory, the real range of housing types, and the real operational rules (existing residents, exclusive apartments, reserved buildings, religious and gender restrictions, priority and accessibility handling) were connected, that simplified picture stopped matching production reality. At several points, extending the solver required reconsidering how students, apartments, and constraints were represented together, not adding an isolated condition on top of the existing model.
 
-Two changes illustrate this most clearly. Introducing [bed-level assignment tracking](../backend/BACKEND_API_AND_DATABASE_REPORT.md#bed-level-assignment-correcting-the-persistence-model) changed what the solver was even allocating *into* — from room-level occupancy to individually identified beds — which every constraint and every persistence step downstream had to be built against. And representing couple, family, and single-in-an-apartment applications correctly (see [Couples, Families, and Single-Occupant Apartments](#7-couples-families-and-single-occupant-apartments-z3-z4-z6) below) required treating an entire apartment, not a single bed, as the unit being allocated for those housing types — a distinction the earlier, single-student-per-bed model had no way to express. Later work extended and strengthened this model considerably (stronger religious and gender rules, existing-occupant protection, reserved-building policy, diagnostics, live search control) without needing another change of this kind, because the underlying representation was now capable of holding the real domain.
+Two changes illustrate this most clearly. Introducing [bed-level assignment tracking](../backend/MAHA_BACKEND_API_DATABASE_FIXES.md#bed-level-assignment-correcting-the-persistence-model) changed what the solver was even allocating *into* — from room-level occupancy to individually identified beds — which every constraint and every persistence step downstream had to be built against. And representing couple, family, and single-in-an-apartment applications correctly (see [Couples, Families, and Single-Occupant Apartments](#7-couples-families-and-single-occupant-apartments-z3-z4-z6) below) required treating an entire apartment, not a single bed, as the unit being allocated for those housing types — a distinction the earlier, single-student-per-bed model had no way to express. Later work extended and strengthened this model considerably (stronger religious and gender rules, existing-occupant protection, reserved-building policy, diagnostics, live search control) without needing another change of this kind, because the underlying representation was now capable of holding the real domain.
 
 ---
 
@@ -46,7 +46,7 @@ These define what a *legal* placement is — the solver cannot produce an assign
 | Exclusive housing types | Couple, family, and single-in-an-apartment applications occupy their apartment exclusively — no other student may share it |
 | Accepted dorm type | A student may only be placed within the dorm type they were accepted into, with narrow, explicitly-defined exceptions |
 | Reserved apartments | Reserved inventory is only usable by students the reservation is actually for |
-| Building 179 / Upper Dorm Office reservation | Non-eligible students can never automatically consume Building 179; eligible אנייר students accepted into its dorm type are preferred there but not confined to it, and may legally overflow into any other compatible building within that same accepted dorm type. The rule does not apply to manual placement (see [Manual Overrides](../assisted-allocation/ASSISTED_ALLOCATION_AND_TRANSFER_REPORT.md#candidate-evaluation-and-manual-overrides)) |
+| Building 179 / Upper Dorm Office reservation | Non-eligible students can never automatically consume Building 179; eligible אנייר students accepted into its dorm type are preferred there but not confined to it, and may legally overflow into any other compatible building within that same accepted dorm type. The rule does not apply to manual placement (see [Manual Overrides](../assisted-allocation/MAHA_ASSISTED_ALLOCATION_AND_TRANSFER_FIXES.md#candidate-evaluation-and-manual-overrides)) |
 | Mutual roommate requests | A hard roommate pairing is only honored when both students requested each other — see [Roommate Identity Normalization](#roommate-identity-normalization) for how "the same student" is reliably determined across different request formats |
 
 ## 4. Soft Preferences
@@ -71,7 +71,7 @@ Real-data validation caught exactly this: a subset of affected students eligible
 
 ### The import-mapping layer
 
-A separate, earlier defect existed one layer up from this: the אנייר signal from the source file was, at one point, not reaching the student record the solver reads from at all — described fully in the [ANIR import mapping section](../data-integrity/IMPORT_DATA_AND_INVENTORY_REPORT.md#5-anir-אנייר-import-mapping) of that report. That defect and the regression above are independent — one is about whether the signal reaches the student record at all, the other is about how the solver reasons once it has that signal — and are kept as two separate corrections for that reason.
+A separate, earlier defect existed one layer up from this: the אנייר signal from the source file was, at one point, not reaching the student record the solver reads from at all — described fully in the [ANIR import mapping section](../data-integrity/MAHA_IMPORT_DATA_AND_INVENTORY_STABILIZATION.md#5-anir-אנייר-import-mapping) of that report. That defect and the regression above are independent — one is about whether the signal reaches the student record at all, the other is about how the solver reasons once it has that signal — and are kept as two separate corrections for that reason.
 
 A standing diagnostic distinguishes *imported* אנייר students, from *eligible* ones, from ones who actually had the reserved building available as a real candidate at solve time, so a future recurrence of either layer's failure is visible immediately as a mismatch between those counters, rather than requiring a fresh investigation.
 
@@ -100,7 +100,7 @@ In every one of these cases, one student record represents one complete, indepen
 
 This distinction mattered in practice, not only in principle. A capacity rule enforcing "at most one exclusive application per apartment" interacts with the solver's general roommate-pairing logic, which otherwise assumes two paired students are meant to end up together. Exclusive-type applications were not originally excluded from that general pairing machinery, so a mutual roommate request between two unrelated couple, family, or single-occupant applicants could interact with the one-application-per-apartment rule in a way that incorrectly constrained both applications, even though they could never legally share an apartment in the first place. The fix excludes exclusive-type applications from the general roommate-pairing machinery entirely, so a stray or coincidental mutual request between two such applicants can no longer affect either one's placement.
 
-Existing residents in these apartment types are respected the same way as any other occupied inventory — a reserved, exclusive apartment is never treated as available capacity for a second, unrelated application. And the same failure mode already described for accessibility and gender-nullability (see [Housing Applications That Required a Gender They Never Had](../data-integrity/IMPORT_DATA_AND_INVENTORY_REPORT.md#3-housing-applications-that-required-a-gender-they-never-had-z3-z4-z6)) applied here too before that fix: rejecting a legitimate application for lacking information that was never actually relevant to it.
+Existing residents in these apartment types are respected the same way as any other occupied inventory — a reserved, exclusive apartment is never treated as available capacity for a second, unrelated application. And the same failure mode already described for accessibility and gender-nullability (see [Housing Applications That Required a Gender They Never Had](../data-integrity/MAHA_IMPORT_DATA_AND_INVENTORY_STABILIZATION.md#3-housing-applications-that-required-a-gender-they-never-had-z3-z4-z6)) applied here too before that fix: rejecting a legitimate application for lacking information that was never actually relevant to it.
 
 **Verification:** the solver's household-exclusivity test suite covers this directly — one application per unit, no cross-application grouping including under a mutual roommate request, and correct handling when capacity is tight across multiple independent applications of the same type.
 
@@ -110,7 +110,7 @@ Existing residents in these apartment types are respected the same way as any ot
 
 Re-running allocation must never treat an occupied bed as free. Existing active assignments are accounted for the same way a newly proposed assignment would be, and are never modified as a side effect of a later run. Where an existing occupant no longer matches a rule that was configured after they were placed (for example, a building's gender restriction changed after someone already lived there), this is surfaced as a diagnostic warning, never as an automatic move.
 
-The inventory a run is protecting also has to be internally consistent within that same run — including a case where the solver's own bed-count self-repair could contradict itself mid-run. That defect and its correction are described in [Inventory: Authoritative Identity and Physical Capacity](../data-integrity/IMPORT_DATA_AND_INVENTORY_REPORT.md#7-inventory-authoritative-identity-and-physical-capacity).
+The inventory a run is protecting also has to be internally consistent within that same run — including a case where the solver's own bed-count self-repair could contradict itself mid-run. That defect and its correction are described in [Inventory: Authoritative Identity and Physical Capacity](../data-integrity/MAHA_IMPORT_DATA_AND_INVENTORY_STABILIZATION.md#7-inventory-authoritative-identity-and-physical-capacity).
 
 ---
 
@@ -188,7 +188,7 @@ The solver routes shared-facility apartments through a room-level candidate and 
 
 **Problem:** After a long CP-SAT search completed successfully, saving its result could itself fail or hang.
 
-**Root Cause:** Results were originally persisted by looping over each assigned student and saving that student's assignment individually as the solution was extracted. Two problems compounded: a long solve can leave the database connection stale by the time persistence starts (see [Long Imports and a Stale Database Connection](../data-integrity/IMPORT_DATA_AND_INVENTORY_REPORT.md#8-long-imports-and-a-stale-database-connection) for the same failure mode in the import pipeline), and a per-student loop of individual saves is exactly the shape of code most exposed to a connection problem appearing partway through, potentially leaving a run partially persisted.
+**Root Cause:** Results were originally persisted by looping over each assigned student and saving that student's assignment individually as the solution was extracted. Two problems compounded: a long solve can leave the database connection stale by the time persistence starts (see [Long Imports and a Stale Database Connection](../data-integrity/MAHA_IMPORT_DATA_AND_INVENTORY_STABILIZATION.md#8-long-imports-and-a-stale-database-connection) for the same failure mode in the import pipeline), and a per-student loop of individual saves is exactly the shape of code most exposed to a connection problem appearing partway through, potentially leaving a run partially persisted.
 
 **Correction:** The solver now builds the full set of assignments to create and students to update as plain in-memory objects first, refreshes the database connection immediately before touching the database, and then persists everything in one short transaction using bulk operations — one bulk insert for the new bed assignments, one bulk update for the affected students — rather than one round-trip per student. This is a database-reliability change, separate from the CP-SAT search-performance work in [Group-Capacity Search Performance](#6-group-capacity-search-performance): it affects how a completed solution is saved, not how the search itself reaches that solution.
 
@@ -204,7 +204,7 @@ Results shown to staff are read back from the database — active bed assignment
 
 ## 12. Verification Summary
 
-Regression coverage across this report spans hard-constraint legality (gender, religion, exclusive housing types, reserved and restricted inventory), the reserved-building eligibility fix in both its import and solver layers, the group-capacity performance change, run-lifecycle transitions, and the live-preview/stop-and-save mechanism. A deterministic, known-answer fixture suite exercises many of these scenarios end-to-end against the real solver rather than through mocked constraint logic; that suite predates this work and was substantially extended over its course rather than replaced. Full verification methodology and status are in [Verification Status](../testing/TESTING_AND_REGRESSION_REPORT.md#verification-status).
+Regression coverage across this report spans hard-constraint legality (gender, religion, exclusive housing types, reserved and restricted inventory), the reserved-building eligibility fix in both its import and solver layers, the group-capacity performance change, run-lifecycle transitions, and the live-preview/stop-and-save mechanism. A deterministic, known-answer fixture suite exercises many of these scenarios end-to-end against the real solver rather than through mocked constraint logic; that suite predates this work and was substantially extended over its course rather than replaced. Full verification methodology and status are in [Verification Status](../testing/MAHA_TESTING_AND_REGRESSION_RECORD.md#verification-status).
 
 ---
 
