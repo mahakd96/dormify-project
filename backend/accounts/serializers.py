@@ -205,7 +205,7 @@ class StaffUserSerializer(
         # G3-19: "exactly one region_boss per region" - enforced here at
         # the application level (a DB partial-unique-constraint migration
         # also exists as a backstop, see api.models.User.Meta.constraints
-        # and its migration, applied to the Azure database as part of the
+        # and its migration, applied to the production database as part of the
         # production closeout - see
         # project-quality/security/SECURITY_AND_AUTHORIZATION_REPORT.md
         # section 14). select_for_update() locks the REGION row itself as the
