@@ -2312,7 +2312,7 @@ class Building179AutomaticAllocationTest(TestCase):
         self.assertEqual(self._assigned_building_number(result, new_student), 999)
 
     # ------------------------------------------------------------------
-    # Regression test for a real production defect (allocation run 113):
+    # Regression test for a real production defect (allocation a production validation run):
     # an eligible Hasmaha ANIR student who also happens to be is_priority
     # (the common case — the Excel import pipeline sets is_priority=True
     # as a side effect of populating special_status_1..4, so most ANIR
@@ -2481,7 +2481,7 @@ class Building179AutomaticAllocationTest(TestCase):
 
     def test_anier_priority_student_not_allowed_to_cross_accepted_dorm_types_merely_because_of_marker(self):
         """Same as above, but with is_priority=True — the exact
-        combination that reproduced the production regression (run 113):
+        combination that reproduced the production regression (a production validation run):
         an ANIR student accepted into a different dorm type, who also
         carries is_priority=True, must still be confined to their own
         accepted dorm type. A compatible bed in Building 179 AND a
@@ -4975,7 +4975,7 @@ class AccessibilityAllocationExclusionTest(TestCase):
     used to also include the STAYING/CONTINUING category value
     ('הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2'), which is the
     majority category for returning students. That single mistaken entry
-    caused 722 of 840 students to be marked accessibility_flag=True and
+    caused a large share of students to be marked accessibility_flag=True and
     excluded from the OR-Tools solver, leaving only 118 students actually
     allocated. Only the EXACT value 'הסמכה - נכים' may set
     accessibility_flag=True (see ACCESSIBILITY_ALLOCATION_GROUP_VALUES /
@@ -5048,7 +5048,7 @@ class AccessibilityAllocationExclusionTest(TestCase):
         STAYING/CONTINUING students (the majority category) and must NOT
         set accessibility_flag=True. Before the fix, this exact value was
         mistakenly included in the accessibility whitelist, which flagged
-        722 of 840 students as accessibility_flag=True and excluded them
+        a large share of students as accessibility_flag=True and excluded them
         from the OR-Tools solver, leaving only 118 actually allocated.
         These students must still reach the solver like any other
         staying/continuing student, since all students are re-allocated
