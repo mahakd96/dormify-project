@@ -18,7 +18,7 @@ observe failure
   → rerun the surrounding suite for that area
 ```
 
-This is why, for example, the [accessibility-exclusion fix](../data-integrity/IMPORT_DATA_AND_INVENTORY_REPORT.md#4-accessibility-classification) was diagnosed by inspecting real student records before touching solver logic, and why the [reserved-building eligibility bug](../allocation/ALLOCATION_ENGINE_AND_LIFECYCLE_REPORT.md#5-priority-anir-and-building-179) was diagnosed by tracing the rule interaction back to a regression confirmed through real-data validation, rather than assuming the underlying business rule itself was wrong.
+This is why, for example, the [accessibility-exclusion fix](../data-integrity/MAHA_IMPORT_DATA_AND_INVENTORY_STABILIZATION.md#4-accessibility-classification) was diagnosed by inspecting real student records before touching solver logic, and why the [reserved-building eligibility bug](../allocation/MAHA_ALLOCATION_ENGINE_AND_LIFECYCLE_FIXES.md#5-priority-anir-and-building-179) was diagnosed by tracing the rule interaction back to a regression confirmed through real-data validation, rather than assuming the underlying business rule itself was wrong.
 
 ---
 
@@ -42,7 +42,7 @@ Rather than list every test file and class, coverage is summarized here by the e
 - **Import-batch lifecycle** — stop, stop-and-delete, and the ownership-scoped cleanup that ensures only a batch's own created students can be removed.
 - **Inventory capacity consistency** — the bed-row auto-repair path and its interaction with an already-loaded in-memory room object are covered directly, alongside general inventory edit-safety.
 - **Inventory edit safety** — editing or deactivating buildings, apartments, rooms, and beds cannot silently remove an existing assignment.
-- **Assisted allocation** — candidate ranking, manual overrides, safe inventory reconfiguration, and the [post-assignment read-state fix](../assisted-allocation/ASSISTED_ALLOCATION_AND_TRANSFER_REPORT.md#the-post-assignment-state-bug).
+- **Assisted allocation** — candidate ranking, manual overrides, safe inventory reconfiguration, and the [post-assignment read-state fix](../assisted-allocation/MAHA_ASSISTED_ALLOCATION_AND_TRANSFER_FIXES.md#the-post-assignment-state-bug).
 - **Region transfer and permissions** — destination-region approval routing, source-region withdrawal authority, and the purpose-specific destination-region endpoint's scope.
 
 ---
