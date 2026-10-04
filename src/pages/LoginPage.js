@@ -19,8 +19,6 @@ function LoginPage({ language, onLanguageToggle }) {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const TECHNION_LOGO_SRC = '/brand/technion-logo.png';
-
   const { login } = useAuth();
   const navigate = useNavigate();
 
@@ -125,13 +123,9 @@ function LoginPage({ language, onLanguageToggle }) {
         <div className="brand-content">
           <div
             className="logo-container"
-            aria-label="Technion logo"
+            aria-label="Dormify"
           >
-            <img
-              src={TECHNION_LOGO_SRC}
-              alt="Technion"
-              className="main-logo"
-            />
+            <div className="main-logo" style={{display:'flex',alignItems:'center',justifyContent:'center',fontSize:'42px',fontWeight:800,color:'#004e89'}}>Dormify</div>
           </div>
 
           <h1 className="brand-title">
@@ -141,7 +135,7 @@ function LoginPage({ language, onLanguageToggle }) {
           </h1>
 
           <p className="brand-subtitle">
-            Technion Dormitories Management System
+            University Housing Management System
           </p>
 
           <div className="brand-decorative" />
@@ -149,7 +143,7 @@ function LoginPage({ language, onLanguageToggle }) {
 
         <div className="left-footer">
           <p>
-            © 2026 Technion - Israel Institute of Technology
+            © 2026 Dormify Project Contributors
           </p>
         </div>
       </div>
@@ -203,7 +197,7 @@ function LoginPage({ language, onLanguageToggle }) {
                   type="email"
                   value={email}
                   onChange={handleEmailChange}
-                  placeholder="your.email@technion.ac.il"
+                  placeholder="name@example.edu"
                   autoComplete="email"
                 />
               </div>
