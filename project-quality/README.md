@@ -51,7 +51,7 @@ technical reasoning and engineering evidence.
 
 ## Supporting Evidence
 
-The `concurrency/evidence/` directory contains selected controlled test outputs
+The `concurrency/evidence/` directory contains selected controlled before/after test outputs
 used to support the concurrency and load-testing reports. These files contain
 test-environment evidence only; production credentials and institutional data
 are not included.
