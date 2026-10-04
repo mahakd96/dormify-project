@@ -4,7 +4,7 @@ Building / Apartment / Room / Bed create-edit-activate-deactivate, the
 safety validations that block conflicting edits on occupied inventory, and
 region-scoped permission enforcement.
 
-Run with the isolated test database (never the production Azure DB):
+Run with the isolated test database only; never target an operational database:
     ENV_FILE=.env.test python manage.py test api.tests.test_inventory
 """
 
