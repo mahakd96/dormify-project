@@ -29,7 +29,7 @@ All measurements were taken with Django REST Framework's in-process
 `APIClient` against a local, disposable PostgreSQL 16 Docker test
 database (`ENV_FILE=.env.test`). **No measurement in this body of work
 reflects real HTTP network latency, TLS negotiation, or the real
-managed cloud environment-hosted production database** — this limitation applies to every
+managed production database** — this limitation applies to every
 number in this report and is restated in Section 12.
 
 ---
@@ -418,7 +418,7 @@ functional regression observed and the page noticeably faster.
 | Report HTTP-path tests + existing report-content tests (`test_reports_performance`) combined | 10/10 passed |
 
 All test runs used the local disposable PostgreSQL test database; the
-real managed cloud environment database was never connected to at any point in this work.
+real production database was never connected to at any point in this work.
 
 ---
 
@@ -427,7 +427,7 @@ real managed cloud environment database was never connected to at any point in t
 These are open items, not fixed problems, and are preserved here as
 genuine limitations rather than resolved:
 
-- **Real managed cloud environment/network latency** for every endpoint measured across this
+- **Real production network/database latency** for every endpoint measured across this
   entire body of work is unmeasured — all figures come from an in-process
   API client with no real HTTP round trip, TLS handshake, or database
   network hop.
