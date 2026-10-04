@@ -713,8 +713,8 @@ if (activeTab !== 'unassigned' && f.assignmentStatuses?.length) {
   // needs ONLY: student + scope + valid region PK + non-empty reason.
   // Room/apartment/bed are chosen later, at APPROVAL time - never required
   // to create the request.
-  // NOTE: Region PKs in this project are SLUG STRINGS (e.g. "broshim",
-  // "technion") - never validate them numerically.
+  // NOTE: Region primary keys are slug strings, not numeric IDs; never
+  // validate them numerically.
   const reqRegionValid = reqTargetRegion != null && String(reqTargetRegion).trim() !== '';
   const reqDisabledReason =
     reqSubmitting ? 'submitting'
