@@ -13,6 +13,19 @@ Dormify is built as a web application with a **React frontend**, **Django REST b
 
 ---
 
+## Project Team
+
+Dormify was developed as a final-year Information Systems Engineering project by:
+
+- Maha Kadah
+- Donia Hassan
+- Aya Abu-Raya
+- Zeinab Habiballah
+- Siraj Sulieman
+
+The repository preserves the original Git commit history so individual
+contributions remain attributable to their original authors.
+
 ## System Overview
 
 Dormify supports the housing allocation process from data ingestion to final placement management.
