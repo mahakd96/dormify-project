@@ -1,26 +1,49 @@
-# JetBrains / IDE
+# IDE / OS
 .idea/
+.vscode/
+.DS_Store
+Thumbs.db
 
-# Django local DB
-backend/db.sqlite3
-db.sqlite3
-
-# Python
+# Python / Django
 .venv/
 venv/
 __pycache__/
-*.pyc
+*.py[cod]
+*.sqlite3
+*.db
+backend/db.sqlite3
+db.sqlite3
 
-# React
+# React / Node
 node_modules/
-.env
-.env.*
-!.env.example
-
-# Build files
 build/
 dist/
 
-# OS files
-.DS_Store
-Thumbs.db
+# Secrets and environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+credentials.*
+secrets.*
+*.secret
+
+# Local exports, backups, and operational data
+*.sql
+*.dump
+*.bak
+*.backup
+backend/data/*.xlsx
+backend/data/*.xls
+backend/data/*.csv
+!backend/data/README.md
+!backend/data/example_*.csv
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
