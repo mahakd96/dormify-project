@@ -47,7 +47,7 @@ No allocation algorithm code was read for correctness purposes, evaluated, or mo
 - New test packages created:
   - `backend/api/concurrency_tests/test_race_conditions.py` — 6 test classes, 6 tests (race conditions, bed contention, multi-region isolation, inbox double-mark, the incidental Transfer bug).
   - `backend/api/concurrency_tests/test_load_concurrency.py` — 1 test class, 5 tests (load/throughput at N=1/5/10/20 across 5 endpoints).
-- Evidence: `project-quality/concurrency/evidence/GROUP2_RACE_CONDITION_EVIDENCE.txt`, `project-quality/concurrency/evidence/GROUP2_LOAD_MEASUREMENTS.txt` (both regenerated directly by the test runs below).
+- Evidence: `project-quality/concurrency/evidence/RACE_CONDITION_EVIDENCE_BASELINE.txt`, `project-quality/concurrency/evidence/LOAD_MEASUREMENTS_BASELINE.txt` (both regenerated directly by the test runs below).
 
 ---
 
@@ -155,7 +155,7 @@ No F-expression / atomic-counter patterns were found needing review (Dormify doe
 
 ## 8. Load/Scaling Measurements
 
-Full raw output: `project-quality/concurrency/evidence/GROUP2_LOAD_MEASUREMENTS.txt`. Dataset: 3 buildings × 2 rooms × 4 beds (24 beds), 20 students (12 assigned), 10 pending requests — rebuilt fresh per test method (comparable scale to the prior performance work's fixtures).
+Full raw output: `project-quality/concurrency/evidence/LOAD_MEASUREMENTS_BASELINE.txt`. Dataset: 3 buildings × 2 rooms × 4 beds (24 beds), 20 students (12 assigned), 10 pending requests — rebuilt fresh per test method (comparable scale to the prior performance work's fixtures).
 
 **Important methodology correction made during this audit:** the first measurement pass showed a suspicious, near-identical ≈2.0–2.6 second floor on *every* endpoint regardless of complexity or concurrency level. Investigation (a raw `socket.create_connection()` timing probe) isolated the cause precisely: connecting to the hostname `"localhost"` on this Windows machine takes **~2020ms** per TCP connect, vs **~13ms** connecting to `127.0.0.1` against the exact same listening port — a well-documented Windows IPv6-then-IPv4-fallback DNS/connect quirk, **entirely a local-machine artifact with zero relation to Django or this backend's code** (see below, Category B). All measurements below use `127.0.0.1` directly, removing that artifact.
 
@@ -261,8 +261,8 @@ This is a genuinely positive, confirmed finding: the "one manager per region" ar
 - `backend/api/concurrency_tests/__init__.py`
 - `backend/api/concurrency_tests/test_race_conditions.py` (6 tests)
 - `backend/api/concurrency_tests/test_load_concurrency.py` (5 tests)
-- `project-quality/concurrency/evidence/GROUP2_RACE_CONDITION_EVIDENCE.txt`
-- `project-quality/concurrency/evidence/GROUP2_LOAD_MEASUREMENTS.txt`
+- `project-quality/concurrency/evidence/RACE_CONDITION_EVIDENCE_BASELINE.txt`
+- `project-quality/concurrency/evidence/LOAD_MEASUREMENTS_BASELINE.txt`
 - `project-quality/concurrency/CONCURRENCY_AND_LOAD_AUDIT.md` (this file)
 
 No other files were modified. No allocation code was touched. No frontend code was touched.
