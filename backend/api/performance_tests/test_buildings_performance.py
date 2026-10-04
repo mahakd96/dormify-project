@@ -27,7 +27,7 @@ query that returns wrong numbers is not an acceptable outcome.
 
 Run against Django's disposable TEST database (created/destroyed as
 test_<DB_NAME> - never touches the real database). This repo's real .env
-points at the production Azure Postgres instance, so this measurement run
+points at the production production Postgres instance, so this measurement run
 should be pointed at the local docker-compose `test_db` service instead,
 via a local-only .env.test:
 
