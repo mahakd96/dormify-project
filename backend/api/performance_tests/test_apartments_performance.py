@@ -36,9 +36,8 @@ inactive room still has an ACTIVE assignment - a faster query that returns
 wrong numbers is not an acceptable outcome.
 
 Run against Django's disposable TEST database (created/destroyed as
-test_<DB_NAME> - never touches the real database). This repo's real .env
-points at the production Azure Postgres instance, so this measurement run
-should be pointed at the local docker-compose `test_db` service instead,
+test_<DB_NAME> - never touches the production database). Public-repository test runs must
+use the isolated local `test_db` service rather than any operational database,
 via a local-only .env.test:
 
     cd backend
