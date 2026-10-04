@@ -193,13 +193,13 @@ Plus `TransferCreateAndApproveSequentialTests` (3 sequential, non-concurrent tes
 
 **Methodology unchanged from the audit** (still the correct choice, re-affirmed): `TransactionTestCase` (not `TestCase`) for every race test — `TestCase`'s single-connection outer-transaction wrapping would either hide the race entirely (background threads can't see uncommitted writes) or deadlock (a `select_for_update()` from a background thread against a row the main thread's open transaction touched blocks forever). No sequential test was substituted for a genuine concurrent one anywhere in this suite — every "race" test still uses `ThreadPoolExecutor` + `threading.Barrier`-synchronized concurrent HTTP calls, each on its own `APIClient()`/connection.
 
-Evidence file: `project-quality/concurrency/evidence/GROUP2_RACE_CONDITION_EVIDENCE_AFTER_FIX.txt` (new filename — the audit's original `GROUP2_RACE_CONDITION_EVIDENCE.txt` is preserved unmodified as the "before" record).
+Evidence file: `project-quality/concurrency/evidence/RACE_CONDITION_EVIDENCE_AFTER_FIX.txt` (new filename — the audit's original `GROUP2_RACE_CONDITION_EVIDENCE.txt` is preserved unmodified as the "before" record).
 
 ---
 
 ## 9. Load Measurements: Before vs. After
 
-Re-ran the identical methodology from the audit (`LiveServerTestCase`, real threaded WSGI server, real sockets, `127.0.0.1` explicit to avoid the Windows `"localhost"` DNS artifact diagnosed in the audit) at the same concurrency levels (1/5/10/20) against the same 5 representative GET endpoints. Full data: `project-quality/concurrency/evidence/GROUP2_LOAD_MEASUREMENTS_AFTER_FIX.txt` (new filename; audit's original `GROUP2_LOAD_MEASUREMENTS.txt` preserved unmodified).
+Re-ran the identical methodology from the audit (`LiveServerTestCase`, real threaded WSGI server, real sockets, `127.0.0.1` explicit to avoid the Windows `"localhost"` DNS artifact diagnosed in the audit) at the same concurrency levels (1/5/10/20) against the same 5 representative GET endpoints. Full data: `project-quality/concurrency/evidence/LOAD_MEASUREMENTS_AFTER_FIX.txt` (new filename; audit's original `GROUP2_LOAD_MEASUREMENTS.txt` preserved unmodified).
 
 | Endpoint | Audit ratio (20/1) | After-fix ratio (20/1) | Failures (after) |
 |---|---|---|---|
