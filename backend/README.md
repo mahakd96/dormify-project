@@ -1,6 +1,6 @@
 # 🏠 Dormify Backend (Django + Python)
 
-Backend API for Dormify - Technion Dormitory Management System.
+Backend API for Dormify - university housing management system.
 
 ---
 
@@ -204,11 +204,11 @@ Django includes a FREE admin panel!
 
 | Email | Role |
 |-------|------|
-| admin@technion.ac.il | Central Admin |
-| canada@technion.ac.il | Region Boss (Canada) |
-| canada.emp@technion.ac.il | Employee (Canada) |
-| hasmaha@technion.ac.il | Region Boss (Hasmaha) |
-| mizrah@technion.ac.il | Region Boss (Mizrah) |
+| admin@example.edu | Central Admin |
+| canada@example.edu | Region Boss (Canada) |
+| canada.emp@example.edu | Employee (Canada) |
+| hasmaha@example.edu | Region Boss (Hasmaha) |
+| mizrah@example.edu | Region Boss (Mizrah) |
 
 The password for each account is taken from the `SEED_ADMIN_PASSWORD` / `SEED_STAFF_PASSWORD` environment variables if set, otherwise a random password is generated per run and printed once to the console (never written back into source).
 
