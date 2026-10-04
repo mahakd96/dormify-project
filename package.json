@@ -1,7 +1,7 @@
 {
   "name": "dormify",
   "version": "2.0.0",
-  "description": "Smart Dormitory Management System for Technion",
+  "description": "Constraint-based university housing allocation and management system",
   "private": true,
   "dependencies": {
     "@arcgis/core": "^4.34.8",
