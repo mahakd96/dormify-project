@@ -229,7 +229,7 @@ JWT_REFRESH_COOKIE_DOMAIN = os.getenv("JWT_REFRESH_COOKIE_DOMAIN") or None
 
 CORS_ALLOWED_ORIGINS = os.getenv(
     "CORS_ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000,http://192.168.1.13:3000",
+    "http://localhost:3000,http://127.0.0.1:3000",
 ).split(",")
 
 CORS_ALLOW_HEADERS = list(default_headers) + [

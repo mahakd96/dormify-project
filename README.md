@@ -1,14 +1,45 @@
+> [!NOTE]
+> This repository is a sanitized portfolio/publication version of Dormify. Operational datasets, production credentials, internal deployment details, and institution-owned operational assets are intentionally excluded. The project was originally developed as an academic engineering project in collaboration with a university housing office; this public repository is not an official institutional distribution. The Technion logo is retained only to identify the academic project context; trademark rights remain with their owner.
+
 # Dormify
 
 **Dormitory allocation and management platform for university housing administration.**
 
-Dormify is a full-stack information system designed to support complex university dormitory operations.
+Dormify is a full-stack information system developed for the **Technion Dormitories Office** to support complex student-housing allocation and management workflows.
 
 The platform centralizes student data, dormitory inventory, automatic allocation, assisted placement, transfers, reporting, and administrative workflows in one system. Its allocation engine uses constraint-based optimization to generate valid housing assignments while respecting operational rules, available capacity, and configurable preferences.
 
 Dormify is built as a web application with a **React frontend**, **Django REST backend**, **PostgreSQL database**, and an **OR-Tools CP-SAT allocation engine**.
 
+## Current Status
+
+Dormify has progressed beyond the academic prototype stage. The system has been **deployed on Technion CIS infrastructure** and handed over for institutional use. The deployed environment is ready for operational use by the Technion Dormitories Office, with CIS responsible for the institutional deployment environment and continued technical ownership after the student project phase.
+
+This repository is the sanitized public portfolio version of that work. Production credentials, operational datasets, internal deployment details, and confidential institutional material are intentionally excluded.
+
+## Deployment & Handover
+
+- **Institutional deployment:** deployed on Technion CIS infrastructure.
+- **Operational readiness:** prepared and handed over for use by the Technion Dormitories Office.
+- **Post-project ownership:** the institutional deployment is maintained outside this public repository by Technion CIS.
+- **Public repository scope:** source code, architecture, testing, and sanitized engineering evidence are retained here; production configuration and operational data are not.
+
 ---
+
+## Project Team
+
+Dormify was developed as a final-year **Information Systems Engineering** project at the **Technion – Israel Institute of Technology**, in collaboration with the **Technion Dormitories Office**, by:
+
+- Maha Kadah
+- Donia Hassan
+- Aya Abu-Raya
+- Zeinab Habiballah
+- Siraj Sulieman
+
+The repository preserves the original Git commit history so individual
+contributions remain attributable to their original authors. The project
+continued through deployment and handover to Technion CIS after the academic
+development phase.
 
 ## System Overview
 
@@ -638,32 +669,15 @@ ENV_FILE=.env.test python manage.py test api.tests
 
 # Project Quality
 
-Engineering verification and stabilization documentation is maintained under:
+Public engineering-quality notes are summarized under:
 
 ```text
 project-quality/
 ```
 
-This directory contains technical records related to areas such as:
+Detailed production incident reports, environment-specific measurements, real inventory snapshots, and internal operational notes are intentionally excluded from this public portfolio version. The retained public summary describes the testing strategy and engineering practices without exposing institutional or production-specific details.
 
-* allocation-engine corrections;
-* allocation lifecycle improvements;
-* backend and database stabilization;
-* Assisted Allocation;
-* transfer workflows;
-* import and inventory integrity;
-* regression testing;
-* performance optimization;
-* concurrency testing;
-* frontend and usability corrections;
-* localization;
-* analysis improvements.
-
-These documents provide additional engineering context for significant system changes and verification work.
-
-They are separate from the application source code and are intended to preserve technical traceability.
-
-See [`project-quality/README.md`](project-quality/README.md) for the current engineering-quality reports and verification documentation.
+See [`project-quality/README.md`](project-quality/README.md).
 
 ---
 
@@ -679,7 +693,7 @@ See [`project-quality/README.md`](project-quality/README.md) for the current eng
 | Authentication              | JWT                    |
 | Data Processing             | pandas, openpyxl       |
 | Frontend API Client         | Axios                  |
-| Mapping                     | Static dormitory map image with React-positioned interactive overlays |
+| Mapping                     | Public-safe demonstration map with React-positioned interactive overlays |
 | Reporting / File Processing | XLSX, openpyxl         |
 | Infrastructure              | Docker, Docker Compose |
 

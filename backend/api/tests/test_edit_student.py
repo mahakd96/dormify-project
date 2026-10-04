@@ -4,7 +4,7 @@ match-options "single blocking error" behavior for students missing
 housing_type/region.
 
 Covers the housing-type/region assignment-eligibility bug: a student with
-housing_type='' (e.g. real Azure student pk=26203, category=leaving) must
+housing_type='' (e.g. real Azure a production student record, category=leaving) must
 never reach the room-scanning loop and get the same "no supported housing
 type" conflict repeated on every candidate room - instead match-options
 returns one clear (blocking_field, reason) pair.

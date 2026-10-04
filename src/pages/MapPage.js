@@ -18,8 +18,16 @@ import { api } from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import { localizeLocationText } from "../utils/locationNames";
 
-const MAP_FILE = "technionDormMap.png";
-const MAP_SRC = `/maps/${MAP_FILE}`;
+const MAP_SRC = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900">
+  <rect width="1400" height="900" fill="#eef3f7"/>
+  <g fill="none" stroke="#cbd5e1" stroke-width="2">
+    <path d="M120 150 H1280 M120 300 H1280 M120 450 H1280 M120 600 H1280 M120 750 H1280"/>
+    <path d="M250 80 V820 M500 80 V820 M750 80 V820 M1000 80 V820 M1250 80 V820"/>
+  </g>
+  <text x="700" y="420" text-anchor="middle" font-family="Arial, sans-serif" font-size="42" font-weight="700" fill="#334155">Dormify Demo Map</text>
+  <text x="700" y="470" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" fill="#64748b">Institutional map asset excluded from public repository</text>
+</svg>`)}`;
 
 const clickableDormAreas = {
   canada: { top: "15.5%", left: "29.5%", width: "12.5%", height: "7.5%" },
@@ -970,7 +978,7 @@ export default function MapPage({ language = "he" }) {
                   ref={imgRef}
                   className="map-img"
                   src={MAP_SRC}
-                  alt="Technion dormitory map"
+                  alt="Dormify demonstration housing map"
                   draggable={false}
                   onLoad={updateImgBounds}
                 />

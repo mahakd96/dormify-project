@@ -6,7 +6,7 @@ Run against Django's disposable TEST database only:
 
     ENV_FILE=.env.test python manage.py test api.security_tests
 
-Never against Azure - see
+Never against production - see
 project-quality/security/SECURITY_AND_AUTHORIZATION_REPORT.md for the
 full verification method.
 """

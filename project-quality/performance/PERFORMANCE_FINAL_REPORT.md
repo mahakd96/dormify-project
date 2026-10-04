@@ -29,7 +29,7 @@ All measurements were taken with Django REST Framework's in-process
 `APIClient` against a local, disposable PostgreSQL 16 Docker test
 database (`ENV_FILE=.env.test`). **No measurement in this body of work
 reflects real HTTP network latency, TLS negotiation, or the real
-Azure-hosted production database** — this limitation applies to every
+managed production database** — this limitation applies to every
 number in this report and is restated in Section 12.
 
 ---
@@ -56,7 +56,7 @@ number in this report and is restated in Section 12.
   non-scaling inefficiencies: duplicate queries, a missing
   `select_related`, and redundant Python-side passes over data.
 - **Two database/runtime configuration items** — `CONN_MAX_AGE = 0`
-  against what is very likely a remote, TLS-secured Azure Postgres host,
+  against what is very likely a remote, TLS-secured managed cloud environment Postgres host,
   and the backend Docker configuration running Django's development
   server with no production WSGI server present in `requirements.txt` —
   were identified by static configuration inspection; their real-world
@@ -418,7 +418,7 @@ functional regression observed and the page noticeably faster.
 | Report HTTP-path tests + existing report-content tests (`test_reports_performance`) combined | 10/10 passed |
 
 All test runs used the local disposable PostgreSQL test database; the
-real Azure database was never connected to at any point in this work.
+real production database was never connected to at any point in this work.
 
 ---
 
@@ -427,13 +427,13 @@ real Azure database was never connected to at any point in this work.
 These are open items, not fixed problems, and are preserved here as
 genuine limitations rather than resolved:
 
-- **Real Azure/network latency** for every endpoint measured across this
+- **Real production network/database latency** for every endpoint measured across this
   entire body of work is unmeasured — all figures come from an in-process
   API client with no real HTTP round trip, TLS handshake, or database
   network hop.
 - **`CONN_MAX_AGE = 0`** in `backend/dormify/settings.py`, combined with
   a database configuration that defaults to requiring SSL and a host
-  consistent with a managed Azure Postgres instance, means every request
+  consistent with a managed managed cloud environment Postgres instance, means every request
   opens and closes a fresh database connection. The real latency cost of
   this against the production host was not measured and requires
   real-environment measurement before any configuration change is

@@ -3,11 +3,11 @@
 **Baseline commit:** `23bb2c8` (the only change since the prior audit/revalidation baseline `c486f89` was `README.md` — no security-relevant source changed).
 
 > **Status: Implemented and deployed.** This work was merged and has since completed its full
-> production closeout, including the Azure database migration that §4 below originally left
+> production closeout, including the production database migration that §4 below originally left
 > blocked. See **§14 "Production Closeout"** at the end of this report for what happened after
 > deployment. Everything above that section is preserved as the historical record of the
 > implementation and review pass that led up to it — read it as "at the time this was written,"
-> not as the current state of Azure.
+> not as the current state of managed cloud environment.
 
 > **Post-review correction (G3-13):** the version of this report reviewed earlier stated that
 > `DEBUG` was left defaulting to `"True"` in `dormify/settings.py`, and separately claimed
@@ -39,7 +39,7 @@ backend/api/serializers.py               - G3-01, G3-02, G3-06 (RegisterSerializ
 backend/api/urls.py                      - G3-01 (route removed), G3-14/16 (refresh/logout routes)
 backend/api/views.py                     - nearly every finding; see table
 backend/api/throttling.py (new)          - G3-10
-backend/api/migrations/0019_...py (new)  - G3-19 (not applied to Azure at the time this was
+backend/api/migrations/0019_...py (new)  - G3-19 (not applied to managed cloud environment at the time this was
                                             written - since applied after cleanup, see §14)
 backend/api/security_tests/ (new)        - dedicated security regression package
 backend/api/tests_assisted_allocation.py - one test updated for the new G3-03 API contract
@@ -70,17 +70,17 @@ this pass are documented in §10 below.
 > originally written** (i.e., before this work was deployed) and are kept as the historical record of why
 > the migration wasn't applied yet at that point. That blocker has since been resolved — see
 > **§14 "Production Closeout"** for the actual cleanup and migration application that happened
-> afterward. Do not read the "NOT applied to Azure" statement below as the current state.
+> afterward. Do not read the "NOT applied to managed cloud environment" statement below as the current state.
 
 - Created and verified against the **isolated local test database only** (`ENV_FILE=.env.test`,
   applied automatically by `manage.py test`, and directly tested in
   `api/security_tests/test_manager_uniqueness.py::RegionBossPartialUniqueConstraintTests`).
-- **NOT applied to Azure at the time of writing.** Azure at that point had **3** `region_boss`
-  users for one region (Gush-Elyon) and **0** for another (Technion, temporarily covered by its
-  `central_admin` per team decision) — applying this migration to Azure as-is would have failed
+- **NOT applied to managed cloud environment at the time of writing.** managed cloud environment at that point had **3** `region_boss`
+  users for one region (an operational region) and **0** for another (the institution, temporarily covered by its
+  `central_admin` per team decision) — applying this migration to managed cloud environment as-is would have failed
   outright (a UNIQUE constraint cannot be created over existing violating rows).
 - **Exact blocker as originally stated, verbatim:** *"Production migration requires approved
-  cleanup of the existing duplicate Gush-Elyon region_boss records before this constraint can be
+  cleanup of the existing duplicate an operational region region_boss records before this constraint can be
   applied."* The known real manager was `regional.manager@example.edu`; the two suspected
   unused/test accounts (`legacy.manager1@example.edu`, `legacy.manager2@example.edu`) were **not
   modified** as part of this implementation pass — no email addresses were hardcoded anywhere in
@@ -88,7 +88,7 @@ this pass are documented in §10 below.
   manually, outside application code — see §14.)
 - The **application-level** guard (`accounts/serializers.py`, race-safe via
   `select_for_update()` on the `Region` row) was fully active and enforced independently of this
-  migration from the moment this pass was implemented, and never required any Azure cleanup to
+  migration from the moment this pass was implemented, and never required any managed cloud environment cleanup to
   work. It remains active today alongside the now-applied database constraint.
 
 ## 4a. G3-13 correction: DEBUG now defaults to False
@@ -133,12 +133,12 @@ edit only exists on disk until the container is recreated), so it immediately hi
 `Restarting (1) ...`). This is precisely the scenario requirement #2 exists to prevent, and it
 would have stayed broken without a redeploy. Because leaving local Docker dev crash-looping is a
 direct violation of that requirement, and because recreating one already-affected local container
-is a safe, reversible, non-Azure action, it was fixed as part of this correction:
+is a safe, reversible, non-managed cloud environment action, it was fixed as part of this correction:
 `docker compose up -d --force-recreate backend`. Confirmed healthy afterward (`docker ps` →
 `Up ...`; `docker logs dormify_backend` → `Watching for file changes with StatReloader`, no
 errors). `dormify_frontend` and `dormify_test_db` were never affected (neither reads `DEBUG`).
 
-**Still NOT touched, by design:** the real local `.env` (the one `DB_HOST` points at the Azure
+**Still NOT touched, by design:** the real local `.env` (the one `DB_HOST` points at the managed cloud environment
 Postgres instance). It is not mounted into any Docker container and so was never part of this
 incident, but a direct, non-Docker `python manage.py runserver` / `manage.py check` using that
 file (default `ENV_FILE=.env`) will now also fail closed with the same `ImproperlyConfigured`
@@ -177,7 +177,7 @@ the same boss standing in for both sides.
 
 Ran with `ENV_FILE=.env.test python manage.py test <target> --keepdb`, against the isolated local
 Postgres test database only (confirmed `HOST=localhost, NAME=dormify_test, PORT=5433` before any
-test ran — never Azure).
+test ran — never managed cloud environment).
 
 | Suite | Result |
 |---|---|
@@ -269,10 +269,10 @@ production-facing deployment:
 | `SEED_ADMIN_PASSWORD` / `SEED_STAFF_PASSWORD` | dev seed only | `backend/seed.py` refuses to run at all unless `DEBUG=True` |
 | `TEST_DB_USER` / `TEST_DB_PASSWORD` | local Docker test DB | defaults preserve current `docker-compose.yml` behavior |
 
-**Previously required, operationally, before enabling the G3-19 DB constraint on Azure:** an
-approved manual cleanup reducing Gush-Elyon to exactly one `region_boss` (see §4). This was a data
+**Previously required, operationally, before enabling the G3-19 DB constraint on managed cloud environment:** an
+approved manual cleanup reducing an operational region to exactly one `region_boss` (see §4). This was a data
 decision for the team, deliberately not automated by this implementation pass — **it has since
-been completed and the constraint is now live on Azure; see §14.**
+been completed and the constraint is now live on managed cloud environment; see §14.**
 
 **Recreating the test-DB container** was previously listed here as still required for the G3-20
 binding change to take effect (editing the compose file alone does not live-migrate an
@@ -295,8 +295,8 @@ already-running container's port binding). **This has since been done — see §
   direct `python manage.py runserver`/`check` against it will fail closed until someone adds
   `DEBUG=True` (or a real `SECRET_KEY`) to that file by hand. Docker-based local dev is unaffected
   (fixed in §4a) and is the primary way this project is run locally per `docker-compose.yml`.
-- **G3-19 DB constraint:** ~~not live on Azure pending the manual cleanup in §4~~ — **resolved**,
-  the cleanup was completed and the constraint applied to Azure after this work was deployed; see §14. The
+- **G3-19 DB constraint:** ~~not live on managed cloud environment pending the manual cleanup in §4~~ — **resolved**,
+  the cleanup was completed and the constraint applied to managed cloud environment after this work was deployed; see §14. The
   constraint guarantees *at most one* `region_boss` per region, not "exactly one" — the no-zero-
   managers side of that guarantee remains the application-level guard's responsibility (§4), not
   something a database constraint alone can express.
@@ -305,12 +305,12 @@ already-running container's port binding). **This has since been done — see §
 
 - `.env.example` — not updated as part of this pass; the new variables are documented in §10 instead.
   (`.env.test`, by contrast, was updated directly as part of the G3-13 correction, §4a.)
-- The real local `.env` (Azure-connected) — not modified as part of this pass. It now needs
+- The real local `.env` (managed cloud environment-connected) — not modified as part of this pass. It now needs
   `DEBUG=True` or a real `SECRET_KEY` added by hand for any direct, non-Docker use of that file to
   keep working (§4a, §11).
 - ~~The G3-19 database constraint could not be applied anywhere except the local test database, by
-  design (Azure has existing violating data — see §4).~~ **Resolved after this work was deployed** — the
-  violating data was cleaned up manually and the constraint is now applied to Azure;
+  design (managed cloud environment has existing violating data — see §4).~~ **Resolved after this work was deployed** — the
+  violating data was cleaned up manually and the constraint is now applied to managed cloud environment;
   see §14. This bullet is kept struck through, rather than deleted, as part of the historical
   record of what this implementation pass itself could and couldn't do.
 - ~~The docker-compose port-binding fix (G3-20) is written but not yet live on the running
@@ -341,26 +341,26 @@ follow-ups rather than something this pass could resolve itself.
 
 **1. Merge.** This work was merged into the main codebase.
 
-**2. `token_blacklist` migrations applied to Azure.** The `rest_framework_simplejwt.token_blacklist`
+**2. `token_blacklist` migrations applied to managed cloud environment.** The `rest_framework_simplejwt.token_blacklist`
 app's own migrations (enabling G3-14's server-side refresh-token revocation) were applied
-successfully to the Azure database.
+successfully to the production database.
 
-**3. Gush-Elyon duplicate-manager cleanup, completed manually and safely, before touching
+**3. an operational region duplicate-manager cleanup, completed manually and safely, before touching
 `0019`.** With the migration order deliberately cleanup-first:
    - `legacy.manager1@example.edu` was removed.
    - `legacy.manager2@example.edu` was removed.
-   - `regional.manager@example.edu` remains — the sole Gush-Elyon regional manager.
+   - `regional.manager@example.edu` remains — the sole an operational region regional manager.
 
-**4. Read-only verification, after cleanup.** Confirmed on Azure:
+**4. Read-only verification, after cleanup.** Confirmed on managed cloud environment:
    - No remaining accounts with either removed email address.
-   - Gush-Elyon has exactly one active `region_boss`.
+   - an operational region has exactly one active `region_boss`.
    - No region, anywhere, has duplicate `region_boss` users.
 
 **5. Migration plan checked before applying.** `showmigrations`/plan output for
 `api.0019_user_unique_region_boss_per_region` showed only that one migration pending — nothing
 else queued alongside it.
 
-**6. `api.0019_user_unique_region_boss_per_region` applied to Azure.** Applied successfully, now
+**6. `api.0019_user_unique_region_boss_per_region` applied to managed cloud environment.** Applied successfully, now
 that no row violated the constraint.
 
 **7. Confirmed via `showmigrations api`:**
@@ -370,17 +370,17 @@ that no row violated the constraint.
 ```
 
 **8. Therefore: the previous production blocker for G3-19 is RESOLVED.** The condition documented
-in §4/§10/§11/§12 above ("cannot apply `0019` to Azure until the Gush-Elyon duplicates are cleaned
+in §4/§10/§11/§12 above ("cannot apply `0019` to managed cloud environment until the an operational region duplicates are cleaned
 up") no longer holds — the cleanup happened first, verified, and the migration was applied after.
 
-**9. Database-level uniqueness protection is now active in Azure.** A partial `UNIQUE` constraint
+**9. Database-level uniqueness protection is now active in managed cloud environment.** A partial `UNIQUE` constraint
 on `User(region)` where `role='region_boss'` now enforces, at the database layer, that no region
 can ever have more than one `region_boss` row — independent of, and in addition to, the
 application-level `select_for_update()` guard in `accounts/serializers.py` (§4).
 
 **10. What the constraint does and does not guarantee.** The database constraint guarantees **at
 most one** `region_boss` per region — it does **not** by itself guarantee **exactly one**. A
-region with zero `region_boss` users (the Technion case, temporarily covered by its
+region with zero `region_boss` users (the the institution case, temporarily covered by its
 `central_admin` per team decision, §4) does not violate this constraint and is not something a
 uniqueness constraint can express. Preventing a region from being left at zero managers (via
 deletion, demotion, or reassignment) remains the responsibility of the application-level rules,

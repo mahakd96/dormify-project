@@ -30,7 +30,7 @@ No allocation algorithm code was read for correctness purposes, evaluated, or mo
 - Frontend/UI code and design.
 - Full authorization/privacy testing (covered separately by the security work) — only the concurrency-specific "do two regions' simultaneous actions interfere" check was performed.
 - Deployment configuration changes.
-- Any load/testing against the real Azure database — **all measurement in this audit ran exclusively against the local disposable Postgres test database** (`ENV_FILE=.env.test`, `dormify_test` on `localhost:5433`, confirmed via direct settings inspection before any test ran).
+- Any load/testing against the real production database — **all measurement in this audit ran exclusively against the local disposable Postgres test database** (`ENV_FILE=.env.test`, `dormify_test` on `localhost:5433`, confirmed via direct settings inspection before any test ran).
 - Destructive/extreme stress testing intended only to crash the local machine.
 
 **Business rule honored:** every multi-manager test in this audit uses `REGION_BOSS` users from **different** regions (`g2-mr-region-a` / `g2-mr-region-b`), matching the stated one-manager-per-region rule. No test simulates two bosses in the same region.
@@ -39,7 +39,7 @@ No allocation algorithm code was read for correctness purposes, evaluated, or mo
 
 ## 3. Test Environment and Methodology
 
-- **Database:** local disposable Postgres 16 in Docker (`dormify_test_db` container), accessed only via `ENV_FILE=.env.test` (`localhost:5433`, `dormify_test`). Confirmed programmatically before any test ran; never touched the real Azure database.
+- **Database:** local disposable Postgres 16 in Docker (`dormify_test_db` container), accessed only via `ENV_FILE=.env.test` (`localhost:5433`, `dormify_test`). Confirmed programmatically before any test ran; never touched the real production database.
 - **Why `TransactionTestCase`, not `TestCase`, for race-condition tests:** Django's plain `TestCase` wraps each test body in one outer transaction on one connection; a background thread started inside such a test gets its own thread-local connection that can never see the main thread's *uncommitted* writes, and a `select_for_update()` taken by a background thread against a row the main thread's still-open transaction touched simply blocks forever (a **test hang**, not a race reproduction). `TransactionTestCase` does not wrap the test body in a transaction (it truncates tables between tests instead), so every thread's connection genuinely commits and becomes visible to every other thread — the only test class that can actually reproduce a race rather than mask or deadlock on it. This is documented directly in `api/concurrency_tests/test_race_conditions.py`'s module docstring.
 - **Why `LiveServerTestCase`, not `APIClient`, for load measurements:** `APIClient` calls the view function in-process — no socket, no WSGI dispatch, no real per-request DB connection lifecycle. Section 7 of this audit specifically needs to observe real Django development-server behavior under concurrent HTTP traffic (real `accept()`/thread-per-request cycle, real per-request Postgres connections given `CONN_MAX_AGE=0`). `LiveServerTestCase` starts an actual threaded WSGI server on a real local port; the `requests` library was used as a genuinely independent HTTP client, exactly as the real frontend or a browser would connect.
 - **Thread orchestration:** `threading.Barrier` synchronizes worker-thread start times so concurrent requests fire as close to simultaneously as achievable in Python; each worker thread builds its **own** `APIClient()`/HTTP connection (never a shared client object) and explicitly calls `django.db.connections.close_all()` on exit (see §7 finding G2-EVIDENCE-conn-leak).
@@ -47,7 +47,7 @@ No allocation algorithm code was read for correctness purposes, evaluated, or mo
 - New test packages created:
   - `backend/api/concurrency_tests/test_race_conditions.py` — 6 test classes, 6 tests (race conditions, bed contention, multi-region isolation, inbox double-mark, the incidental Transfer bug).
   - `backend/api/concurrency_tests/test_load_concurrency.py` — 1 test class, 5 tests (load/throughput at N=1/5/10/20 across 5 endpoints).
-- Evidence: `project-quality/concurrency/evidence/GROUP2_RACE_CONDITION_EVIDENCE.txt`, `project-quality/concurrency/evidence/GROUP2_LOAD_MEASUREMENTS.txt` (both regenerated directly by the test runs below).
+- Evidence: `project-quality/concurrency/evidence/RACE_CONDITION_EVIDENCE_BASELINE.txt`, `project-quality/concurrency/evidence/LOAD_MEASUREMENTS_BASELINE.txt` (both regenerated directly by the test runs below).
 
 ---
 
@@ -155,7 +155,7 @@ No F-expression / atomic-counter patterns were found needing review (Dormify doe
 
 ## 8. Load/Scaling Measurements
 
-Full raw output: `project-quality/concurrency/evidence/GROUP2_LOAD_MEASUREMENTS.txt`. Dataset: 3 buildings × 2 rooms × 4 beds (24 beds), 20 students (12 assigned), 10 pending requests — rebuilt fresh per test method (comparable scale to the prior performance work's fixtures).
+Full raw output: `project-quality/concurrency/evidence/LOAD_MEASUREMENTS_BASELINE.txt`. Dataset: 3 buildings × 2 rooms × 4 beds (24 beds), 20 students (12 assigned), 10 pending requests — rebuilt fresh per test method (comparable scale to the prior performance work's fixtures).
 
 **Important methodology correction made during this audit:** the first measurement pass showed a suspicious, near-identical ≈2.0–2.6 second floor on *every* endpoint regardless of complexity or concurrency level. Investigation (a raw `socket.create_connection()` timing probe) isolated the cause precisely: connecting to the hostname `"localhost"` on this Windows machine takes **~2020ms** per TCP connect, vs **~13ms** connecting to `127.0.0.1` against the exact same listening port — a well-documented Windows IPv6-then-IPv4-fallback DNS/connect quirk, **entirely a local-machine artifact with zero relation to Django or this backend's code** (see below, Category B). All measurements below use `127.0.0.1` directly, removing that artifact.
 
@@ -261,8 +261,8 @@ This is a genuinely positive, confirmed finding: the "one manager per region" ar
 - `backend/api/concurrency_tests/__init__.py`
 - `backend/api/concurrency_tests/test_race_conditions.py` (6 tests)
 - `backend/api/concurrency_tests/test_load_concurrency.py` (5 tests)
-- `project-quality/concurrency/evidence/GROUP2_RACE_CONDITION_EVIDENCE.txt`
-- `project-quality/concurrency/evidence/GROUP2_LOAD_MEASUREMENTS.txt`
+- `project-quality/concurrency/evidence/RACE_CONDITION_EVIDENCE_BASELINE.txt`
+- `project-quality/concurrency/evidence/LOAD_MEASUREMENTS_BASELINE.txt`
 - `project-quality/concurrency/CONCURRENCY_AND_LOAD_AUDIT.md` (this file)
 
 No other files were modified. No allocation code was touched. No frontend code was touched.
