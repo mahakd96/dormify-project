@@ -4,7 +4,7 @@ match-options "single blocking error" behavior for students missing
 housing_type/region.
 
 Covers the housing-type/region assignment-eligibility bug: a student with
-housing_type='' (e.g. real Azure student pk=26203, category=leaving) must
+housing_type='' in an operational record must
 never reach the room-scanning loop and get the same "no supported housing
 type" conflict repeated on every candidate room - instead match-options
 returns one clear (blocking_field, reason) pair.
@@ -43,7 +43,7 @@ def _make_room(dorm_type, building_number, apartment_number, category,
     )
     room = Room.objects.create(apartment=apartment, name='101', capacity=room_capacity)
     # Matching is read-only over real Bed rows - fixtures materialize them
-    # explicitly, like a properly initialized production database.
+    # explicitly, like a properly initialized deployment database.
     from api.tests.matching_test_utils import create_beds_for_room
     create_beds_for_room(room)
     return building, apartment, room
