@@ -1,48 +1,21 @@
-\# Dormitory Inventory Import
+# Dormitory Inventory Data
 
+Operational housing inventory is intentionally **not included** in this public repository.
 
+The importer is available at:
 
-Source workbook:
+`api/management/commands/import_buildings_final.py`
 
-`מיטות במעונות.xlsx`
+For local development or evaluation, provide your own authorized test workbook outside version control and run a dry run before importing it:
 
+```bash
+python manage.py import_buildings_final "/path/to/local/inventory.xlsx" --dry-run
+```
 
+After validating the output:
 
-Django importer:
+```bash
+python manage.py import_buildings_final "/path/to/local/inventory.xlsx"
+```
 
-`api/management/commands/import\_buildings\_final.py`
-
-
-
-From the `backend` directory, validate first without changing the database:
-
-
-
-python manage.py import\_buildings\_final "data/מיטות במעונות.xlsx" --dry-run
-
-
-
-Expected inventory:
-
-\- 11 dorm types
-
-\- 91 buildings
-
-\- 1,016 apartments
-
-\- 3,079 rooms
-
-\- 3,371 beds
-
-
-
-After a successful dry run:
-
-
-
-python manage.py import\_buildings\_final "data/מיטות במעונות.xlsx"
-
-
-
-Do not use `--replace` unless the existing inventory has been reviewed and a database backup has been taken.
-
+Do not commit real housing inventories, room/bed identifiers, production exports, or institutional operational data to this repository.
