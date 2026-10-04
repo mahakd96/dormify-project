@@ -2,7 +2,7 @@
 Tests for the Assisted Allocation workbench
 (/api/assisted-allocation/*, backend/allocation/manual_placement.py).
 
-Run with the test database (never the production Azure DB):
+Run with the isolated test database only; never target an operational database:
     python manage.py test api.tests_assisted_allocation
 """
 
