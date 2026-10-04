@@ -3,7 +3,7 @@
 **Baseline commit:** `23bb2c8` (the only change since the prior audit/revalidation baseline `c486f89` was `README.md` — no security-relevant source changed).
 
 > **Status: Implemented and deployed.** This work was merged and has since completed its full
-> production closeout, including the managed cloud environment database migration that §4 below originally left
+> production closeout, including the production database migration that §4 below originally left
 > blocked. See **§14 "Production Closeout"** at the end of this report for what happened after
 > deployment. Everything above that section is preserved as the historical record of the
 > implementation and review pass that led up to it — read it as "at the time this was written,"
@@ -343,7 +343,7 @@ follow-ups rather than something this pass could resolve itself.
 
 **2. `token_blacklist` migrations applied to managed cloud environment.** The `rest_framework_simplejwt.token_blacklist`
 app's own migrations (enabling G3-14's server-side refresh-token revocation) were applied
-successfully to the managed cloud environment database.
+successfully to the production database.
 
 **3. an operational region duplicate-manager cleanup, completed manually and safely, before touching
 `0019`.** With the migration order deliberately cleanup-first:
