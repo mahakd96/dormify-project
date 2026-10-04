@@ -40,7 +40,7 @@ An import now goes through an explicit lifecycle — created, processing, option
 - **Stop-and-delete, and plain delete.** Undoing an import raises a sharper question than "cancel the request" — *which* rows belong to this batch, which existed before it, and what is safe to remove? Each `Student` row created by an import batch is tagged with the batch that created it (a field kept separate from, and never overwritten by, whichever batch most recently *updated* that row). Deleting a batch's effect therefore only ever removes students that batch itself created — never a pre-existing student it happened to touch, and never any dorm inventory. A student who was created by the batch but has since been given a bed is protected from deletion at the database level and is reported back explicitly rather than silently skipped or allowed to break the rest of the cleanup.
 - **Recovery after interruption.** The batch's row persists its own progress and final summary, so a page refresh, a lost connection, or navigating away and back can recover exactly what happened instead of losing it.
 
-This is the same underlying engineering decision as the [allocation-run lifecycle](../allocation/ALLOCATION_ENGINE_AND_LIFECYCLE_REPORT.md#10-allocation-run-lifecycle-and-recovery): a long-running, interruptible operation needs its state to live in the database, not only for the duration of the request or browser tab that started it.
+This is the same underlying engineering decision as the [allocation-run lifecycle](../allocation/MAHA_ALLOCATION_ENGINE_AND_LIFECYCLE_FIXES.md#10-allocation-run-lifecycle-and-recovery): a long-running, interruptible operation needs its state to live in the database, not only for the duration of the request or browser tab that started it.
 
 ### Verification
 
@@ -126,7 +126,7 @@ Import-level regression tests confirm an אנייר-flagged source row produces 
 
 ## 6. Reserved-Building (Building 179) Eligibility
 
-The אנייר import fix above corrected whether the *signal* reached the solver at all. A separate, independent defect existed on the solver side of the same feature: it is documented under [Priority, ANIR, and Building 179](../allocation/ALLOCATION_ENGINE_AND_LIFECYCLE_REPORT.md#5-priority-anir-and-building-179), together with the diagnostic counters added afterward specifically so a future recurrence of either an import-mapping failure or a solver-side eligibility failure is visible immediately, rather than requiring a fresh investigation.
+The אנייר import fix above corrected whether the *signal* reached the solver at all. A separate, independent defect existed on the solver side of the same feature: it is documented under [Priority, ANIR, and Building 179](../allocation/MAHA_ALLOCATION_ENGINE_AND_LIFECYCLE_FIXES.md#5-priority-anir-and-building-179), together with the diagnostic counters added afterward specifically so a future recurrence of either an import-mapping failure or a solver-side eligibility failure is visible immediately, rather than requiring a fresh investigation.
 
 ---
 
@@ -162,7 +162,7 @@ The solver's inventory-preparation test coverage exercises the missing-bed-row r
 
 **Root Cause:** The hosted PostgreSQL connection can go idle and be closed server-side during a long-running request. Django does not automatically detect and recover from this mid-request — the next query on that same connection simply fails. A per-row loop that finishes in well under the idle timeout never hits this; a loop long enough to process a full workbook can outlast it, so the failure lands on whatever runs immediately afterward, not on the import itself.
 
-**Correction:** A small helper checks the connection's health and transparently reconnects if it has gone stale, called explicitly at the boundary after the row loop and before the subsequent metadata writes — and, separately, before the equivalent post-solve persistence step in the allocation engine (see [Persisting Results After a Long Solve](../allocation/ALLOCATION_ENGINE_AND_LIFECYCLE_REPORT.md#persisting-results-after-a-long-solve)), since both share the same shape: a long-running loop followed by a database write that must not inherit a connection the loop has outlived.
+**Correction:** A small helper checks the connection's health and transparently reconnects if it has gone stale, called explicitly at the boundary after the row loop and before the subsequent metadata writes — and, separately, before the equivalent post-solve persistence step in the allocation engine (see [Persisting Results After a Long Solve](../allocation/MAHA_ALLOCATION_ENGINE_AND_LIFECYCLE_FIXES.md#persisting-results-after-a-long-solve)), since both share the same shape: a long-running loop followed by a database write that must not inherit a connection the loop has outlived.
 
 **Verification:** Exercised as part of the import-batch lifecycle test coverage; the connection-refresh helper itself is a small, independently reviewable function called at each of these boundaries.
 
@@ -189,14 +189,14 @@ Dorm inventory — buildings, apartments, rooms, and beds — is never modified 
 
 ## 11. Verification Summary
 
-Regression coverage across this report spans import-batch lifecycle and safe cleanup, accessibility and category classification (in both directions of the correction), the אנייר mapping fix, the additions-file reconciliation rules, inventory edit-safety, and the bed-row/capacity consistency fix. Full verification methodology and status are in [Verification Status](../testing/TESTING_AND_REGRESSION_REPORT.md#verification-status).
+Regression coverage across this report spans import-batch lifecycle and safe cleanup, accessibility and category classification (in both directions of the correction), the אנייר mapping fix, the additions-file reconciliation rules, inventory edit-safety, and the bed-row/capacity consistency fix. Full verification methodology and status are in [Verification Status](../testing/MAHA_TESTING_AND_REGRESSION_RECORD.md#verification-status).
 
 ---
 
 ## Implementation Traceability
 
 Representative commits:
-- `693d78a` — introduced the normalized bed-level schema this pipeline writes into (see [Bed-Level Assignment: Correcting the Persistence Model](../backend/BACKEND_API_AND_DATABASE_REPORT.md#bed-level-assignment-correcting-the-persistence-model)).
+- `693d78a` — introduced the normalized bed-level schema this pipeline writes into (see [Bed-Level Assignment: Correcting the Persistence Model](../backend/MAHA_BACKEND_API_DATABASE_FIXES.md#bed-level-assignment-correcting-the-persistence-model)).
 - `60aed10` — rebuilt the upload pipeline against real, database-connected inventory in place of an earlier mock-data flow; introduced the stale-connection refresh helper.
 - `80c3ebf`/`4b90437` — introduced the additions-file reconciliation rules (positive-decision filter, category preservation, authoritative dorm code).
 - `b982895` — first accessibility-exclusion and אנייר-mapping fix.
