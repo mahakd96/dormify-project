@@ -14,6 +14,24 @@ production-only identifiers, confidential operational details, and sensitive
 institutional data have been removed or generalized while preserving the
 technical reasoning and engineering evidence.
 
+## Maha Engineering Records
+
+The six engineering records originally added in Maha Kadah's historical commit
+**`Add Maha project quality engineering reports (#70)`** retain their original
+`MAHA_` filenames in this public portfolio version so that the authorship and
+workstream attribution remain visible alongside the preserved Git history:
+
+- `allocation/MAHA_ALLOCATION_ENGINE_AND_LIFECYCLE_FIXES.md`
+- `assisted-allocation/MAHA_ASSISTED_ALLOCATION_AND_TRANSFER_FIXES.md`
+- `backend/MAHA_BACKEND_API_DATABASE_FIXES.md`
+- `data-integrity/MAHA_IMPORT_DATA_AND_INVENTORY_STABILIZATION.md`
+- `system-stabilization/MAHA_SYSTEM_STABILIZATION_AND_DEBUGGING.md`
+- `testing/MAHA_TESTING_AND_REGRESSION_RECORD.md`
+
+Their engineering content is retained. Public-release sanitization is limited to
+sensitive operational data such as credentials, private account identities,
+confidential datasets, and internal deployment details.
+
 ## Reports
 
 - [Allocation engine and lifecycle](allocation/MAHA_ALLOCATION_ENGINE_AND_LIFECYCLE_FIXES.md)
