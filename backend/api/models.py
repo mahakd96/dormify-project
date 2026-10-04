@@ -50,10 +50,8 @@ class User(AbstractUser):
             # duplicate case, not a region left with zero managers - see
             # that create() method's comment for the full picture).
             #
-            # Applied to the real managed production database as part of the production
-            # closeout - the previously-existing duplicate region_boss
-            # records were cleaned up manually before this migration was
-            # applied. See
+            # Applied during production hardening after pre-existing duplicate
+            # manager records were reviewed and cleaned up. See
             # project-quality/security/SECURITY_AND_AUTHORIZATION_REPORT.md
             # section 14 for the cleanup and migration-application record.
             models.UniqueConstraint(
