@@ -87,7 +87,7 @@ def seed():
         {'email': 'canada@example.edu', 'username': 'canada_boss', 'first_name': 'Demo', 'last_name': 'Manager', 'role': 'region_boss', 'region': 'canada', 'password': staff_password},
         {'email': 'canada.emp@example.edu', 'username': 'canada_emp', 'first_name': 'Demo', 'last_name': 'Employee', 'role': 'employee', 'region': 'canada', 'password': staff_password},
         {'email': 'hasmaha@example.edu', 'username': 'hasmaha_boss', 'first_name': 'Demo', 'last_name': 'Manager', 'role': 'region_boss', 'region': 'hasmaha', 'password': staff_password},
-        {'email': 'mizrah@example.edu', 'username': 'mizrah_boss', 'first_name': 'משה', 'last_name': 'פרץ', 'role': 'region_boss', 'region': 'mizrah', 'password': staff_password},
+        {'email': 'mizrah@example.edu', 'username': 'mizrah_boss', 'first_name': 'Demo', 'last_name': 'Manager', 'role': 'region_boss', 'region': 'mizrah', 'password': staff_password},
     ]
 
     for data in users_data:
