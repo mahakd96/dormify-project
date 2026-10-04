@@ -1,5 +1,5 @@
 > [!NOTE]
-> This repository is a sanitized portfolio/publication version of Dormify. Operational datasets, production credentials, internal deployment details, and institution-owned assets are intentionally excluded. The project was originally developed as an academic engineering project in collaboration with a university housing office; this public repository is not an official institutional distribution.
+> This repository is a sanitized portfolio/publication version of Dormify. Operational datasets, production credentials, internal deployment details, and institution-owned operational assets are intentionally excluded. The project was originally developed as an academic engineering project in collaboration with a university housing office; this public repository is not an official institutional distribution. The Technion logo is retained only to identify the academic project context; trademark rights remain with their owner.
 
 # Dormify
 
