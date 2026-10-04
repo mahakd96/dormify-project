@@ -83,11 +83,11 @@ def seed():
     # ===========================================
     print('👥 Creating users...')
     users_data = [
-        {'email': 'admin@technion.ac.il', 'username': 'admin', 'first_name': 'אברהם', 'last_name': 'כהן', 'role': 'central_admin', 'region': None, 'password': admin_password},
-        {'email': 'canada@technion.ac.il', 'username': 'canada_boss', 'first_name': 'שרה', 'last_name': 'לוי', 'role': 'region_boss', 'region': 'canada', 'password': staff_password},
-        {'email': 'canada.emp@technion.ac.il', 'username': 'canada_emp', 'first_name': 'דוד', 'last_name': 'ישראלי', 'role': 'employee', 'region': 'canada', 'password': staff_password},
-        {'email': 'hasmaha@technion.ac.il', 'username': 'hasmaha_boss', 'first_name': 'יוסף', 'last_name': 'חדד', 'role': 'region_boss', 'region': 'hasmaha', 'password': staff_password},
-        {'email': 'mizrah@technion.ac.il', 'username': 'mizrah_boss', 'first_name': 'משה', 'last_name': 'פרץ', 'role': 'region_boss', 'region': 'mizrah', 'password': staff_password},
+        {'email': 'admin@example.edu', 'username': 'admin', 'first_name': 'Demo', 'last_name': 'Admin', 'role': 'central_admin', 'region': None, 'password': admin_password},
+        {'email': 'canada@example.edu', 'username': 'canada_boss', 'first_name': 'Demo', 'last_name': 'Manager', 'role': 'region_boss', 'region': 'canada', 'password': staff_password},
+        {'email': 'canada.emp@example.edu', 'username': 'canada_emp', 'first_name': 'Demo', 'last_name': 'Employee', 'role': 'employee', 'region': 'canada', 'password': staff_password},
+        {'email': 'hasmaha@example.edu', 'username': 'hasmaha_boss', 'first_name': 'Demo', 'last_name': 'Manager', 'role': 'region_boss', 'region': 'hasmaha', 'password': staff_password},
+        {'email': 'mizrah@example.edu', 'username': 'mizrah_boss', 'first_name': 'משה', 'last_name': 'פרץ', 'role': 'region_boss', 'region': 'mizrah', 'password': staff_password},
     ]
 
     for data in users_data:
@@ -183,9 +183,9 @@ def seed():
     print(f'   - {Room.objects.count()} rooms')
     print(f'   - {Student.objects.count()} students')
     print('\n🔐 Login credentials (generated this run - not stored anywhere):')
-    print(f'   Central Admin: admin@technion.ac.il / {admin_password}')
-    print(f'   Canada Boss: canada@technion.ac.il / {staff_password}')
-    print(f'   Hasmaha Boss: hasmaha@technion.ac.il / {staff_password}')
+    print(f'   Central Admin: admin@example.edu / {admin_password}')
+    print(f'   Canada Boss: canada@example.edu / {staff_password}')
+    print(f'   Hasmaha Boss: hasmaha@example.edu / {staff_password}')
     print(
         '   (set SEED_ADMIN_PASSWORD / SEED_STAFF_PASSWORD before running '
         'to choose known values instead of random ones)\n'
