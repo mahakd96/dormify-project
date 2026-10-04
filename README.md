@@ -641,32 +641,15 @@ ENV_FILE=.env.test python manage.py test api.tests
 
 # Project Quality
 
-Engineering verification and stabilization documentation is maintained under:
+Public engineering-quality notes are summarized under:
 
 ```text
 project-quality/
 ```
 
-This directory contains technical records related to areas such as:
+Detailed production incident reports, environment-specific measurements, real inventory snapshots, and internal operational notes are intentionally excluded from this public portfolio version. The retained public summary describes the testing strategy and engineering practices without exposing institutional or production-specific details.
 
-* allocation-engine corrections;
-* allocation lifecycle improvements;
-* backend and database stabilization;
-* Assisted Allocation;
-* transfer workflows;
-* import and inventory integrity;
-* regression testing;
-* performance optimization;
-* concurrency testing;
-* frontend and usability corrections;
-* localization;
-* analysis improvements.
-
-These documents provide additional engineering context for significant system changes and verification work.
-
-They are separate from the application source code and are intended to preserve technical traceability.
-
-See [`project-quality/README.md`](project-quality/README.md) for the current engineering-quality reports and verification documentation.
+See [`project-quality/README.md`](project-quality/README.md).
 
 ---
 
@@ -682,7 +665,7 @@ See [`project-quality/README.md`](project-quality/README.md) for the current eng
 | Authentication              | JWT                    |
 | Data Processing             | pandas, openpyxl       |
 | Frontend API Client         | Axios                  |
-| Mapping                     | Static dormitory map image with React-positioned interactive overlays |
+| Mapping                     | Public-safe demonstration map with React-positioned interactive overlays |
 | Reporting / File Processing | XLSX, openpyxl         |
 | Infrastructure              | Docker, Docker Compose |
 
