@@ -2,7 +2,7 @@
 G3-19: exactly one region_boss per region - duplicate creation is rejected,
 including under a concurrency race, at the application level. The DB
 partial-unique-constraint backstop (migration 0019) is verified separately
-here too, against the LOCAL TEST DATABASE ONLY - never Azure.
+here too, against the LOCAL TEST DATABASE ONLY - never managed production.
 """
 
 import threading
@@ -97,8 +97,8 @@ class RegionBossPartialUniqueConstraintTests(SecurityTestCase):
     project-quality/security/SECURITY_AND_AUTHORIZATION_REPORT.md -
     confirmed here to actually reject a duplicate at the database layer,
     independent of the application-level check above. Never run against
-    Azure - see that report for why the real database cannot take this
-    constraint yet (existing duplicate Gush-Elyon region_boss records).
+    managed production - see that report for why the production database cannot take this
+    constraint yet (existing duplicate a production region region_boss records).
     """
 
     def test_db_constraint_rejects_duplicate_region_boss_bypassing_app_layer(self):
