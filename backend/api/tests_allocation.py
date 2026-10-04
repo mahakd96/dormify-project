@@ -2312,20 +2312,14 @@ class Building179AutomaticAllocationTest(TestCase):
         self.assertEqual(self._assigned_building_number(result, new_student), 999)
 
     # ------------------------------------------------------------------
-    # Regression test for a real production defect (allocation run 113):
-    # an eligible Hasmaha ANIR student who also happens to be is_priority
-    # (the common case — the Excel import pipeline sets is_priority=True
-    # as a side effect of populating special_status_1..4, so most ANIR
-    # students are also generic-priority students) was being offered
-    # candidates in completely unrelated dorm types, because the
-    # pre-existing generic is_priority bypass in
-    # _should_enforce_accepted_dorm_type was firing for them too — 22 of
-    # 142 eligible ANIR students in that run leaked into DormType codes
-    # 6, 11, and 18. This test reproduces the exact shape of that bug:
-    # Building 179 unavailable, a compatible bed available in DormType 15
-    # (valid overflow) AND a compatible bed available in an unrelated
-    # DormType (the leak this test must prove no longer happens), all in
-    # the same solver call.
+    # Regression test for a production-discovered allocation defect:
+    # a reserved-program student who also carried a generic priority flag
+    # could be offered candidates outside the accepted dorm type because
+    # the generic-priority bypass was applied too broadly. The public
+    # portfolio version intentionally omits environment-specific run IDs,
+    # counts, and operational dorm-type examples. This test preserves the
+    # behavior: valid same-type overflow remains allowed, while unrelated
+    # dorm types remain forbidden.
     # ------------------------------------------------------------------
 
     def test_hasmaha_anier_priority_student_overflows_within_dormtype_not_to_unrelated_dorm_type(self):
@@ -2480,13 +2474,11 @@ class Building179AutomaticAllocationTest(TestCase):
         self.assertIn(student.id, result["students_with_no_feasible_beds"])
 
     def test_anier_priority_student_not_allowed_to_cross_accepted_dorm_types_merely_because_of_marker(self):
-        """Same as above, but with is_priority=True — the exact
-        combination that reproduced the production regression (run 113):
-        an ANIR student accepted into a different dorm type, who also
-        carries is_priority=True, must still be confined to their own
-        accepted dorm type. A compatible bed in Building 179 AND a
-        compatible bed in a third, unrelated dorm type are both available;
-        neither may be used — only their own accepted dorm type."""
+        """Same as above, but with is_priority=True — the combination
+        that reproduced a production-discovered regression. A reserved-
+        program student accepted into a different dorm type must still be
+        confined to that accepted dorm type even when a generic priority
+        flag is also set."""
         room179 = self._make_room(self.building_179, "1", bed_count=2)
         third_dorm_type = DormType.objects.create(
             name="ThirdUnrelatedDorm", region=self.upper_region,
@@ -4971,15 +4963,12 @@ class AccessibilityAllocationExclusionTest(TestCase):
     Covers the confirmed root cause of the over-flagging bug plus the
     surrounding accessibility/category behavior:
 
-    Root cause: the allocation-group ("החלטה-תאור קבוצת הקצאה") whitelist
-    used to also include the STAYING/CONTINUING category value
-    ('הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2'), which is the
-    majority category for returning students. That single mistaken entry
-    caused 722 of 840 students to be marked accessibility_flag=True and
-    excluded from the OR-Tools solver, leaving only 118 students actually
-    allocated. Only the EXACT value 'הסמכה - נכים' may set
-    accessibility_flag=True (see ACCESSIBILITY_ALLOCATION_GROUP_VALUES /
-    allocation_group_indicates_accessibility in api/views.py).
+    Root cause: an ordinary continuing-student allocation category was
+    mistakenly included in the accessibility whitelist, causing a large
+    share of otherwise eligible students to be excluded from the solver.
+    The corrected logic uses only the explicitly approved accessibility
+    category values. Environment-specific counts are intentionally omitted
+    from this public portfolio version.
 
     Separately, an accessibility_flag=True student must still be saved
     normally but excluded from the solver — neither api.views.run_allocation
@@ -5047,10 +5036,9 @@ class AccessibilityAllocationExclusionTest(TestCase):
         'הסמכה – ותיקים+חדשים שנפסלו כחדשים+בינלאומי מלאות2' identifies
         STAYING/CONTINUING students (the majority category) and must NOT
         set accessibility_flag=True. Before the fix, this exact value was
-        mistakenly included in the accessibility whitelist, which flagged
-        722 of 840 students as accessibility_flag=True and excluded them
-        from the OR-Tools solver, leaving only 118 actually allocated.
-        These students must still reach the solver like any other
+        mistakenly included in the accessibility whitelist, excluding a
+        large share of ordinary students from the solver. These students
+        must still reach the solver like any other
         staying/continuing student, since all students are re-allocated
         from scratch.
         """
