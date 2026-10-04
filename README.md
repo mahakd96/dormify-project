@@ -5,17 +5,23 @@
 
 **Dormitory allocation and management platform for university housing administration.**
 
-Dormify is a full-stack information system designed to support complex university dormitory operations.
+Dormify is a full-stack information system developed for the **Technion Dormitories Office** to support complex student-housing allocation and management workflows.
 
 The platform centralizes student data, dormitory inventory, automatic allocation, assisted placement, transfers, reporting, and administrative workflows in one system. Its allocation engine uses constraint-based optimization to generate valid housing assignments while respecting operational rules, available capacity, and configurable preferences.
 
 Dormify is built as a web application with a **React frontend**, **Django REST backend**, **PostgreSQL database**, and an **OR-Tools CP-SAT allocation engine**.
 
+## Current Status
+
+Dormify has progressed beyond the academic prototype stage. The system has been **deployed on Technion CIS infrastructure** and handed over for institutional use. The deployed environment is ready for operational use by the Technion Dormitories Office, with CIS responsible for the institutional deployment environment and continued technical ownership after the student project phase.
+
+This repository is the sanitized public portfolio version of that work. Production credentials, operational datasets, internal deployment details, and confidential institutional material are intentionally excluded.
+
 ---
 
 ## Project Team
 
-Dormify was developed as a final-year Information Systems Engineering project by:
+Dormify was developed as a final-year **Information Systems Engineering** project at the **Technion – Israel Institute of Technology**, in collaboration with the **Technion Dormitories Office**, by:
 
 - Maha Kadah
 - Donia Hassan
@@ -24,7 +30,9 @@ Dormify was developed as a final-year Information Systems Engineering project by
 - Siraj Sulieman
 
 The repository preserves the original Git commit history so individual
-contributions remain attributable to their original authors.
+contributions remain attributable to their original authors. The project
+continued through deployment and handover to Technion CIS after the academic
+development phase.
 
 ## System Overview
 
