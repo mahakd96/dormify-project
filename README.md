@@ -17,6 +17,13 @@ Dormify has progressed beyond the academic prototype stage. The system has been 
 
 This repository is the sanitized public portfolio version of that work. Production credentials, operational datasets, internal deployment details, and confidential institutional material are intentionally excluded.
 
+## Deployment & Handover
+
+- **Institutional deployment:** deployed on Technion CIS infrastructure.
+- **Operational readiness:** prepared and handed over for use by the Technion Dormitories Office.
+- **Post-project ownership:** the institutional deployment is maintained outside this public repository by Technion CIS.
+- **Public repository scope:** source code, architecture, testing, and sanitized engineering evidence are retained here; production configuration and operational data are not.
+
 ---
 
 ## Project Team
