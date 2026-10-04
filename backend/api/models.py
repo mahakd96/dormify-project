@@ -50,7 +50,7 @@ class User(AbstractUser):
             # duplicate case, not a region left with zero managers - see
             # that create() method's comment for the full picture).
             #
-            # Applied to the real Azure database as part of the production
+            # Applied to the real managed production database as part of the production
             # closeout - the previously-existing duplicate region_boss
             # records were cleaned up manually before this migration was
             # applied. See
