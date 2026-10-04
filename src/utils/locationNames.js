@@ -54,11 +54,9 @@
 // "System-Wide Location Name Localization" section, for how these were
 // confirmed).
 //
-// These six names are NOT this project's own translation - they are
-// the exact official English names supplied by the user, sourced from
-// the Technion Dean of Students / dormitory website's own English
-// terminology for these six dorm complexes. Use them verbatim; do not
-// "improve" or re-derive them from the Hebrew.
+// English display names are centralized here so the UI uses one
+// consistent vocabulary across screens. The public portfolio version
+// omits the original institution-specific sourcing notes.
 const REGION_EN_BY_ID = {
   canada: 'Canada Dormitories',
   broshim: 'Broshim Dormitories',
@@ -66,11 +64,8 @@ const REGION_EN_BY_ID = {
   'gush-elyon': 'Upper Dormitory Block',
   'gush-tachton': 'Lower Campus Dormitories',
   'segal-zutar': 'Junior Faculty Dormitories',
-  // "Technion" is the university's own name, already used in English
-  // elsewhere in this app (e.g. LoginPage.js's "Technion Dormitories
-  // Management System" heading) - not a guessed translation. "Other
-  // Region" only ever appears in backend test fixtures, never in real
-  // seeded data.
+  // Institution and fallback region labels used by legacy data shapes.
+  // These strings are display-only and are not authorization identifiers.
   technion: 'Technion',
   other_region: 'Other Region',
   // Additional id spellings seen in test fixtures / other environments -
@@ -122,9 +117,8 @@ const DORM_TYPE_EN_BY_CODE = {
 // return it as.
 const NAME_EN_BY_HEBREW_TEXT = {
   // Regions (with the "מעונות" prefix, as Region.name actually stores it).
-  // These six are the exact official English names supplied by the user
-  // (Technion Dean of Students / dormitory website terminology) - not
-  // derived or guessed by this codebase. See REGION_EN_BY_ID above.
+  // These display labels are kept centralized for consistency. See
+  // REGION_EN_BY_ID above.
   'מעונות קנדה': 'Canada Dormitories',
   'מעונות ברושים': 'Broshim Dormitories',
   'מעונות מזרח': 'East Dormitory Block',
