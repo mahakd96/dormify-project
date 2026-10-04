@@ -743,7 +743,7 @@ def _is_hasmaha_anier_student(student):
     The population eligible for the Building-179 automatic-allocation
     preference: carries the אנייר marker AND is accepted into כפר הסמכה
     (accepted_dorm_type.code == 15). Both conditions are required —
-    confirmed business rule B1: the אנייר marker alone is not sufficient.
+    the program marker alone is not sufficient.
 
     Deliberately does NOT consult: region, allocation_group free text, a
     Django primary key, accessibility status, the separate הסמכה special-
@@ -787,17 +787,13 @@ def _should_enforce_accepted_dorm_type(student):
     predates, and is unrelated to, the Building-179 policy and is
     intentionally left unchanged here.
 
-    ANY student carrying the אנייר marker MUST always have this
-    restriction enforced, regardless of is_priority (confirmed business
-    rule — production validation of run 113 caught a regression here: the
-    ANIR import pipeline routinely also sets is_priority=True as a side
-    effect of populating special_status_*, so an ANIR student is very
-    often also a generic-priority student. If the generic-priority bypass
-    below were allowed to apply to them too, accepted_dorm_type would be
-    silently skipped and the student would receive candidates in ANY dorm
-    type, not just their own — exactly the cross-DormType leak observed
-    in production, where 22 of 142 eligible Hasmaha ANIR students were
-    placed in unrelated dorm types 6, 11, and 18).
+    Students carrying the reserved-program marker must always have the
+    accepted-dorm-type restriction enforced, even when they also carry a
+    generic priority flag. Historical validation found that allowing the
+    generic-priority bypass here could create candidates outside the
+    student's accepted dorm type. Environment-specific run identifiers,
+    counts, and operational examples are intentionally omitted from this
+    public portfolio version.
 
     Enforcing this unconditionally for every אנייר-marked student is still
     correct for a Hasmaha ANIR student (accepted_dorm_type.code == 15):
