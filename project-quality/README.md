@@ -16,11 +16,11 @@ technical reasoning and engineering evidence.
 
 ## Reports
 
-- [Allocation engine and lifecycle](allocation/ALLOCATION_ENGINE_AND_LIFECYCLE_REPORT.md)
+- [Allocation engine and lifecycle](allocation/MAHA_ALLOCATION_ENGINE_AND_LIFECYCLE_FIXES.md)
   — solver behavior, constraint interactions, lifecycle controls, and regression fixes.
-- [Assisted allocation and transfer workflow](assisted-allocation/ASSISTED_ALLOCATION_AND_TRANSFER_REPORT.md)
+- [Assisted allocation and transfer workflow](assisted-allocation/MAHA_ASSISTED_ALLOCATION_AND_TRANSFER_FIXES.md)
   — staff-assisted placement, transfer decisions, and workflow consistency.
-- [Backend API and database](backend/BACKEND_API_AND_DATABASE_REPORT.md)
+- [Backend API and database](backend/MAHA_BACKEND_API_DATABASE_FIXES.md)
   — backend corrections, integrity rules, and API/database stabilization.
 - [Concurrency and load audit](concurrency/CONCURRENCY_AND_LOAD_AUDIT.md)
   — race-condition analysis, concurrency risks, and load-focused verification.
@@ -30,7 +30,7 @@ technical reasoning and engineering evidence.
   — design evolution, implementation reasoning, and analysis-page decisions.
 - [Data-analysis implementation report](data-analysis-redesign/IMPLEMENTATION_REPORT.md)
   — implementation details and verification of the redesigned analytics workflow.
-- [Import data and inventory](data-integrity/IMPORT_DATA_AND_INVENTORY_REPORT.md)
+- [Import data and inventory](data-integrity/MAHA_IMPORT_DATA_AND_INVENTORY_STABILIZATION.md)
   — import validation, data mapping, inventory integrity, and related fixes.
 - [Location-name localization](localization/LOCATION_NAME_LOCALIZATION.md)
   — centralized bilingual display-name handling and consistency decisions.
@@ -38,9 +38,9 @@ technical reasoning and engineering evidence.
   — query-efficiency work, performance bottlenecks, measurements, and improvements.
 - [Security and authorization](security/SECURITY_AND_AUTHORIZATION_REPORT.md)
   — authentication, authorization, scope enforcement, and production hardening.
-- [System stabilization](system-stabilization/SYSTEM_STABILIZATION_REPORT.md)
+- [System stabilization](system-stabilization/MAHA_SYSTEM_STABILIZATION_AND_DEBUGGING.md)
   — cross-cutting failures, root causes, and stabilization work.
-- [Testing and regression](testing/TESTING_AND_REGRESSION_REPORT.md)
+- [Testing and regression](testing/MAHA_TESTING_AND_REGRESSION_RECORD.md)
   — regression strategy and representative defect coverage.
 - [Dashboard and what-if](ui/DASHBOARD_AND_WHATIF_REPORT.md)
   — dashboard behavior, analysis workflow, and UI verification.
