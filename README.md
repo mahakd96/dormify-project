@@ -28,14 +28,7 @@ This repository is the sanitized public portfolio version of that work. Producti
 
 ## Project Team
 
-Dormify was developed as a final-year **Information Systems Engineering** project at the **Technion – Israel Institute of Technology**, in collaboration with the **Technion Dormitories Office**, by:
-
-- Maha Kadah
-- Donia Hassan
-- Aya Abu-Raya
-- Zeinab Habiballah
-- Siraj Sulieman
-
+Dormify was developed as a final-year **Information Systems Engineering** project at the **Technion – Israel Institute of Technology**, in collaboration with the **Technion Dormitories Office**
 The repository preserves the original Git commit history so individual
 contributions remain attributable to their original authors. The project
 continued through deployment and handover to Technion CIS after the academic
